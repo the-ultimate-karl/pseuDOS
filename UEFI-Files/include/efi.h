@@ -1,5 +1,5 @@
-#ifndef PSEUDOS_EFI_H
-#define PSEUDOS_EFI_H
+#ifndef EFI_H
+#define EFI_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -14,6 +14,8 @@ typedef int8_t    INT8;
 typedef int16_t   INT16;
 typedef int32_t   INT32;
 typedef int64_t   INT64;
+typedef uint64_t  UINTN;
+typedef int64_t   INTN;
 typedef uint16_t  CHAR16;
 typedef uint8_t   CHAR8;
 typedef uint8_t   BOOLEAN;
@@ -27,34 +29,29 @@ typedef UINT64    EFI_TPL;
 typedef UINT64    EFI_PHYSICAL_ADDRESS;
 typedef UINT64    EFI_VIRTUAL_ADDRESS;
 
-#define EFI_SUCCESS               0ULL
-#define EFI_LOAD_ERROR            (1ULL | (1ULL << 63))
-#define EFI_INVALID_PARAMETER     (2ULL | (1ULL << 63))
-#define EFI_UNSUPPORTED           (3ULL | (1ULL << 63))
-#define EFI_BAD_BUFFER_SIZE       (4ULL | (1ULL << 63))
-#define EFI_BUFFER_TOO_SMALL      (5ULL | (1ULL << 63))
-#define EFI_NOT_READY             (6ULL | (1ULL << 63))
-#define EFI_DEVICE_ERROR          (7ULL | (1ULL << 63))
-#define EFI_WRITE_PROTECTED       (8ULL | (1ULL << 63))
-#define EFI_OUT_OF_RESOURCES      (9ULL | (1ULL << 63))
-#define EFI_VOLUME_CORRUPTED      (10ULL | (1ULL << 63))
-#define EFI_VOLUME_FULL           (11ULL | (1ULL << 63))
-#define EFI_NO_MEDIA              (12ULL | (1ULL << 63))
-#define EFI_MEDIA_CHANGED         (13ULL | (1ULL << 63))
-#define EFI_NOT_FOUND             (14ULL | (1ULL << 63))
-#define EFI_ACCESS_DENIED         (15ULL | (1ULL << 63))
-#define EFI_NO_RESPONSE           (16ULL | (1ULL << 63))
-#define EFI_NO_MAPPING            (17ULL | (1ULL << 63))
-#define EFI_TIMEOUT               (18ULL | (1ULL << 63))
-#define EFI_NOT_STARTED           (19ULL | (1ULL << 63))
-#define EFI_ALREADY_STARTED       (20ULL | (1ULL << 63))
-#define EFI_ABORTED               (21ULL | (1ULL << 63))
-#define EFI_ICMP_ERROR            (22ULL | (1ULL << 63))
-#define EFI_TFTP_ERROR            (23ULL | (1ULL << 63))
-#define EFI_PROTOCOL_ERROR        (24ULL | (1ULL << 63))
-#define EFI_INCOMPATIBLE_VERSION  (25ULL | (1ULL << 63))
-#define EFI_SECURITY_VIOLATION    (26ULL | (1ULL << 63))
-#define EFI_CRC_ERROR             (27ULL | (1ULL << 63))
+#define EFI_SUCCESS                 0ULL
+#define EFI_LOAD_ERROR              (1ULL  | (1ULL << 63))
+#define EFI_INVALID_PARAMETER       (2ULL  | (1ULL << 63))
+#define EFI_UNSUPPORTED             (3ULL  | (1ULL << 63))
+#define EFI_BAD_BUFFER_SIZE         (4ULL  | (1ULL << 63))
+#define EFI_BUFFER_TOO_SMALL        (5ULL  | (1ULL << 63))
+#define EFI_NOT_READY               (6ULL  | (1ULL << 63))
+#define EFI_DEVICE_ERROR            (7ULL  | (1ULL << 63))
+#define EFI_WRITE_PROTECTED         (8ULL  | (1ULL << 63))
+#define EFI_OUT_OF_RESOURCES        (9ULL  | (1ULL << 63))
+#define EFI_VOLUME_CORRUPTED        (10ULL | (1ULL << 63))
+#define EFI_VOLUME_FULL             (11ULL | (1ULL << 63))
+#define EFI_NO_MEDIA                (12ULL | (1ULL << 63))
+#define EFI_MEDIA_CHANGED           (13ULL | (1ULL << 63))
+#define EFI_NOT_FOUND               (14ULL | (1ULL << 63))
+#define EFI_ACCESS_DENIED           (15ULL | (1ULL << 63))
+#define EFI_NO_RESPONSE             (16ULL | (1ULL << 63))
+#define EFI_NO_MAPPING              (17ULL | (1ULL << 63))
+#define EFI_TIMEOUT                 (18ULL | (1ULL << 63))
+#define EFI_NOT_STARTED             (19ULL | (1ULL << 63))
+#define EFI_ALREADY_STARTED         (20ULL | (1ULL << 63))
+#define EFI_ABORTED                 (21ULL | (1ULL << 63))
+#define EFI_SECURITY_VIOLATION      (26ULL | (1ULL << 63))
 
 #define EFI_ERROR(status) (((INT64)(status)) < 0)
 
@@ -74,10 +71,33 @@ typedef struct {
 } EFI_TABLE_HEADER;
 
 /* Forward declarations */
-struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
 struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
+struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
 struct _EFI_BOOT_SERVICES;
 struct _EFI_RUNTIME_SERVICES;
+struct _EFI_DEVICE_PATH_PROTOCOL;
+
+/* Input Key */
+typedef struct {
+    UINT16 ScanCode;
+    CHAR16 UnicodeChar;
+} EFI_INPUT_KEY;
+
+typedef EFI_STATUS (EFIAPI *EFI_INPUT_RESET)(
+    struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This,
+    BOOLEAN ExtendedVerification
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_INPUT_READ_KEY)(
+    struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This,
+    EFI_INPUT_KEY *Key
+);
+
+typedef struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
+    EFI_INPUT_RESET         Reset;
+    EFI_INPUT_READ_KEY      ReadKeyStroke;
+    EFI_EVENT               WaitForKey;
+} EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
 
 /* Simple Text Output Protocol */
 typedef EFI_STATUS (EFIAPI *EFI_TEXT_RESET)(
@@ -97,19 +117,19 @@ typedef EFI_STATUS (EFIAPI *EFI_TEXT_TEST_STRING)(
 
 typedef EFI_STATUS (EFIAPI *EFI_TEXT_QUERY_MODE)(
     struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This,
-    UINT64 ModeNumber,
-    UINT64 *Columns,
-    UINT64 *Rows
+    UINTN ModeNumber,
+    UINTN *Columns,
+    UINTN *Rows
 );
 
 typedef EFI_STATUS (EFIAPI *EFI_TEXT_SET_MODE)(
     struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This,
-    UINT64 ModeNumber
+    UINTN ModeNumber
 );
 
 typedef EFI_STATUS (EFIAPI *EFI_TEXT_SET_ATTRIBUTE)(
     struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This,
-    UINT64 Attribute
+    UINTN Attribute
 );
 
 typedef EFI_STATUS (EFIAPI *EFI_TEXT_CLEAR_SCREEN)(
@@ -118,8 +138,8 @@ typedef EFI_STATUS (EFIAPI *EFI_TEXT_CLEAR_SCREEN)(
 
 typedef EFI_STATUS (EFIAPI *EFI_TEXT_SET_CURSOR_POSITION)(
     struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This,
-    UINT64 Column,
-    UINT64 Row
+    UINTN Column,
+    UINTN Row
 );
 
 typedef EFI_STATUS (EFIAPI *EFI_TEXT_ENABLE_CURSOR)(
@@ -137,19 +157,19 @@ typedef struct {
 } SIMPLE_TEXT_OUTPUT_MODE;
 
 typedef struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
-    EFI_TEXT_RESET                Reset;
-    EFI_TEXT_STRING               OutputString;
-    EFI_TEXT_TEST_STRING          TestString;
-    EFI_TEXT_QUERY_MODE           QueryMode;
-    EFI_TEXT_SET_MODE             SetMode;
-    EFI_TEXT_SET_ATTRIBUTE        SetAttribute;
-    EFI_TEXT_CLEAR_SCREEN         ClearScreen;
-    EFI_TEXT_SET_CURSOR_POSITION  SetCursorPosition;
-    EFI_TEXT_ENABLE_CURSOR        EnableCursor;
-    SIMPLE_TEXT_OUTPUT_MODE       *Mode;
+    EFI_TEXT_RESET                  Reset;
+    EFI_TEXT_STRING                 OutputString;
+    EFI_TEXT_TEST_STRING            TestString;
+    EFI_TEXT_QUERY_MODE             QueryMode;
+    EFI_TEXT_SET_MODE               SetMode;
+    EFI_TEXT_SET_ATTRIBUTE          SetAttribute;
+    EFI_TEXT_CLEAR_SCREEN           ClearScreen;
+    EFI_TEXT_SET_CURSOR_POSITION    SetCursorPosition;
+    EFI_TEXT_ENABLE_CURSOR          EnableCursor;
+    SIMPLE_TEXT_OUTPUT_MODE         *Mode;
 } EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
 
-/* Memory types */
+/* Memory Types */
 typedef enum {
     EfiReservedMemoryType,
     EfiLoaderCode,
@@ -177,92 +197,128 @@ typedef enum {
 } EFI_ALLOCATE_TYPE;
 
 typedef struct {
-    UINT32               Type;
-    EFI_PHYSICAL_ADDRESS PhysicalStart;
-    EFI_VIRTUAL_ADDRESS  VirtualStart;
-    UINT64               NumberOfPages;
-    UINT64               Attribute;
+    UINT32                  Type;
+    EFI_PHYSICAL_ADDRESS    PhysicalStart;
+    EFI_VIRTUAL_ADDRESS     VirtualStart;
+    UINT64                  NumberOfPages;
+    UINT64                  Attribute;
 } EFI_MEMORY_DESCRIPTOR;
 
-/* Graphics Output Protocol */
+/* Reset Types */
 typedef enum {
-    PixelRedGreenBlueReserved8BitPerColor,
-    PixelBlueGreenRedReserved8BitPerColor,
-    PixelBitMask,
-    PixelBltOnly,
-    PixelFormatMax
-} EFI_GRAPHICS_PIXEL_FORMAT;
+    EfiResetCold,
+    EfiResetWarm,
+    EfiResetShutdown,
+    EfiResetPlatformSpecific
+} EFI_RESET_TYPE;
 
-typedef struct {
-    UINT32 RedMask;
-    UINT32 GreenMask;
-    UINT32 BlueMask;
-    UINT32 ReservedMask;
-} EFI_PIXEL_BITMASK;
-
-typedef struct {
-    UINT32                    Version;
-    UINT32                    HorizontalResolution;
-    UINT32                    VerticalResolution;
-    EFI_GRAPHICS_PIXEL_FORMAT PixelFormat;
-    EFI_PIXEL_BITMASK         PixelInformation;
-    UINT32                    PixelsPerScanLine;
-} EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
-
-typedef struct {
-    UINT32                               MaxMode;
-    UINT32                               Mode;
-    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info;
-    UINT64                               SizeOfInfo;
-    EFI_PHYSICAL_ADDRESS                 FrameBufferBase;
-    UINT64                               FrameBufferSize;
-} EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
-
-struct _EFI_GRAPHICS_OUTPUT_PROTOCOL;
-
-typedef EFI_STATUS (EFIAPI *EFI_GRAPHICS_OUTPUT_PROTOCOL_QUERY_MODE)(
-    struct _EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
-    UINT32 ModeNumber,
-    UINT64 *SizeOfInfo,
-    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **Info
+typedef VOID (EFIAPI *EFI_RESET_SYSTEM)(
+    EFI_RESET_TYPE ResetType,
+    EFI_STATUS ResetStatus,
+    UINTN DataSize,
+    VOID *ResetData
 );
 
-typedef EFI_STATUS (EFIAPI *EFI_GRAPHICS_OUTPUT_PROTOCOL_SET_MODE)(
-    struct _EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
-    UINT32 ModeNumber
+typedef struct _EFI_RUNTIME_SERVICES {
+    EFI_TABLE_HEADER        Hdr;
+    VOID                    *GetTime;
+    VOID                    *SetTime;
+    VOID                    *GetWakeupTime;
+    VOID                    *SetWakeupTime;
+    VOID                    *SetVirtualAddressMap;
+    VOID                    *ConvertPointer;
+    VOID                    *GetVariable;
+    VOID                    *GetNextVariableName;
+    VOID                    *SetVariable;
+    VOID                    *GetNextHighMonotonicCount;
+    EFI_RESET_SYSTEM        ResetSystem;
+} EFI_RUNTIME_SERVICES;
+
+/* Device Path Protocol */
+typedef struct _EFI_DEVICE_PATH_PROTOCOL {
+    UINT8 Type;
+    UINT8 SubType;
+    UINT8 Length[2];
+} EFI_DEVICE_PATH_PROTOCOL;
+
+#define EFI_DEVICE_PATH_TYPE_HARDWARE 0x01
+#define EFI_DEVICE_PATH_TYPE_ACPI     0x02
+#define EFI_DEVICE_PATH_TYPE_MESSAGING 0x03
+#define EFI_DEVICE_PATH_TYPE_MEDIA    0x04
+#define EFI_DEVICE_PATH_TYPE_BIOS     0x05
+#define EFI_DEVICE_PATH_TYPE_END      0x7F
+
+/* Loaded Image Protocol */
+typedef struct {
+    UINT32                  Revision;
+    EFI_HANDLE              ParentHandle;
+    VOID                    *SystemTable;
+    EFI_HANDLE              DeviceHandle;
+    EFI_DEVICE_PATH_PROTOCOL *FilePath;
+    VOID                    *Reserved;
+    UINT32                  ImageLoadOptionsSize;
+    VOID                    *ImageLoadOptions;
+    VOID                    *ImageBase;
+    UINT64                  ImageSize;
+    EFI_MEMORY_TYPE         ImageCodeType;
+    EFI_MEMORY_TYPE         ImageDataType;
+    VOID                    *Unload;
+} EFI_LOADED_IMAGE_PROTOCOL;
+
+/* Device Path To Text Protocol */
+typedef CHAR16* (EFIAPI *EFI_DEVICE_PATH_TO_TEXT_NODE)(
+    const EFI_DEVICE_PATH_PROTOCOL *DeviceNode,
+    BOOLEAN DisplayOnly,
+    BOOLEAN AllowShortcuts
 );
 
-typedef struct _EFI_GRAPHICS_OUTPUT_PROTOCOL {
-    EFI_GRAPHICS_OUTPUT_PROTOCOL_QUERY_MODE QueryMode;
-    EFI_GRAPHICS_OUTPUT_PROTOCOL_SET_MODE   SetMode;
-    VOID                                    *Blt;
-    EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE       *Mode;
-} EFI_GRAPHICS_OUTPUT_PROTOCOL;
+typedef CHAR16* (EFIAPI *EFI_DEVICE_PATH_TO_TEXT_PATH)(
+    const EFI_DEVICE_PATH_PROTOCOL *DevicePath,
+    BOOLEAN DisplayOnly,
+    BOOLEAN AllowShortcuts
+);
 
-/* Boot Services */
+typedef struct {
+    EFI_DEVICE_PATH_TO_TEXT_NODE ConvertDeviceNodeToText;
+    EFI_DEVICE_PATH_TO_TEXT_PATH ConvertDevicePathToText;
+} EFI_DEVICE_PATH_TO_TEXT_PROTOCOL;
+
+/* Boot Services function pointers */
+typedef EFI_STATUS (EFIAPI *EFI_HANDLE_PROTOCOL)(
+    EFI_HANDLE Handle,
+    const EFI_GUID *Protocol,
+    VOID **Interface
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_LOCATE_PROTOCOL)(
+    const EFI_GUID *Protocol,
+    VOID *Registration,
+    VOID **Interface
+);
+
 typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_PAGES)(
     EFI_ALLOCATE_TYPE Type,
     EFI_MEMORY_TYPE MemoryType,
-    UINT64 Pages,
+    UINTN Pages,
     EFI_PHYSICAL_ADDRESS *Memory
 );
 
 typedef EFI_STATUS (EFIAPI *EFI_FREE_PAGES)(
     EFI_PHYSICAL_ADDRESS Memory,
-    UINT64 Pages
+    UINTN Pages
 );
 
 typedef EFI_STATUS (EFIAPI *EFI_GET_MEMORY_MAP)(
-    UINT64 *MemoryMapSize,
+    UINTN *MemoryMapSize,
     EFI_MEMORY_DESCRIPTOR *MemoryMap,
-    UINT64 *MapKey,
-    UINT64 *DescriptorSize,
+    UINTN *MapKey,
+    UINTN *DescriptorSize,
     UINT32 *DescriptorVersion
 );
 
 typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_POOL)(
     EFI_MEMORY_TYPE PoolType,
-    UINT64 Size,
+    UINTN Size,
     VOID **Buffer
 );
 
@@ -270,100 +326,65 @@ typedef EFI_STATUS (EFIAPI *EFI_FREE_POOL)(
     VOID *Buffer
 );
 
-typedef EFI_STATUS (EFIAPI *EFI_HANDLE_PROTOCOL)(
-    EFI_HANDLE Handle,
-    EFI_GUID *Protocol,
-    VOID **Interface
-);
-
-typedef EFI_STATUS (EFIAPI *EFI_LOCATE_PROTOCOL)(
-    EFI_GUID *Protocol,
-    VOID *Registration,
-    VOID **Interface
+typedef EFI_STATUS (EFIAPI *EFI_SET_WATCHDOG_TIMER)(
+    UINTN Timeout,
+    UINT64 WatchdogCode,
+    UINTN DataSize,
+    const CHAR16 *WatchdogData
 );
 
 typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(
     EFI_HANDLE ImageHandle,
-    UINT64 MapKey
-);
-
-typedef EFI_STATUS (EFIAPI *EFI_SET_WATCHDOG_TIMER)(
-    UINT64 Timeout,
-    UINT64 WatchdogCode,
-    UINT64 DataSize,
-    CHAR16 *WatchdogData
+    UINTN MapKey
 );
 
 typedef struct _EFI_BOOT_SERVICES {
-    EFI_TABLE_HEADER        Hdr;
-    VOID                    *RaiseTPL;
-    VOID                    *RestoreTPL;
-    EFI_ALLOCATE_PAGES      AllocatePages;
-    EFI_FREE_PAGES          FreePages;
-    EFI_GET_MEMORY_MAP      GetMemoryMap;
-    EFI_ALLOCATE_POOL       AllocatePool;
-    EFI_FREE_POOL           FreePool;
-    VOID                    *CreateEvent;
-    VOID                    *SetTimer;
-    VOID                    *WaitForEvent;
-    VOID                    *SignalEvent;
-    VOID                    *CloseEvent;
-    VOID                    *CheckEvent;
-    VOID                    *InstallProtocolInterface;
-    VOID                    *ReinstallProtocolInterface;
-    VOID                    *UninstallProtocolInterface;
-    EFI_HANDLE_PROTOCOL     HandleProtocol;
-    VOID                    *Void;
-    VOID                    *RegisterProtocolNotify;
-    VOID                    *LocateHandle;
-    VOID                    *LocateDevicePath;
-    VOID                    *InstallConfigurationTable;
-    VOID                    *LoadImage;
-    VOID                    *StartImage;
-    VOID                    *Exit;
-    VOID                    *UnloadImage;
-    EFI_EXIT_BOOT_SERVICES  ExitBootServices;
-    VOID                    *GetNextMonotonicCount;
-    VOID                    *Stall;
-    EFI_SET_WATCHDOG_TIMER  SetWatchdogTimer;
-    VOID                    *ConnectController;
-    VOID                    *DisconnectController;
-    VOID                    *OpenProtocol;
-    VOID                    *CloseProtocol;
-    VOID                    *OpenProtocolInformation;
-    VOID                    *ProtocolsPerHandle;
-    VOID                    *LocateHandleBuffer;
-    EFI_LOCATE_PROTOCOL     LocateProtocol;
+    EFI_TABLE_HEADER                Hdr;
+    VOID                            *RaiseTPL;
+    VOID                            *RestoreTPL;
+    EFI_ALLOCATE_PAGES              AllocatePages;
+    EFI_FREE_PAGES                  FreePages;
+    EFI_GET_MEMORY_MAP              GetMemoryMap;
+    EFI_ALLOCATE_POOL               AllocatePool;
+    EFI_FREE_POOL                   FreePool;
+    VOID                            *CreateEvent;
+    VOID                            *SetTimer;
+    VOID                            *WaitForEvent;
+    VOID                            *SignalEvent;
+    VOID                            *CloseEvent;
+    VOID                            *CheckEvent;
+    VOID                            *InstallProtocolInterface;
+    VOID                            *ReinstallProtocolInterface;
+    VOID                            *UninstallProtocolInterface;
+    EFI_HANDLE_PROTOCOL             HandleProtocol;
+    VOID                            *VoidReserved;
+    VOID                            *RegisterProtocolNotify;
+    VOID                            *LocateHandle;
+    VOID                            *LocateDevicePath;
+    VOID                            *InstallConfigurationTable;
+    VOID                            *LoadImage;
+    VOID                            *StartImage;
+    VOID                            *Exit;
+    VOID                            *UnloadImage;
+    EFI_EXIT_BOOT_SERVICES          ExitBootServices;
+    VOID                            *GetNextMonotonicCount;
+    VOID                            *Stall;
+    EFI_SET_WATCHDOG_TIMER          SetWatchdogTimer;
+    VOID                            *ConnectController;
+    VOID                            *DisconnectController;
+    VOID                            *OpenProtocol;
+    VOID                            *CloseProtocol;
+    VOID                            *OpenProtocolInformation;
+    VOID                            *ProtocolsPerHandle;
+    VOID                            *LocateHandleBuffer;
+    EFI_LOCATE_PROTOCOL             LocateProtocol;
+    VOID                            *InstallMultipleProtocolInterfaces;
+    VOID                            *UninstallMultipleProtocolInterfaces;
+    VOID                            *CalculateCrc32;
+    VOID                            *CopyMem;
+    VOID                            *SetMem;
+    VOID                            *CreateEventEx;
 } EFI_BOOT_SERVICES;
-
-/* Runtime Services */
-typedef EFI_STATUS (EFIAPI *EFI_RESET_SYSTEM)(
-    UINT32 ResetType,
-    EFI_STATUS ResetStatus,
-    UINT64 DataSize,
-    VOID *ResetData
-);
-
-typedef struct _EFI_RUNTIME_SERVICES {
-    EFI_TABLE_HEADER    Hdr;
-    VOID                *GetTime;
-    VOID                *SetTime;
-    VOID                *GetWakeupTime;
-    VOID                *SetWakeupTime;
-    VOID                *SetVirtualAddressMap;
-    VOID                *ConvertPointer;
-    VOID                *GetVariable;
-    VOID                *GetNextVariableName;
-    VOID                *SetVariable;
-    VOID                *GetNextHighMonotonicCount;
-    EFI_RESET_SYSTEM    ResetSystem;
-} EFI_RUNTIME_SERVICES;
-
-/* Configuration Table */
-typedef struct {
-    EFI_GUID VendorGuid;
-    VOID     *VendorTable;
-} EFI_CONFIGURATION_TABLE;
 
 /* System Table */
 typedef struct {
@@ -371,15 +392,20 @@ typedef struct {
     CHAR16                          *FirmwareVendor;
     UINT32                          FirmwareRevision;
     EFI_HANDLE                      ConsoleInHandle;
-    VOID                            *ConIn;
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL  *ConIn;
     EFI_HANDLE                      ConsoleOutHandle;
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
     EFI_HANDLE                      StandardErrorHandle;
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *StdErr;
     EFI_RUNTIME_SERVICES            *RuntimeServices;
     EFI_BOOT_SERVICES               *BootServices;
-    UINT64                          NumberOfTableEntries;
-    EFI_CONFIGURATION_TABLE         *ConfigurationTable;
+    UINTN                           NumberOfTableEntries;
+    VOID                            *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
-#endif /* PSEUDOS_EFI_H */
+/* Protocol GUID Constants */
+extern const EFI_GUID gEfiLoadedImageProtocolGuid;
+extern const EFI_GUID gEfiDevicePathProtocolGuid;
+extern const EFI_GUID gEfiDevicePathToTextProtocolGuid;
+
+#endif /* EFI_H */

@@ -53,27 +53,24 @@ static void uart_puts(const char *str) {
     }
 }
 
-static void uefi_puts(EFI_SYSTEM_TABLE *SystemTable, const char *str) {
-    if (!SystemTable || !SystemTable->ConOut || !str) return;
-    CHAR16 buf[256];
-    size_t i = 0;
-    while (*str && i < 254) {
-        if (*str == '\n') {
-            buf[i++] = (CHAR16)'\r';
-        }
-        buf[i++] = (CHAR16)(*str++);
-    }
-    buf[i] = 0;
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
-}
-
 static void boot_msg(EFI_SYSTEM_TABLE *SystemTable, const char *str) {
-    uart_puts(str);
-    uefi_puts(SystemTable, str);
+    if (SystemTable && SystemTable->ConOut) {
+        CHAR16 buf[256];
+        size_t i = 0;
+        while (*str && i < 254) {
+            if (*str == '\n') {
+                buf[i++] = (CHAR16)'\r';
+            }
+            buf[i++] = (CHAR16)(*str++);
+        }
+        buf[i] = 0;
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
+    } else {
+        uart_puts(str);
+    }
 }
 
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
-    (void)ImageHandle;
     uart_init();
 
     if (!SystemTable || !SystemTable->BootServices) {
@@ -115,7 +112,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_msg(SystemTable, "====================================\n\n");
 
     /* 5. Jump to kernel */
-    kernel_main(SystemTable);
+    kernel_main(ImageHandle, SystemTable);
 
     /* Should never reach here */
     error_boot(SystemTable, ERR_GENERIC_BOOT_FAILURE, "Kernel unexpectedly returned to bootloader");

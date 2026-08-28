@@ -24,7 +24,15 @@ LDFLAGS = -nostdlib \
 
 SRCS = src/boot/bootloader.c \
        src/boot/errtext.c \
-       src/kernel/kernel.c
+       src/lib/string.c \
+       src/fs/devpath.c \
+       src/drivers/console.c \
+       src/drivers/keyboard.c \
+       src/drivers/cpu.c \
+       src/drivers/memory.c \
+       src/drivers/pci.c \
+       src/kernel/kernel.c \
+       src/kernel/shell.c
 
 OBJS = $(patsubst src/%.c, bin/%.o, $(SRCS))
 
@@ -49,6 +57,18 @@ bin/boot/%.o: src/boot/%.c
 	@mkdir -p bin/boot
 	$(CC) $(CFLAGS) -c $< -o $@
 
+bin/lib/%.o: src/lib/%.c
+	@mkdir -p bin/lib
+	$(CC) $(CFLAGS) -c $< -o $@
+
+bin/fs/%.o: src/fs/%.c
+	@mkdir -p bin/fs
+	$(CC) $(CFLAGS) -c $< -o $@
+
+bin/drivers/%.o: src/drivers/%.c
+	@mkdir -p bin/drivers
+	$(CC) $(CFLAGS) -c $< -o $@
+
 bin/kernel/%.o: src/kernel/%.c
 	@mkdir -p bin/kernel
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -60,4 +80,4 @@ run-serial: $(TARGET_ISO)
 	qemu-system-x86_64 -display none -serial stdio -bios $(OVMF_BIOS) -cdrom $(TARGET_ISO) -net none
 
 clean:
-	rm -rf bin/boot bin/kernel bin/*.o bin/*.so bin/*.EFI bin/*.efi build/*.iso build/*.img
+	rm -rf bin/boot bin/lib bin/fs bin/drivers bin/kernel bin/*.o bin/*.so bin/*.EFI bin/*.efi build/*.iso build/*.img

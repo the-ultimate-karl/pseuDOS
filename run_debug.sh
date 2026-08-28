@@ -90,6 +90,7 @@ done
     echo " Log Destination: ${LOGFILE}"
     echo "============================================================"
     echo ""
+    echo "--- LIVE TERMINAL / SERIAL CONSOLE OUTPUT ---"
 } > "$LOGFILE"
 
 echo "============================================================"
@@ -107,18 +108,11 @@ fi
 echo "============================================================"
 
 DEBUGCON_LOG=$(mktemp)
-SERIAL_LOG=$(mktemp)
 STDERR_LOG=$(mktemp)
 
 cleanup() {
     EXIT_CODE=$?
     {
-        echo ""
-        echo "--- SERIAL PORT OUTPUT (COM1 / 0x3F8) ---"
-        if [ -f "$SERIAL_LOG" ]; then
-            cat "$SERIAL_LOG" 2>/dev/null || true
-            rm -f "$SERIAL_LOG"
-        fi
         echo ""
         echo "--- FIRMWARE DEBUG OUTPUT (Port 0x402) ---"
         if [ -f "$DEBUGCON_LOG" ]; then
@@ -153,11 +147,10 @@ if [ "$MODE" = "gui" ]; then
         -cdrom "$ISO_PATH" \
         -net none \
         -display gtk \
-        -chardev file,id=char0,path="$SERIAL_LOG" \
-        -serial chardev:char0 \
+        -serial mon:stdio \
         -debugcon file:"$DEBUGCON_LOG" \
         -global isa-debugcon.iobase=0x402 \
-        "${EXTRA_ARGS[@]}" 2> "$STDERR_LOG"
+        "${EXTRA_ARGS[@]}" 2> "$STDERR_LOG" | tee -a "$LOGFILE"
 elif [ "$MODE" = "curses" ]; then
     qemu-system-x86_64 \
         -machine pc,accel=tcg \
@@ -169,8 +162,6 @@ elif [ "$MODE" = "curses" ]; then
         -cdrom "$ISO_PATH" \
         -net none \
         -display curses \
-        -chardev file,id=char0,path="$SERIAL_LOG" \
-        -serial chardev:char0 \
         -debugcon file:"$DEBUGCON_LOG" \
         -global isa-debugcon.iobase=0x402 \
         "${EXTRA_ARGS[@]}" 2> "$STDERR_LOG"
@@ -185,9 +176,7 @@ else
         -cdrom "$ISO_PATH" \
         -net none \
         -nographic \
-        -chardev file,id=char0,path="$SERIAL_LOG" \
-        -serial chardev:char0 \
         -debugcon file:"$DEBUGCON_LOG" \
         -global isa-debugcon.iobase=0x402 \
-        "${EXTRA_ARGS[@]}" 2> "$STDERR_LOG"
+        "${EXTRA_ARGS[@]}" 2> "$STDERR_LOG" | tee -a "$LOGFILE"
 fi

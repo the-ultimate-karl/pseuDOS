@@ -28,6 +28,8 @@ typedef enum {
     ERR_GENERIC_BOOT_FAILURE
 } boot_error_t;
 
+typedef boot_error_t BootErrorCode;
+
 /*
  * Print formatted bootloader error diagnostic to UEFI Console and UART COM1,
  * replicating pseuDOS error_boot structure with real hardware diagnostics.
