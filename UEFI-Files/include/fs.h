@@ -1,7 +1,9 @@
 #ifndef FS_H
 #define FS_H
 
-#include "efi.h"
+#include <stdint.h>
+#include <stddef.h>
+#include "bootinfo.h"
 
 /* VFS Node Types */
 typedef enum {
@@ -38,7 +40,7 @@ typedef struct {
 extern BootLocationInfo g_boot_location;
 
 /* VFS Core Operations */
-EFI_STATUS vfs_init(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable);
+int vfs_init_initramfs(void);
 vfs_node_t *vfs_find_node(const char *path);
 vfs_node_t *vfs_mkdir(const char *path);
 vfs_node_t *vfs_create_file(const char *path);
@@ -51,7 +53,7 @@ const char *vfs_getcwd(void);
 void vfs_listdir(const char *path);
 
 /* Boot Device & Prompt Path Resolution */
-EFI_STATUS fs_init_boot_location(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable);
+void fs_init_devpath(const BootInfo *boot_info);
 void fs_get_prompt_path(char *out_buf, size_t max_len);
 void devpath_set_mode(devpath_mode_t mode);
 devpath_mode_t devpath_get_mode(void);

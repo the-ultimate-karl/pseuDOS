@@ -1,49 +1,19 @@
 #include "drivers.h"
+#include "bootinfo.h"
 #include "lib.h"
 
-void memory_print_info(EFI_SYSTEM_TABLE *SystemTable) {
-    if (!SystemTable || !SystemTable->BootServices) {
-        console_printf("memory: boot services not available\n");
-        return;
-    }
+/* Standard UEFI Memory Descriptor format */
+typedef struct {
+    uint32_t type;
+    uint64_t physical_start;
+    uint64_t virtual_start;
+    uint64_t number_of_pages;
+    uint64_t attribute;
+} uefi_mem_desc_t;
 
-    UINTN memory_map_size = 0;
-    UINTN map_key = 0;
-    UINTN descriptor_size = 0;
-    UINT32 descriptor_version = 0;
-
-    /* Query buffer size needed */
-    EFI_STATUS status = SystemTable->BootServices->GetMemoryMap(
-        &memory_map_size,
-        NULL,
-        &map_key,
-        &descriptor_size,
-        &descriptor_version
-    );
-
-    if (status != EFI_BUFFER_TOO_SMALL && !EFI_ERROR(status)) {
-        console_printf("memory: failed to query memory map size\n");
-        return;
-    }
-
-    memory_map_size += 2 * descriptor_size;
-    uint8_t *map_buf = (uint8_t *)kmalloc(memory_map_size);
-    if (!map_buf) {
-        console_printf("memory: failed to allocate temporary buffer for memory map\n");
-        return;
-    }
-
-    status = SystemTable->BootServices->GetMemoryMap(
-        &memory_map_size,
-        (EFI_MEMORY_DESCRIPTOR *)map_buf,
-        &map_key,
-        &descriptor_size,
-        &descriptor_version
-    );
-
-    if (EFI_ERROR(status)) {
-        console_printf("memory: GetMemoryMap failed (status: 0x%lx)\n", (unsigned long)status);
-        kfree(map_buf);
+void memory_print_info(const MemoryMapInfo *mem_info) {
+    if (!mem_info || mem_info->map_buffer == 0 || mem_info->descriptor_size == 0) {
+        console_printf("Memory: map information not available\n");
         return;
     }
 
@@ -56,40 +26,42 @@ void memory_print_info(EFI_SYSTEM_TABLE *SystemTable) {
     uint64_t reserved_memory_bytes = 0;
     uint32_t descriptor_count = 0;
 
-    size_t num_entries = memory_map_size / descriptor_size;
+    size_t num_entries = mem_info->map_size / mem_info->descriptor_size;
+    const uint8_t *buf = (const uint8_t *)(uintptr_t)mem_info->map_buffer;
+
     for (size_t i = 0; i < num_entries; i++) {
-        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)(map_buf + (i * descriptor_size));
-        uint64_t size_bytes = desc->NumberOfPages * 4096;
+        const uefi_mem_desc_t *desc = (const uefi_mem_desc_t *)(buf + (i * mem_info->descriptor_size));
+        uint64_t size_bytes = desc->number_of_pages * 4096;
         descriptor_count++;
 
-        switch (desc->Type) {
-            case EfiConventionalMemory:
+        switch (desc->type) {
+            case 7: /* EfiConventionalMemory */
                 usable_bytes += size_bytes;
                 total_system_bytes += size_bytes;
                 break;
-            case EfiLoaderCode:
-            case EfiLoaderData:
-            case EfiBootServicesCode:
-            case EfiBootServicesData:
+            case 1: /* EfiLoaderCode */
+            case 2: /* EfiLoaderData */
+            case 3: /* EfiBootServicesCode */
+            case 4: /* EfiBootServicesData */
                 boot_services_bytes += size_bytes;
                 total_system_bytes += size_bytes;
                 break;
-            case EfiRuntimeServicesCode:
-            case EfiRuntimeServicesData:
+            case 5: /* EfiRuntimeServicesCode */
+            case 6: /* EfiRuntimeServicesData */
                 runtime_services_bytes += size_bytes;
                 total_system_bytes += size_bytes;
                 break;
-            case EfiACPIReclaimMemory:
-            case EfiACPIMemoryNVS:
+            case 9:  /* EfiACPIReclaimMemory */
+            case 10: /* EfiACPIMemoryNVS */
                 acpi_bytes += size_bytes;
                 total_system_bytes += size_bytes;
                 break;
-            case EfiMemoryMappedIO:
-            case EfiMemoryMappedIOPortSpace:
+            case 11: /* EfiMemoryMappedIO */
+            case 12: /* EfiMemoryMappedIOPortSpace */
                 pcie_mmio_bytes += size_bytes;
                 break;
-            case EfiReservedMemoryType:
-            case EfiUnusableMemory:
+            case 0: /* EfiReservedMemoryType */
+            case 8: /* EfiUnusableMemory */
             default:
                 if (size_bytes >= (1024ULL * 1024ULL * 1024ULL)) {
                     pcie_mmio_bytes += size_bytes;
@@ -100,20 +72,18 @@ void memory_print_info(EFI_SYSTEM_TABLE *SystemTable) {
         }
     }
 
-    kfree(map_buf);
-
-    console_printf("physical memory statistics (uefi memory map):\n");
-    console_printf("  total system ram  : %lu mb (%lu bytes)\n", total_system_bytes / (1024 * 1024), total_system_bytes);
-    console_printf("  usable / free ram : %lu mb (%lu bytes)\n", usable_bytes / (1024 * 1024), usable_bytes);
-    console_printf("  boot services ram : %lu mb (%lu bytes)\n", boot_services_bytes / (1024 * 1024), boot_services_bytes);
-    console_printf("  runtime svcs ram  : %lu kb (%lu bytes)\n", runtime_services_bytes / 1024, runtime_services_bytes);
-    console_printf("  acpi tables / nvs : %lu kb (%lu bytes)\n", acpi_bytes / 1024, acpi_bytes);
+    console_printf("Physical Memory Statistics (UEFI Memory Map):\n");
+    console_printf("  Total System RAM  : %lu MB (%lu B)\n", total_system_bytes / (1024 * 1024), total_system_bytes);
+    console_printf("  Usable / Free RAM : %lu MB (%lu B)\n", usable_bytes / (1024 * 1024), usable_bytes);
+    console_printf("  Boot Services RAM : %lu MB (%lu B)\n", boot_services_bytes / (1024 * 1024), boot_services_bytes);
+    console_printf("  Runtime Svcs RAM  : %lu KB (%lu B)\n", runtime_services_bytes / 1024, runtime_services_bytes);
+    console_printf("  ACPI Tables / NVS : %lu KB (%lu B)\n", acpi_bytes / 1024, acpi_bytes);
     if (pcie_mmio_bytes > 0) {
-        console_printf("  pcie mmio aperture: %lu mb (%lu bytes) [bus address space]\n", pcie_mmio_bytes / (1024 * 1024), pcie_mmio_bytes);
+        console_printf("  PCIe MMIO Aperture: %lu MB (%lu B) [PCI Express Address Space]\n", pcie_mmio_bytes / (1024 * 1024), pcie_mmio_bytes);
     }
     if (reserved_memory_bytes > 0) {
-        console_printf("  reserved memory   : %lu kb (%lu bytes)\n", reserved_memory_bytes / 1024, reserved_memory_bytes);
+        console_printf("  Reserved Memory   : %lu KB (%lu B)\n", reserved_memory_bytes / 1024, reserved_memory_bytes);
     }
-    console_printf("  memory map descs  : %u entries (descriptor size: %lu bytes)\n", descriptor_count, descriptor_size);
-    console_printf("  kernel heap used  : %lu kb / %lu kb total\n", heap_get_used() / 1024, heap_get_total() / 1024);
+    console_printf("  Memory Descriptors: %u entries (Descriptor size: %lu B)\n", descriptor_count, mem_info->descriptor_size);
+    console_printf("  Kernel Heap Used  : %lu KB / %lu KB total\n", heap_get_used() / 1024, heap_get_total() / 1024);
 }

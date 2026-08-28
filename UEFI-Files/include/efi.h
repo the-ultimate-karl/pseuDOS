@@ -86,6 +86,7 @@ struct _EFI_RUNTIME_SERVICES;
 struct _EFI_DEVICE_PATH_PROTOCOL;
 struct _EFI_FILE_PROTOCOL;
 struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
+struct _EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
 /* Input Key */
 typedef struct {
@@ -178,6 +179,51 @@ typedef struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     EFI_TEXT_ENABLE_CURSOR          EnableCursor;
     SIMPLE_TEXT_OUTPUT_MODE         *Mode;
 } EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
+
+/* Graphics Output Protocol (GOP) */
+typedef enum {
+    PixelRedGreenBlueReserved8BitPerColor,
+    PixelBlueGreenRedReserved8BitPerColor,
+    PixelBitMask,
+    PixelBltOnly,
+    PixelFormatMax
+} EFI_GRAPHICS_PIXEL_FORMAT;
+
+typedef struct {
+    UINT32 Version;
+    UINT32 HorizontalResolution;
+    UINT32 VerticalResolution;
+    EFI_GRAPHICS_PIXEL_FORMAT PixelFormat;
+    UINT32 RedMask;
+    UINT32 GreenMask;
+    UINT32 BlueMask;
+    UINT32 ReservedMask;
+    UINT32 PixelsPerScanLine;
+} EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
+
+typedef struct {
+    UINT32 MaxMode;
+    UINT32 Mode;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info;
+    UINTN SizeOfInfo;
+    EFI_PHYSICAL_ADDRESS FrameBufferBase;
+    UINTN FrameBufferSize;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
+
+typedef struct _EFI_GRAPHICS_OUTPUT_PROTOCOL {
+    EFI_STATUS (EFIAPI *QueryMode)(
+        struct _EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
+        UINT32 ModeNumber,
+        UINTN *SizeOfInfo,
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **Info
+    );
+    EFI_STATUS (EFIAPI *SetMode)(
+        struct _EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
+        UINT32 ModeNumber
+    );
+    VOID *Blt;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
 /* Memory Types */
 typedef enum {
@@ -279,13 +325,6 @@ typedef struct {
 #define EFI_FILE_MODE_READ      0x0000000000000001ULL
 #define EFI_FILE_MODE_WRITE     0x0000000000000002ULL
 #define EFI_FILE_MODE_CREATE    0x8000000000000000ULL
-
-#define EFI_FILE_READ_ONLY      0x0000000000000001ULL
-#define EFI_FILE_HIDDEN         0x0000000000000002ULL
-#define EFI_FILE_SYSTEM         0x0000000000000004ULL
-#define EFI_FILE_RESERVED       0x0000000000000008ULL
-#define EFI_FILE_DIRECTORY      0x0000000000000010ULL
-#define EFI_FILE_ARCHIVE        0x0000000000000020ULL
 
 typedef struct {
     UINT64 Size;
@@ -482,6 +521,11 @@ typedef struct _EFI_BOOT_SERVICES {
 
 /* System Table */
 typedef struct {
+    EFI_GUID VendorGuid;
+    VOID     *VendorTable;
+} EFI_CONFIGURATION_TABLE;
+
+typedef struct {
     EFI_TABLE_HEADER                Hdr;
     CHAR16                          *FirmwareVendor;
     UINT32                          FirmwareRevision;
@@ -494,7 +538,7 @@ typedef struct {
     EFI_RUNTIME_SERVICES            *RuntimeServices;
     EFI_BOOT_SERVICES               *BootServices;
     UINTN                           NumberOfTableEntries;
-    VOID                            *ConfigurationTable;
+    EFI_CONFIGURATION_TABLE         *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
 /* Protocol GUID Constants */
@@ -503,5 +547,8 @@ extern const EFI_GUID gEfiDevicePathProtocolGuid;
 extern const EFI_GUID gEfiDevicePathToTextProtocolGuid;
 extern const EFI_GUID gEfiSimpleFileSystemProtocolGuid;
 extern const EFI_GUID gEfiFileInfoGuid;
+extern const EFI_GUID gEfiGraphicsOutputProtocolGuid;
+extern const EFI_GUID gEfiAcpi20TableGuid;
+extern const EFI_GUID gEfiAcpi10TableGuid;
 
 #endif /* EFI_H */

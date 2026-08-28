@@ -38,7 +38,7 @@ static void normalize_path(const char *path, char *out_buf, size_t max_len) {
     }
 
     char full[512];
-    if (path[0] == '/') {
+    if (path[0] == '/' || path[0] == '\\') {
         strncpy(full, path, sizeof(full) - 1);
     } else {
         if (strcmp(g_cwd_path, "/") == 0) {
@@ -59,7 +59,7 @@ static void normalize_path(const char *path, char *out_buf, size_t max_len) {
             if (token_len > 0) {
                 token[token_len] = '\0';
                 if (strcmp(token, ".") == 0) {
-                    /* Current dir, ignore */
+                    /* Ignore current dir */
                 } else if (strcmp(token, "..") == 0) {
                     if (seg_count > 0) seg_count--;
                 } else {
@@ -312,20 +312,17 @@ int vfs_remove_node_ex(const char *path, int recursive, int force) {
     vfs_node_t *node = vfs_find_node(norm_path);
     if (!node) return -1;
 
-    /* Check if directory has children without -r */
     if (node->type == VFS_NODE_DIRECTORY && node->first_child != NULL && !recursive) {
         return -2; /* Directory not empty */
     }
 
-    /* Check protected status */
     if (check_node_protected_recursive(node) && !force) {
-        return -4; /* Targeted directory is protected! Needs -f */
+        return -4; /* Protected directory! */
     }
 
     vfs_node_t *parent = node->parent;
     if (!parent) return -3;
 
-    /* Unlink from parent's children list */
     if (parent->first_child == node) {
         parent->first_child = node->next_sibling;
     } else {
@@ -383,7 +380,7 @@ void vfs_listdir(const char *path) {
     }
 
     if (target->type != VFS_NODE_DIRECTORY) {
-        console_printf("  %8u b   %s\n", (unsigned int)target->size, target->name);
+        console_printf("  %8u B   %s\n", (unsigned int)target->size, target->name);
         return;
     }
 
@@ -397,7 +394,7 @@ void vfs_listdir(const char *path) {
         if (child->type == VFS_NODE_DIRECTORY) {
             console_printf("  <dir>          %s\n", child->name);
         } else {
-            console_printf("  %8u b   %s\n", (unsigned int)child->size, child->name);
+            console_printf("  %8u B   %s\n", (unsigned int)child->size, child->name);
         }
         count++;
         child = child->next_sibling;
@@ -405,118 +402,43 @@ void vfs_listdir(const char *path) {
     console_printf("  total: %d item(s)\n", count);
 }
 
-static void u16_to_ascii(const CHAR16 *src, char *dst, size_t max_len) {
-    size_t i = 0;
-    if (!src || !dst || max_len == 0) return;
-    while (src[i] != 0 && i + 1 < max_len) {
-        dst[i] = (char)(src[i] & 0x7F);
-        i++;
-    }
-    dst[i] = '\0';
-}
-
-static void scan_and_import_uefi_dir(EFI_FILE_PROTOCOL *dir_handle, const char *vfs_parent_path) {
-    if (!dir_handle || !vfs_parent_path) return;
-
-    uint8_t info_buffer[512];
-    while (1) {
-        UINTN buf_size = sizeof(info_buffer);
-        EFI_STATUS status = dir_handle->Read(dir_handle, &buf_size, info_buffer);
-        if (EFI_ERROR(status) || buf_size == 0) {
-            break;
-        }
-
-        EFI_FILE_INFO *info = (EFI_FILE_INFO *)info_buffer;
-        char name[64];
-        u16_to_ascii(info->FileName, name, sizeof(name));
-
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
-            continue;
-        }
-
-        char item_vfs_path[256];
-        if (strcmp(vfs_parent_path, "/") == 0) {
-            snprintf(item_vfs_path, sizeof(item_vfs_path), "/%s", name);
-        } else {
-            snprintf(item_vfs_path, sizeof(item_vfs_path), "%s/%s", vfs_parent_path, name);
-        }
-
-        if (info->Attribute & EFI_FILE_DIRECTORY) {
-            vfs_node_t *dir_node = vfs_mkdir(item_vfs_path);
-            if (dir_node && (strcasecmp(name, "EFI") == 0 || strcasecmp(name, "protected") == 0)) {
-                dir_node->is_protected = 1;
-            }
-
-            EFI_FILE_PROTOCOL *sub_dir = NULL;
-            status = dir_handle->Open(dir_handle, &sub_dir, info->FileName, EFI_FILE_MODE_READ, 0);
-            if (!EFI_ERROR(status) && sub_dir) {
-                scan_and_import_uefi_dir(sub_dir, item_vfs_path);
-                sub_dir->Close(sub_dir);
-            }
-        } else {
-            vfs_node_t *node = vfs_create_file(item_vfs_path);
-            if (node) {
-                node->size = (size_t)info->FileSize;
-            }
-        }
-    }
-}
-
-EFI_STATUS vfs_init(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
-    /* 1. Initialize root directory */
+int vfs_init_initramfs(void) {
+    /* 1. Create root directory node */
     g_vfs_root = create_node("/", VFS_NODE_DIRECTORY, NULL);
-    if (!g_vfs_root) return EFI_OUT_OF_RESOURCES;
+    if (!g_vfs_root) return -1;
 
     g_vfs_cwd = g_vfs_root;
     strcpy(g_cwd_path, "/");
 
-    /* 2. Mount and import physical UEFI FAT filesystem volume */
-    if (SystemTable && SystemTable->BootServices && ImageHandle) {
-        EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
-        EFI_STATUS status = SystemTable->BootServices->HandleProtocol(
-            ImageHandle,
-            &gEfiLoadedImageProtocolGuid,
-            (VOID **)&loaded_image
-        );
+    /* 2. Create EFI system tree */
+    vfs_node_t *efi = vfs_mkdir("/EFI");
+    if (efi) efi->is_protected = 1;
+    vfs_mkdir("/EFI/BOOT");
+    vfs_mkdir("/EFI/pseuDOS");
 
-        if (!EFI_ERROR(status) && loaded_image && loaded_image->DeviceHandle) {
-            EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = NULL;
-            status = SystemTable->BootServices->HandleProtocol(
-                loaded_image->DeviceHandle,
-                &gEfiSimpleFileSystemProtocolGuid,
-                (VOID **)&sfs
-            );
+    vfs_node_t *boot_efi = vfs_create_file("/EFI/BOOT/BOOTX64.EFI");
+    if (boot_efi) boot_efi->size = 31554;
 
-            if (!EFI_ERROR(status) && sfs) {
-                EFI_FILE_PROTOCOL *root_dir = NULL;
-                status = sfs->OpenVolume(sfs, &root_dir);
-                if (!EFI_ERROR(status) && root_dir) {
-                    scan_and_import_uefi_dir(root_dir, "/");
-                    root_dir->Close(root_dir);
-                }
-            }
-        }
-    }
+    vfs_node_t *krnl_bin = vfs_create_file("/EFI/pseuDOS/kernel.bin");
+    if (krnl_bin) krnl_bin->size = 54204;
 
-    /* 3. Ensure standard pseuDOS system directories exist */
+    /* 3. Create Home & Configuration directories */
     vfs_mkdir("/home");
     vfs_mkdir("/etc");
+
+    /* 4. Create Protected system trees */
     vfs_node_t *prot = vfs_mkdir("/protected");
     if (prot) prot->is_protected = 1;
-
-    vfs_node_t *efi_node = vfs_find_node("/EFI");
-    if (efi_node) efi_node->is_protected = 1;
-
     vfs_mkdir("/protected/bootmgr");
     vfs_mkdir("/protected/crit");
     vfs_mkdir("/protected/krnl");
     vfs_mkdir("/protected/krnl/essential");
 
-    /* 4. Ensure standard system configuration and text files exist */
-    vfs_write_file("/home/readme.txt", "welcome to pseuDOS native kernel filesystem!\ntype 'help' to view available commands.\n", 0);
+    /* 5. Create default system configuration and documents */
+    vfs_write_file("/home/readme.txt", "welcome to pseuDOS bare-metal kernel filesystem!\ntype 'help' to view available commands.\n", 0);
     vfs_write_file("/etc/hostname", "pseuDOS\n", 0);
-    vfs_write_file("/etc/os-release", "name=pseuDOS\nversion=0.3.0-native\narch=x86_64\nedition=uefi-native\n", 0);
+    vfs_write_file("/etc/os-release", "NAME=pseuDOS\nVERSION=0.4.0-baremetal\nARCH=x86_64\nEDITION=bare-metal\n", 0);
     vfs_write_file("/protected/bootmgr/config.sys", "boot_default=pseuDOS\ntimeout=5\ndebug=0\n", 0);
 
-    return EFI_SUCCESS;
+    return 0;
 }

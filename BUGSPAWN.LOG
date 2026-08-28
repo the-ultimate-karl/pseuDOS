@@ -1,0 +1,5 @@
+ANTIGRAVITY (2026-08-28 23:41)
+- Double character input caused by race condition between IRQ 1 keyboard ISR queue and simultaneous manual PS/2 port 0x60 polling in keyboard_getchar [FIXED + 2026-08-28 23:43]
+
+[IMPORTANT-BUGS]
+- Double character input caused by dual ISR and manual I/O port polling in drivers/keyboard.c

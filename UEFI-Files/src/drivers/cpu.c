@@ -25,7 +25,7 @@ void cpu_print_info(void) {
         cpuid(0x80000004, (uint32_t *)&brand[32], (uint32_t *)&brand[36], (uint32_t *)&brand[40], (uint32_t *)&brand[44]);
         brand[48] = '\0';
     } else {
-        strcpy(brand, "generic x86_64 processor");
+        strcpy(brand, "Generic x86_64 Processor");
     }
 
     /* 3. Family, Model, Stepping */
@@ -43,31 +43,31 @@ void cpu_print_info(void) {
 
     uint32_t max_cores = (ebx >> 16) & 0xFF;
 
-    console_printf("cpu information:\n");
-    console_printf("  vendor       : %s\n", vendor);
-    console_printf("  model / name : %s\n", trim(brand));
-    console_printf("  family/model : family %u, model %u, stepping %u (type %u)\n", family, model, stepping, type);
-    console_printf("  max logical  : %u core(s)/thread(s)\n", max_cores > 0 ? max_cores : 1);
+    console_printf("CPU Information:\n");
+    console_printf("  Vendor       : %s\n", vendor);
+    console_printf("  Model / Name : %s\n", trim(brand));
+    console_printf("  Family/Model : Family %u, Model %u, Stepping %u (Type %u)\n", family, model, stepping, type);
+    console_printf("  Max Logical  : %u core(s)/thread(s)\n", max_cores > 0 ? max_cores : 1);
 
     /* 4. Feature flags */
-    console_printf("  features     : ");
-    if (edx & (1 << 0))  console_printf("fpu ");
-    if (edx & (1 << 4))  console_printf("tsc ");
-    if (edx & (1 << 6))  console_printf("pae ");
-    if (edx & (1 << 9))  console_printf("apic ");
-    if (edx & (1 << 23)) console_printf("mmx ");
-    if (edx & (1 << 25)) console_printf("sse ");
-    if (edx & (1 << 26)) console_printf("sse2 ");
-    if (ecx & (1 << 0))  console_printf("sse3 ");
-    if (ecx & (1 << 9))  console_printf("ssse3 ");
-    if (ecx & (1 << 19)) console_printf("sse4.1 ");
-    if (ecx & (1 << 20)) console_printf("sse4.2 ");
-    if (ecx & (1 << 28)) console_printf("avx ");
-    if (ecx & (1 << 30)) console_printf("rdrand ");
+    console_printf("  Features     : ");
+    if (edx & (1 << 0))  console_printf("FPU ");
+    if (edx & (1 << 4))  console_printf("TSC ");
+    if (edx & (1 << 6))  console_printf("PAE ");
+    if (edx & (1 << 9))  console_printf("APIC ");
+    if (edx & (1 << 23)) console_printf("MMX ");
+    if (edx & (1 << 25)) console_printf("SSE ");
+    if (edx & (1 << 26)) console_printf("SSE2 ");
+    if (ecx & (1 << 0))  console_printf("SSE3 ");
+    if (ecx & (1 << 9))  console_printf("SSSE3 ");
+    if (ecx & (1 << 19)) console_printf("SSE4.1 ");
+    if (ecx & (1 << 20)) console_printf("SSE4.2 ");
+    if (ecx & (1 << 28)) console_printf("AVX ");
+    if (ecx & (1 << 30)) console_printf("RDRAND ");
 
     /* Extended Long Mode flag */
     cpuid(0x80000001, &eax, &ebx, &ecx, &edx);
-    if (edx & (1 << 29)) console_printf("lm(64-bit) ");
-    if (edx & (1 << 20)) console_printf("nx/xd ");
+    if (edx & (1 << 29)) console_printf("LM(64-bit) ");
+    if (edx & (1 << 20)) console_printf("NX/XD ");
     console_printf("\n");
 }

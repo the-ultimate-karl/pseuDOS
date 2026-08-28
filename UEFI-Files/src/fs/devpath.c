@@ -7,70 +7,17 @@ BootLocationInfo g_boot_location = {
     .mode = DEVPATH_MODE_FIRMWARE
 };
 
-static void unicode_to_ascii(const CHAR16 *src, char *dst, size_t max_len) {
-    size_t i = 0;
-    if (!src || !dst || max_len == 0) return;
-    while (src[i] != 0 && i + 1 < max_len) {
-        dst[i] = (char)(src[i] & 0x7F);
-        i++;
+void fs_init_devpath(const BootInfo *boot_info) {
+    if (!boot_info) return;
+
+    if (boot_info->hardware_devpath[0] != '\0') {
+        strncpy(g_boot_location.base_hardware_path, boot_info->hardware_devpath, sizeof(g_boot_location.base_hardware_path) - 1);
+        g_boot_location.base_hardware_path[sizeof(g_boot_location.base_hardware_path) - 1] = '\0';
     }
-    dst[i] = '\0';
-}
-
-EFI_STATUS fs_init_boot_location(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
-    if (!SystemTable || !SystemTable->BootServices) return EFI_INVALID_PARAMETER;
-
-    EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
-    EFI_STATUS status = SystemTable->BootServices->HandleProtocol(
-        ImageHandle,
-        &gEfiLoadedImageProtocolGuid,
-        (VOID **)&loaded_image
-    );
-
-    if (!EFI_ERROR(status) && loaded_image) {
-        /* Extract FilePath if present */
-        if (loaded_image->FilePath) {
-            EFI_DEVICE_PATH_PROTOCOL *dp = loaded_image->FilePath;
-            while (dp && dp->Type != EFI_DEVICE_PATH_TYPE_END) {
-                if (dp->Type == EFI_DEVICE_PATH_TYPE_MEDIA && dp->SubType == 0x04) {
-                    const CHAR16 *file_str = (const CHAR16 *)((const uint8_t *)dp + 4);
-                    unicode_to_ascii(file_str, g_boot_location.partition_boot_file, sizeof(g_boot_location.partition_boot_file));
-                    break;
-                }
-                uint16_t len = (uint16_t)(dp->Length[0] | (dp->Length[1] << 8));
-                if (len < 4) break;
-                dp = (EFI_DEVICE_PATH_PROTOCOL *)((uint8_t *)dp + len);
-            }
-        }
-
-        /* Check DeviceHandle for hardware device path */
-        if (loaded_image->DeviceHandle) {
-            EFI_DEVICE_PATH_PROTOCOL *dev_dp = NULL;
-            status = SystemTable->BootServices->HandleProtocol(
-                loaded_image->DeviceHandle,
-                &gEfiDevicePathProtocolGuid,
-                (VOID **)&dev_dp
-            );
-
-            if (!EFI_ERROR(status) && dev_dp) {
-                EFI_DEVICE_PATH_TO_TEXT_PROTOCOL *dp_to_text = NULL;
-                status = SystemTable->BootServices->LocateProtocol(
-                    &gEfiDevicePathToTextProtocolGuid,
-                    NULL,
-                    (VOID **)&dp_to_text
-                );
-
-                if (!EFI_ERROR(status) && dp_to_text && dp_to_text->ConvertDevicePathToText) {
-                    CHAR16 *text_u16 = dp_to_text->ConvertDevicePathToText(dev_dp, 1, 0);
-                    if (text_u16) {
-                        unicode_to_ascii(text_u16, g_boot_location.base_hardware_path, sizeof(g_boot_location.base_hardware_path));
-                    }
-                }
-            }
-        }
+    if (boot_info->boot_file_path[0] != '\0') {
+        strncpy(g_boot_location.partition_boot_file, boot_info->boot_file_path, sizeof(g_boot_location.partition_boot_file) - 1);
+        g_boot_location.partition_boot_file[sizeof(g_boot_location.partition_boot_file) - 1] = '\0';
     }
-
-    return EFI_SUCCESS;
 }
 
 void devpath_set_mode(devpath_mode_t mode) {
@@ -86,7 +33,6 @@ void fs_get_prompt_path(char *out_buf, size_t max_len) {
 
     const char *cwd = vfs_getcwd();
 
-    /* Convert cwd to DOS-style backslashes for firmware and hardware modes */
     char dos_cwd[256];
     size_t i = 0;
     while (cwd[i] != '\0' && i < sizeof(dos_cwd) - 1) {

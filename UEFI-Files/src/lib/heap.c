@@ -1,65 +1,44 @@
 #include "lib.h"
 
 typedef struct heap_block {
-    size_t size;               /* Size of user data area in bytes */
+    size_t size;               /* Size of payload data in bytes */
     int is_free;               /* 1 if free, 0 if allocated */
-    struct heap_block *next;   /* Next block in memory order */
-    struct heap_block *prev;   /* Previous block in memory order */
+    struct heap_block *next;   /* Next block pointer */
+    struct heap_block *prev;   /* Previous block pointer */
 } heap_block_t;
 
 #define BLOCK_HEADER_SIZE (sizeof(heap_block_t))
-#define ALIGN8(x) (((x) + 7) & ~7)
 
 static uint8_t *g_heap_start = NULL;
 static size_t g_heap_total_size = 0;
-static heap_block_t *g_first_block = NULL;
+static heap_block_t *g_free_list = NULL;
 
-EFI_STATUS heap_init(EFI_SYSTEM_TABLE *SystemTable, size_t initial_bytes) {
-    if (!SystemTable || !SystemTable->BootServices || !SystemTable->BootServices->AllocatePages) {
-        return EFI_INVALID_PARAMETER;
-    }
+void heap_init(uint64_t heap_start, size_t heap_size) {
+    if (heap_start == 0 || heap_size < (BLOCK_HEADER_SIZE + 1024)) return;
 
-    /* Round up to 4KB pages (e.g. 16MB = 4096 pages) */
-    UINTN pages = (initial_bytes + 4095) / 4096;
-    if (pages < 256) pages = 256; /* Minimum 1MB */
+    g_heap_start = (uint8_t *)(uintptr_t)heap_start;
+    g_heap_total_size = heap_size;
 
-    EFI_PHYSICAL_ADDRESS phys_addr = 0;
-    EFI_STATUS status = SystemTable->BootServices->AllocatePages(
-        AllocateAnyPages,
-        EfiLoaderData,
-        pages,
-        &phys_addr
-    );
-
-    if (EFI_ERROR(status) || phys_addr == 0) {
-        return status;
-    }
-
-    g_heap_start = (uint8_t *)(uintptr_t)phys_addr;
-    g_heap_total_size = pages * 4096;
-
-    /* Initialize the single massive free block spanning the whole pool */
-    g_first_block = (heap_block_t *)g_heap_start;
-    g_first_block->size = g_heap_total_size - BLOCK_HEADER_SIZE;
-    g_first_block->is_free = 1;
-    g_first_block->next = NULL;
-    g_first_block->prev = NULL;
-
-    return EFI_SUCCESS;
+    g_free_list = (heap_block_t *)g_heap_start;
+    g_free_list->size = heap_size - BLOCK_HEADER_SIZE;
+    g_free_list->is_free = 1;
+    g_free_list->next = NULL;
+    g_free_list->prev = NULL;
 }
 
 void *kmalloc(size_t size) {
-    if (size == 0 || !g_first_block) return NULL;
+    if (size == 0 || !g_free_list) return NULL;
 
-    size_t actual_size = ALIGN8(size);
-    heap_block_t *curr = g_first_block;
+    /* Align to 16 bytes */
+    size = (size + 15) & ~15;
 
+    heap_block_t *curr = g_free_list;
     while (curr) {
-        if (curr->is_free && curr->size >= actual_size) {
-            /* Check if block can be split */
-            if (curr->size >= actual_size + BLOCK_HEADER_SIZE + 16) {
-                heap_block_t *new_block = (heap_block_t *)((uint8_t *)curr + BLOCK_HEADER_SIZE + actual_size);
-                new_block->size = curr->size - actual_size - BLOCK_HEADER_SIZE;
+        if (curr->is_free && curr->size >= size) {
+            /* Can we split this block? */
+            if (curr->size >= size + BLOCK_HEADER_SIZE + 32) {
+                heap_block_t *new_block = (heap_block_t *)((uint8_t *)curr + BLOCK_HEADER_SIZE + size);
+                new_block->size = curr->size - size - BLOCK_HEADER_SIZE;
                 new_block->is_free = 1;
                 new_block->next = curr->next;
                 new_block->prev = curr;
@@ -68,7 +47,7 @@ void *kmalloc(size_t size) {
                     curr->next->prev = new_block;
                 }
                 curr->next = new_block;
-                curr->size = actual_size;
+                curr->size = size;
             }
 
             curr->is_free = 0;
@@ -77,20 +56,11 @@ void *kmalloc(size_t size) {
         curr = curr->next;
     }
 
-    return NULL; /* Out of memory */
-}
-
-void *kcalloc(size_t num, size_t size) {
-    size_t total = num * size;
-    void *ptr = kmalloc(total);
-    if (ptr) {
-        memset(ptr, 0, total);
-    }
-    return ptr;
+    return NULL;
 }
 
 void kfree(void *ptr) {
-    if (!ptr || !g_first_block) return;
+    if (!ptr) return;
 
     heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - BLOCK_HEADER_SIZE);
     block->is_free = 1;
@@ -112,6 +82,15 @@ void kfree(void *ptr) {
             block->next->prev = block->prev;
         }
     }
+}
+
+void *kcalloc(size_t num, size_t size) {
+    size_t total = num * size;
+    void *ptr = kmalloc(total);
+    if (ptr) {
+        memset(ptr, 0, total);
+    }
+    return ptr;
 }
 
 void *krealloc(void *ptr, size_t new_size) {
@@ -139,9 +118,9 @@ size_t heap_get_total(void) {
 }
 
 size_t heap_get_used(void) {
-    if (!g_first_block) return 0;
+    if (!g_heap_start) return 0;
     size_t used = 0;
-    heap_block_t *curr = g_first_block;
+    heap_block_t *curr = (heap_block_t *)g_heap_start;
     while (curr) {
         if (!curr->is_free) {
             used += curr->size + BLOCK_HEADER_SIZE;
@@ -149,17 +128,4 @@ size_t heap_get_used(void) {
         curr = curr->next;
     }
     return used;
-}
-
-size_t heap_get_free(void) {
-    if (!g_first_block) return 0;
-    size_t free_mem = 0;
-    heap_block_t *curr = g_first_block;
-    while (curr) {
-        if (curr->is_free) {
-            free_mem += curr->size;
-        }
-        curr = curr->next;
-    }
-    return free_mem;
 }

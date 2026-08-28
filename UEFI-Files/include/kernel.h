@@ -1,13 +1,10 @@
 #ifndef KERNEL_H
 #define KERNEL_H
 
-#include "efi.h"
+#include "bootinfo.h"
 
-/* Kernel main entry point */
-EFI_STATUS EFIAPI kernel_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable);
-
-/* Interactive Kernel Shell */
-void shell_init(EFI_SYSTEM_TABLE *SystemTable);
-void shell_run(EFI_SYSTEM_TABLE *SystemTable);
+void kernel_main(BootInfo *boot_info);
+void shell_init(const BootInfo *boot_info);
+void shell_run(const BootInfo *boot_info);
 
 #endif /* KERNEL_H */

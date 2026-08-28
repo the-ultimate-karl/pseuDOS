@@ -1,9 +1,10 @@
 #include "kernel.h"
+#include "bootinfo.h"
 #include "drivers.h"
 #include "fs.h"
 #include "lib.h"
 
-static EFI_SYSTEM_TABLE *g_st = NULL;
+static const BootInfo *g_boot_info = NULL;
 
 static void cmd_help(void) {
     console_puts("===========================\n");
@@ -16,15 +17,28 @@ static void cmd_help(void) {
     console_puts("touch             :     create an empty file\n");
     console_puts("write             :     write or append text to a file\n");
     console_puts("del               :     delete a file or directory (-r, -f, -rf)\n");
-    console_puts("cpu               :     display cpu model, vendor, and feature flags\n");
+    console_puts("fs                :     display active filesystem and mount information\n");
+    console_puts("cpu               :     display CPU model, vendor, and feature flags\n");
     console_puts("mem               :     display physical memory map and statistics\n");
-    console_puts("pci               :     scan and list connected pci bus devices\n");
-    console_puts("devpath           :     display and toggle uefi boot device hardware path\n");
+    console_puts("pci               :     scan and list connected PCI / PCIe bus devices\n");
+    console_puts("devpath           :     display and toggle boot device hardware path\n");
     console_puts("clear             :     clear the screen console\n");
-    console_puts("reboot            :     perform system reset\n");
-    console_puts("shutdown          :     perform acpi system power-off\n");
-    console_puts("halt              :     halt cpu execution\n");
+    console_puts("reboot            :     perform bare-metal system reset\n");
+    console_puts("shutdown          :     perform bare-metal ACPI system power-off\n");
+    console_puts("halt              :     halt CPU execution\n");
     console_puts("===========================\n");
+}
+
+static void cmd_fs(void) {
+    console_puts("filesystem information:\n");
+    console_puts("  current root (/)  : initramfs (in-memory ramdisk vfs)\n");
+    console_puts("  filesystem type   : tmpfs / initramfs\n");
+    console_puts("  storage medium    : volatile system RAM\n");
+    console_puts("  mount point       : /\n");
+    console_printf("  storage pool size : %lu MB\n", heap_get_total() / (1024 * 1024));
+    console_printf("  used storage      : %lu KB\n", heap_get_used() / 1024);
+    console_puts("  status            : active (read/write)\n");
+    console_puts("  boot stage        : stage-1 early boot filesystem (awaiting switch_root)\n");
 }
 
 static void cmd_devpath(const char *arg) {
@@ -197,13 +211,13 @@ static void cmd_del(const char *arg) {
     } else if (res == -3) {
         console_printf("del: cannot remove '%s': invalid argument\n", target_path);
     } else if (res == -4) {
-        console_puts("del: targeted directory is protected! use the force (-f) flag to override.\n");
+        console_puts("del: recursive deletion error: targeted directory is protected! please use the force (-f) flag to override.\n");
     }
 }
 
 static void cmd_halt(void) {
     console_puts("halt instruction executed!\n");
-    console_puts("System halted!\n");
+    console_puts("system halted!\n");
 
     __asm__ volatile ("cli");
     while (1) {
@@ -211,28 +225,28 @@ static void cmd_halt(void) {
     }
 }
 
-void shell_init(EFI_SYSTEM_TABLE *SystemTable) {
-    g_st = SystemTable;
+void shell_init(const BootInfo *boot_info) {
+    g_boot_info = boot_info;
 }
 
-void shell_run(EFI_SYSTEM_TABLE *SystemTable) {
-    if (SystemTable) {
-        g_st = SystemTable;
+void shell_run(const BootInfo *boot_info) {
+    if (boot_info) {
+        g_boot_info = boot_info;
     }
     char line_buf[256];
     char prompt_buf[512];
     char prompt_path[256];
 
-    console_puts("pseuDOS kernel v0.3.0-native (x86_64 uefi)\n");
-    console_puts("what's new (kernel version 0.3.0):\n");
-    console_puts("- startup what's new changelog display\n");
-    console_puts("- direct fat filesystem and storage integration\n");
-    console_puts("- kernel binary visible at /EFI/pseuDOS/kernel.bin\n");
-    console_puts("- dynamic memory heap allocator (kmalloc/kfree)\n");
-    console_puts("- filesystem commands (ls, cd, pwd, cat, mkdir, touch, write, del)\n");
-    console_puts("- separate kernel payload architecture\n");
-    console_puts("- acpi shutdown and hardware reset capabilities\n");
-    console_puts("- 3-mode devpath navigation with dynamic prompt tracking\n\n");
+    console_puts("pseuDOS kernel v0.4.0-baremetal (x86_64 uefi / bare-metal)\n");
+    console_puts("what's new (kernel version 0.4.0):\n");
+    console_puts("- full bare-metal execution via ExitBootServices()\n");
+    console_puts("- 1280x720 32-bit linear framebuffer console\n");
+    console_puts("- embedded 8x16 bitmap font engine\n");
+    console_puts("- 64-bit IDT (Interrupt Descriptor Table) & exception handlers\n");
+    console_puts("- remapped 8259 PIC & IRQ 1 PS/2 keyboard interrupt driver\n");
+    console_puts("- linux-style 2-stage initramfs in-memory VFS\n");
+    console_puts("- physical RAM and PCIe MMIO aperture memory reporting\n");
+    console_puts("- bare-metal ACPI shutdown and hardware reboot\n\n");
     console_puts("type 'help' to view available commands.\n\n");
 
     while (1) {
@@ -254,6 +268,8 @@ void shell_run(EFI_SYSTEM_TABLE *SystemTable) {
 
         if (strcmp(cmd, "help") == 0) {
             cmd_help();
+        } else if (strcmp(cmd, "fs") == 0 || strcmp(cmd, "mount") == 0 || strcmp(cmd, "df") == 0) {
+            cmd_fs();
         } else if (strcmp(cmd, "devpath") == 0) {
             cmd_devpath(arg);
         } else if (strcmp(cmd, "ls") == 0 || strcmp(cmd, "dir") == 0) {
@@ -275,17 +291,19 @@ void shell_run(EFI_SYSTEM_TABLE *SystemTable) {
         } else if (strcmp(cmd, "cpu") == 0) {
             cpu_print_info();
         } else if (strcmp(cmd, "mem") == 0) {
-            memory_print_info(g_st);
+            if (g_boot_info) {
+                memory_print_info(&g_boot_info->mem);
+            } else {
+                console_puts("mem: boot memory map not available\n");
+            }
         } else if (strcmp(cmd, "pci") == 0) {
             pci_scan_bus();
         } else if (strcmp(cmd, "clear") == 0 || strcmp(cmd, "cls") == 0) {
             console_clear();
         } else if (strcmp(cmd, "reboot") == 0) {
-            console_puts("rebooting system...\n");
-            acpi_reboot(g_st);
+            acpi_reboot();
         } else if (strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) {
-            console_puts("shutting down system via acpi...\n");
-            acpi_shutdown(g_st);
+            acpi_shutdown();
         } else if (strcmp(cmd, "halt") == 0) {
             cmd_halt();
         } else {

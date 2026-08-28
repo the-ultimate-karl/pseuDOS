@@ -22,39 +22,39 @@ static uint16_t pci_read_config_16(uint8_t bus, uint8_t slot, uint8_t func, uint
 
 static const char *pci_class_to_str(uint8_t base_class, uint8_t sub_class) {
     switch (base_class) {
-        case 0x00: return "unclassified device";
+        case 0x00: return "Unclassified Device";
         case 0x01:
             switch (sub_class) {
-                case 0x01: return "ide controller";
-                case 0x06: return "sata controller";
-                case 0x08: return "nvme controller";
-                default:   return "mass storage controller";
+                case 0x01: return "IDE Controller";
+                case 0x06: return "SATA Controller (AHCI)";
+                case 0x08: return "NVMe Controller";
+                default:   return "Mass Storage Controller";
             }
-        case 0x02: return "network controller";
-        case 0x03: return "vga compatible controller";
-        case 0x04: return "multimedia audio device";
-        case 0x05: return "memory controller";
+        case 0x02: return "Network Controller (Ethernet)";
+        case 0x03: return "VGA / Display Controller";
+        case 0x04: return "Multimedia Audio Device";
+        case 0x05: return "Memory Controller";
         case 0x06:
             switch (sub_class) {
-                case 0x00: return "host bridge";
-                case 0x01: return "isa bridge";
-                case 0x04: return "pci-to-pci bridge";
-                default:   return "bridge device";
+                case 0x00: return "Host Bridge";
+                case 0x01: return "ISA Bridge";
+                case 0x04: return "PCI-to-PCI Bridge";
+                default:   return "Bridge Device";
             }
-        case 0x07: return "communication controller";
+        case 0x07: return "Communication Controller (UART)";
         case 0x0C:
             switch (sub_class) {
-                case 0x03: return "usb controller";
-                default:   return "serial bus controller";
+                case 0x03: return "USB Controller (xHCI/EHCI)";
+                default:   return "Serial Bus Controller";
             }
         default:
-            return "generic pci device";
+            return "Generic PCI Device";
     }
 }
 
 void pci_scan_bus(void) {
-    console_printf("pci bus scan (i/o ports 0xcf8 / 0xcfc):\n");
-    console_printf("  bus:dev:fn   vendor:device   class code   description\n");
+    console_printf("PCI / PCIe Bus Scan (I/O Ports 0xCF8 / 0xCFC):\n");
+    console_printf("  Bus:Dev:Fn   Vendor:Device   Class Code   Description\n");
     console_printf("  ----------   -------------   ----------   --------------------------------\n");
 
     int count = 0;
@@ -80,5 +80,5 @@ void pci_scan_bus(void) {
     }
 
     console_printf("  ----------   -------------   ----------   --------------------------------\n");
-    console_printf("  total pci devices detected: %d\n", count);
+    console_printf("  Total PCI / PCIe devices detected: %d\n", count);
 }

@@ -9,6 +9,7 @@ CFLAGS = -ffreestanding \
          -fno-asynchronous-unwind-tables \
          -fshort-wchar \
          -mno-red-zone \
+         -mgeneral-regs-only \
          -maccumulate-outgoing-args \
          -Wall \
          -Wextra \
@@ -42,7 +43,10 @@ KERNEL_SRCS = src/kernel/kernel.c \
               src/lib/heap.c \
               src/lib/string.c \
               src/lib/guid.c \
+              src/drivers/font.c \
+              src/drivers/framebuffer.c \
               src/drivers/console.c \
+              src/drivers/idt.c \
               src/drivers/keyboard.c \
               src/drivers/cpu.c \
               src/drivers/memory.c \

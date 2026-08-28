@@ -1,29 +1,42 @@
 #include "kernel.h"
+#include "bootinfo.h"
+#include "idt.h"
 #include "drivers.h"
 #include "fs.h"
 #include "lib.h"
 
-EFI_STATUS EFIAPI kernel_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
-    if (!SystemTable || !SystemTable->BootServices) {
-        return EFI_INVALID_PARAMETER;
+void kernel_main(BootInfo *boot_info) {
+    if (!boot_info || boot_info->magic != BOOTINFO_MAGIC) {
+        /* Hang safely if boot info is invalid */
+        __asm__ volatile ("cli; hlt");
+        return;
     }
 
-    /* 1. Initialize Dynamic Memory Heap (16MB) */
-    heap_init(SystemTable, 16 * 1024 * 1024);
+    /* 1. Initialize Dynamic Memory Heap (16MB pre-allocated) */
+    heap_init(boot_info->mem.heap_physical_start, boot_info->mem.heap_size_bytes);
 
-    /* 2. Initialize Console & Keyboard */
-    console_init(SystemTable);
-    keyboard_init(SystemTable);
+    /* 2. Initialize Framebuffer & Text Console */
+    fb_init(&boot_info->fb);
+    console_init();
 
-    /* 3. Discover boot location and physical device path */
-    fs_init_boot_location(ImageHandle, SystemTable);
+    /* 3. Initialize 64-bit IDT & Remap 8259 PIC */
+    idt_init();
 
-    /* 4. Initialize Virtual File System with physical storage volume integration */
-    vfs_init(ImageHandle, SystemTable);
+    /* 4. Initialize PS/2 Keyboard Driver */
+    keyboard_init();
 
-    /* 5. Initialize & Launch Interactive Kernel Shell */
-    shell_init(SystemTable);
-    shell_run(SystemTable);
+    /* 5. Initialize Boot Location & Devpath */
+    fs_init_devpath(boot_info);
 
-    return EFI_SUCCESS;
+    /* 6. Mount Stage-1 Initramfs In-Memory VFS */
+    vfs_init_initramfs();
+
+    /* 7. Launch Interactive Bare-Metal Kernel Shell */
+    shell_init(boot_info);
+    shell_run(boot_info);
+
+    /* System halted fallback */
+    while (1) {
+        __asm__ volatile ("hlt");
+    }
 }
