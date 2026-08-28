@@ -1,0 +1,7 @@
+ls
+stat input.txt
+cd protected
+ls
+stat bootmgfw.py
+cd ..
+exit

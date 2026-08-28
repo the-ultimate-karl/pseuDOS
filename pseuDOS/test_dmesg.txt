@@ -1,0 +1,8 @@
+dmesg count
+dmesg export
+cat /home/logs/kernel_dmesg.log
+dmesg level
+dmesg tail 5
+dmesg clear
+dmesg count
+exit

@@ -1,0 +1,26 @@
+help
+whoami
+date
+echo Hello World from pseuDOS
+ls
+mkdir test_dir
+ls
+cd test_dir
+ls
+touch newfile.txt
+ls
+stat newfile.txt
+modfile newfile.txt
+1
+This is a test line!
+
+cat newfile.txt
+cd ..
+rm test_dir/newfile.txt
+rm test_dir
+ls
+ps
+debug 1
+debug 3
+dmesg count
+shutdown

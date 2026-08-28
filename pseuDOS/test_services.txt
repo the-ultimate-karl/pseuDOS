@@ -1,0 +1,4 @@
+ps
+date
+kill
+shutdown

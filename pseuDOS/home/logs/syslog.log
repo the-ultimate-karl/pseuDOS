@@ -1,0 +1,4 @@
+[000.203][[1m[32mINFO[0m][exec] executing shell with args []
+[000.205][[1m[32mINFO[0m][wait] cleaned up zombie PID 0
+[000.223][[1m[32mINFO[0m][exec] executing dmesg with args []
+[000.224][[1m[32mINFO[0m][wait] cleaned up zombie PID 4
