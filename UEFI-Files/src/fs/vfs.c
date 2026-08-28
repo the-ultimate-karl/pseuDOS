@@ -49,7 +49,6 @@ static void normalize_path(const char *path, char *out_buf, size_t max_len) {
     }
     full[sizeof(full) - 1] = '\0';
 
-    /* Parse tokens / segment normalization */
     char segments[32][64];
     int seg_count = 0;
     char token[64];
@@ -272,24 +271,61 @@ int vfs_read_file(const char *path, char *buffer, size_t max_len) {
     return (int)to_read;
 }
 
-int vfs_remove_node(const char *path) {
+static int check_node_protected_recursive(vfs_node_t *node) {
+    if (!node) return 0;
+    if (node->is_protected) return 1;
+
+    vfs_node_t *child = node->first_child;
+    while (child) {
+        if (check_node_protected_recursive(child)) {
+            return 1;
+        }
+        child = child->next_sibling;
+    }
+    return 0;
+}
+
+static void free_vfs_subtree(vfs_node_t *node) {
+    if (!node) return;
+
+    vfs_node_t *child = node->first_child;
+    while (child) {
+        vfs_node_t *next = child->next_sibling;
+        free_vfs_subtree(child);
+        child = next;
+    }
+
+    if (node->content) {
+        kfree(node->content);
+    }
+    kfree(node);
+}
+
+int vfs_remove_node_ex(const char *path, int recursive, int force) {
     if (!path) return -1;
 
     char norm_path[256];
     normalize_path(path, norm_path, sizeof(norm_path));
 
-    if (strcmp(norm_path, "/") == 0) return -1; /* Cannot delete root */
+    if (strcmp(norm_path, "/") == 0) return -3; /* Cannot delete root */
 
     vfs_node_t *node = vfs_find_node(norm_path);
     if (!node) return -1;
 
-    if (node->type == VFS_NODE_DIRECTORY && node->first_child != NULL) {
+    /* Check if directory has children without -r */
+    if (node->type == VFS_NODE_DIRECTORY && node->first_child != NULL && !recursive) {
         return -2; /* Directory not empty */
     }
 
-    vfs_node_t *parent = node->parent;
-    if (!parent) return -1;
+    /* Check protected status */
+    if (check_node_protected_recursive(node) && !force) {
+        return -4; /* Targeted directory is protected! Needs -f */
+    }
 
+    vfs_node_t *parent = node->parent;
+    if (!parent) return -3;
+
+    /* Unlink from parent's children list */
     if (parent->first_child == node) {
         parent->first_child = node->next_sibling;
     } else {
@@ -302,11 +338,12 @@ int vfs_remove_node(const char *path) {
         }
     }
 
-    if (node->content) {
-        kfree(node->content);
-    }
-    kfree(node);
+    free_vfs_subtree(node);
     return 0;
+}
+
+int vfs_remove_node(const char *path) {
+    return vfs_remove_node_ex(path, 0, 0);
 }
 
 int vfs_chdir(const char *path) {
@@ -368,7 +405,6 @@ void vfs_listdir(const char *path) {
     console_printf("  total: %d item(s)\n", count);
 }
 
-/* Helper to convert UEFI CHAR16 string to ASCII */
 static void u16_to_ascii(const CHAR16 *src, char *dst, size_t max_len) {
     size_t i = 0;
     if (!src || !dst || max_len == 0) return;
@@ -379,7 +415,6 @@ static void u16_to_ascii(const CHAR16 *src, char *dst, size_t max_len) {
     dst[i] = '\0';
 }
 
-/* Recursively import UEFI Simple File System directories into VFS */
 static void scan_and_import_uefi_dir(EFI_FILE_PROTOCOL *dir_handle, const char *vfs_parent_path) {
     if (!dir_handle || !vfs_parent_path) return;
 
@@ -388,7 +423,7 @@ static void scan_and_import_uefi_dir(EFI_FILE_PROTOCOL *dir_handle, const char *
         UINTN buf_size = sizeof(info_buffer);
         EFI_STATUS status = dir_handle->Read(dir_handle, &buf_size, info_buffer);
         if (EFI_ERROR(status) || buf_size == 0) {
-            break; /* End of directory */
+            break;
         }
 
         EFI_FILE_INFO *info = (EFI_FILE_INFO *)info_buffer;
@@ -407,9 +442,11 @@ static void scan_and_import_uefi_dir(EFI_FILE_PROTOCOL *dir_handle, const char *
         }
 
         if (info->Attribute & EFI_FILE_DIRECTORY) {
-            vfs_mkdir(item_vfs_path);
+            vfs_node_t *dir_node = vfs_mkdir(item_vfs_path);
+            if (dir_node && (strcasecmp(name, "EFI") == 0 || strcasecmp(name, "protected") == 0)) {
+                dir_node->is_protected = 1;
+            }
 
-            /* Open subdirectory and recurse */
             EFI_FILE_PROTOCOL *sub_dir = NULL;
             status = dir_handle->Open(dir_handle, &sub_dir, info->FileName, EFI_FILE_MODE_READ, 0);
             if (!EFI_ERROR(status) && sub_dir) {
@@ -464,7 +501,12 @@ EFI_STATUS vfs_init(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     /* 3. Ensure standard pseuDOS system directories exist */
     vfs_mkdir("/home");
     vfs_mkdir("/etc");
-    vfs_mkdir("/protected");
+    vfs_node_t *prot = vfs_mkdir("/protected");
+    if (prot) prot->is_protected = 1;
+
+    vfs_node_t *efi_node = vfs_find_node("/EFI");
+    if (efi_node) efi_node->is_protected = 1;
+
     vfs_mkdir("/protected/bootmgr");
     vfs_mkdir("/protected/crit");
     vfs_mkdir("/protected/krnl");

@@ -15,6 +15,7 @@ typedef struct vfs_node {
     size_t size;
     char *content; /* Dynamic buffer for file contents */
     size_t capacity;
+    int is_protected; /* 1 if protected system node requiring -f to delete */
 
     struct vfs_node *parent;
     struct vfs_node *first_child;
@@ -43,6 +44,7 @@ vfs_node_t *vfs_mkdir(const char *path);
 vfs_node_t *vfs_create_file(const char *path);
 int vfs_write_file(const char *path, const char *text, int append);
 int vfs_read_file(const char *path, char *buffer, size_t max_len);
+int vfs_remove_node_ex(const char *path, int recursive, int force);
 int vfs_remove_node(const char *path);
 int vfs_chdir(const char *path);
 const char *vfs_getcwd(void);

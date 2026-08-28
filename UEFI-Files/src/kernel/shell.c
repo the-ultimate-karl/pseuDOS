@@ -15,7 +15,7 @@ static void cmd_help(void) {
     console_puts("mkdir             :     create a new directory in filesystem\n");
     console_puts("touch             :     create an empty file\n");
     console_puts("write             :     write or append text to a file\n");
-    console_puts("del               :     delete a file or empty directory\n");
+    console_puts("del               :     delete a file or directory (-r, -f, -rf)\n");
     console_puts("cpu               :     display cpu model, vendor, and feature flags\n");
     console_puts("mem               :     display physical memory map and statistics\n");
     console_puts("pci               :     scan and list connected pci bus devices\n");
@@ -50,7 +50,6 @@ static void cmd_devpath(const char *arg) {
         devpath_set_mode(DEVPATH_MODE_SOFTWARE);
         console_puts("file path changed to absolute software path\n");
     } else {
-        /* Cycle if unrecognized */
         devpath_mode_t cur = devpath_get_mode();
         if (cur == DEVPATH_MODE_FIRMWARE) {
             devpath_set_mode(DEVPATH_MODE_HARDWARE);
@@ -148,19 +147,63 @@ static void cmd_write(const char *arg) {
 static void cmd_del(const char *arg) {
     if (!arg || arg[0] == '\0') {
         console_puts("del: missing operand\n");
+        console_puts("usage: del [-r] [-f] <path>\n");
         return;
     }
-    int res = vfs_remove_node(arg);
+
+    int recursive = 0;
+    int force = 0;
+    char target_path[256];
+    target_path[0] = '\0';
+
+    char buf[256];
+    strncpy(buf, arg, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *token = buf;
+    while (*token) {
+        while (*token == ' ') token++;
+        if (*token == '\0') break;
+
+        char *next_space = strchr(token, ' ');
+        if (next_space) {
+            *next_space = '\0';
+        }
+
+        if (token[0] == '-') {
+            for (size_t i = 1; token[i] != '\0'; i++) {
+                if (token[i] == 'r' || token[i] == 'R') recursive = 1;
+                else if (token[i] == 'f' || token[i] == 'F') force = 1;
+            }
+        } else {
+            strncpy(target_path, token, sizeof(target_path) - 1);
+            target_path[sizeof(target_path) - 1] = '\0';
+        }
+
+        if (!next_space) break;
+        token = next_space + 1;
+    }
+
+    if (target_path[0] == '\0') {
+        console_puts("del: missing file or directory operand\n");
+        return;
+    }
+
+    int res = vfs_remove_node_ex(target_path, recursive, force);
     if (res == -1) {
-        console_printf("del: cannot remove '%s': no such file or directory\n", arg);
+        console_printf("del: cannot remove '%s': no such file or directory\n", target_path);
     } else if (res == -2) {
-        console_printf("del: cannot remove '%s': directory not empty\n", arg);
+        console_printf("del: cannot remove '%s': directory not empty\n", target_path);
+    } else if (res == -3) {
+        console_printf("del: cannot remove '%s': invalid argument\n", target_path);
+    } else if (res == -4) {
+        console_puts("del: targeted directory is protected! use the force (-f) flag to override.\n");
     }
 }
 
 static void cmd_halt(void) {
     console_puts("halt instruction executed!\n");
-    console_puts("system halted!\n");
+    console_puts("System halted!\n");
 
     __asm__ volatile ("cli");
     while (1) {
@@ -203,7 +246,6 @@ void shell_run(EFI_SYSTEM_TABLE *SystemTable) {
             continue;
         }
 
-        /* Split command name and argument */
         char *arg = strchr(cmd, ' ');
         if (arg) {
             *arg = '\0';

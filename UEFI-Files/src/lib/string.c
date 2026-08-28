@@ -124,6 +124,11 @@ char *strrchr(const char *s, int c) {
     return (c == 0) ? (char *)s : (char *)last;
 }
 
+__attribute__((weak)) void *kmalloc(size_t size) {
+    (void)size;
+    return NULL;
+}
+
 char *strdup(const char *s) {
     if (!s) return NULL;
     size_t len = strlen(s);

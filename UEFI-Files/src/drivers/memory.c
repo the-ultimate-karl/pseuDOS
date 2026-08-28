@@ -26,7 +26,6 @@ void memory_print_info(EFI_SYSTEM_TABLE *SystemTable) {
         return;
     }
 
-    /* Allocate buffer with extra margin for memory allocation itself */
     memory_map_size += 2 * descriptor_size;
     uint8_t *map_buf = (uint8_t *)kmalloc(memory_map_size);
     if (!map_buf) {
@@ -53,7 +52,8 @@ void memory_print_info(EFI_SYSTEM_TABLE *SystemTable) {
     uint64_t boot_services_bytes = 0;
     uint64_t runtime_services_bytes = 0;
     uint64_t acpi_bytes = 0;
-    uint64_t reserved_mmio_bytes = 0;
+    uint64_t pcie_mmio_bytes = 0;
+    uint64_t reserved_memory_bytes = 0;
     uint32_t descriptor_count = 0;
 
     size_t num_entries = memory_map_size / descriptor_size;
@@ -84,12 +84,18 @@ void memory_print_info(EFI_SYSTEM_TABLE *SystemTable) {
                 acpi_bytes += size_bytes;
                 total_system_bytes += size_bytes;
                 break;
-            case EfiReservedMemoryType:
             case EfiMemoryMappedIO:
             case EfiMemoryMappedIOPortSpace:
+                pcie_mmio_bytes += size_bytes;
+                break;
+            case EfiReservedMemoryType:
             case EfiUnusableMemory:
             default:
-                reserved_mmio_bytes += size_bytes;
+                if (size_bytes >= (1024ULL * 1024ULL * 1024ULL)) {
+                    pcie_mmio_bytes += size_bytes;
+                } else {
+                    reserved_memory_bytes += size_bytes;
+                }
                 break;
         }
     }
@@ -102,7 +108,12 @@ void memory_print_info(EFI_SYSTEM_TABLE *SystemTable) {
     console_printf("  boot services ram : %lu mb (%lu bytes)\n", boot_services_bytes / (1024 * 1024), boot_services_bytes);
     console_printf("  runtime svcs ram  : %lu kb (%lu bytes)\n", runtime_services_bytes / 1024, runtime_services_bytes);
     console_printf("  acpi tables / nvs : %lu kb (%lu bytes)\n", acpi_bytes / 1024, acpi_bytes);
-    console_printf("  reserved / mmio   : %lu mb (%lu bytes)\n", reserved_mmio_bytes / (1024 * 1024), reserved_mmio_bytes);
+    if (pcie_mmio_bytes > 0) {
+        console_printf("  pcie mmio aperture: %lu mb (%lu bytes) [bus address space]\n", pcie_mmio_bytes / (1024 * 1024), pcie_mmio_bytes);
+    }
+    if (reserved_memory_bytes > 0) {
+        console_printf("  reserved memory   : %lu kb (%lu bytes)\n", reserved_memory_bytes / 1024, reserved_memory_bytes);
+    }
     console_printf("  memory map descs  : %u entries (descriptor size: %lu bytes)\n", descriptor_count, descriptor_size);
     console_printf("  kernel heap used  : %lu kb / %lu kb total\n", heap_get_used() / 1024, heap_get_total() / 1024);
 }

@@ -6,3 +6,7 @@
 *.md
 *.log
 *.txt
+UEFI-Bootlogs/
+__pycache__/
+*.gitignore
+AGENTS.md

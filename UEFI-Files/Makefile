@@ -14,30 +14,43 @@ CFLAGS = -ffreestanding \
          -Wextra \
          -Iinclude
 
-LDFLAGS = -nostdlib \
-          -m i386pep \
-          --subsystem 10 \
-          --image-base 0x10000000 \
-          --file-alignment 0x1000 \
-          --section-alignment 0x1000 \
-          -e efi_main
+LDFLAGS_BOOT = -nostdlib \
+               -m i386pep \
+               --subsystem 10 \
+               --image-base 0x10000000 \
+               --file-alignment 0x1000 \
+               --section-alignment 0x1000 \
+               -e efi_main
 
-SRCS = src/boot/bootloader.c \
-       src/boot/errtext.c \
-       src/lib/string.c \
-       src/lib/heap.c \
-       src/fs/vfs.c \
-       src/fs/devpath.c \
-       src/drivers/console.c \
-       src/drivers/keyboard.c \
-       src/drivers/cpu.c \
-       src/drivers/memory.c \
-       src/drivers/pci.c \
-       src/drivers/acpi.c \
-       src/kernel/kernel.c \
-       src/kernel/shell.c
+LDFLAGS_KERNEL = -nostdlib \
+                 -m i386pep \
+                 --subsystem 10 \
+                 --image-base 0x10000000 \
+                 --file-alignment 0x1000 \
+                 --section-alignment 0x1000 \
+                 -e kernel_main
 
-OBJS = $(patsubst src/%.c, bin/%.o, $(SRCS))
+BOOT_SRCS = src/boot/bootloader.c \
+            src/boot/errtext.c \
+            src/lib/string.c \
+            src/lib/guid.c
+
+KERNEL_SRCS = src/kernel/kernel.c \
+              src/kernel/shell.c \
+              src/fs/vfs.c \
+              src/fs/devpath.c \
+              src/lib/heap.c \
+              src/lib/string.c \
+              src/lib/guid.c \
+              src/drivers/console.c \
+              src/drivers/keyboard.c \
+              src/drivers/cpu.c \
+              src/drivers/memory.c \
+              src/drivers/pci.c \
+              src/drivers/acpi.c
+
+BOOT_OBJS = $(patsubst src/%.c, bin/%.o, $(BOOT_SRCS))
+KERNEL_OBJS = $(patsubst src/%.c, bin/%.o, $(KERNEL_SRCS))
 
 TARGET_EFI = bin/BOOTX64.EFI
 TARGET_KERNEL = bin/kernel.bin
@@ -53,13 +66,13 @@ $(TARGET_ISO): $(TARGET_EFI) $(TARGET_KERNEL)
 	@mkdir -p build
 	$(PYTHON) scripts/make_iso.py --efi $(TARGET_EFI) --kernel $(TARGET_KERNEL) --iso $(TARGET_ISO)
 
-$(TARGET_EFI): $(OBJS)
+$(TARGET_EFI): $(BOOT_OBJS)
 	@mkdir -p bin
-	$(LD) $(LDFLAGS) -o $@ $^
+	$(LD) $(LDFLAGS_BOOT) -o $@ $^
 
-$(TARGET_KERNEL): $(TARGET_EFI)
+$(TARGET_KERNEL): $(KERNEL_OBJS)
 	@mkdir -p bin
-	@cp $(TARGET_EFI) $(TARGET_KERNEL)
+	$(LD) $(LDFLAGS_KERNEL) -o $@ $^
 
 bin/boot/%.o: src/boot/%.c
 	@mkdir -p bin/boot

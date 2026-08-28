@@ -1,7 +1,8 @@
 #include "efi.h"
 #include "errtext.h"
-#include "kernel.h"
 #include "io.h"
+
+typedef EFI_STATUS (EFIAPI *EFI_IMAGE_ENTRY_POINT)(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable);
 
 /*
  * Check basic x86_64 CPU features using CPUID instruction
@@ -79,14 +80,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         SystemTable->ConOut->ClearScreen(SystemTable->ConOut);
     }
 
-    boot_msg(SystemTable, "\n[bootmgfw] pseuDOS 64-bit uefi boot manager v1.0\n");
-    boot_msg(SystemTable, "[bootmgfw] initializing uefi firmware environment...\n");
+    boot_msg(SystemTable, "\n[bootmgfw] pseuDOS 64-bit UEFI Boot Manager v1.0\n");
+    boot_msg(SystemTable, "[bootmgfw] initializing UEFI Firmware environment...\n");
 
     /* 1. Validate System Table */
-    boot_msg(SystemTable, "[bootmgfw] validating uefi system table and boot services... [ok]\n");
+    boot_msg(SystemTable, "[bootmgfw] validating UEFI system table and boot services... [ok]\n");
 
     /* 2. Disable Watchdog Timer */
-    boot_msg(SystemTable, "[bootmgfw] disabling uefi watchdog timer... ");
+    boot_msg(SystemTable, "[bootmgfw] disabling UEFI watchdog timer... ");
     if (SystemTable->BootServices->SetWatchdogTimer) {
         SystemTable->BootServices->SetWatchdogTimer(0, 0, 0, NULL);
         boot_msg(SystemTable, "[ok]\n");
@@ -116,7 +117,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     if (EFI_ERROR(status) || !loaded_image || !loaded_image->DeviceHandle) {
         boot_msg(SystemTable, "[failed]\n");
-        error_boot(SystemTable, ERR_STORAGE_DEVICE_IO, "failed to query efi_loaded_image_protocol for boot device");
+        error_boot(SystemTable, ERR_STORAGE_DEVICE_IO, "failed to query EFI_LOADED_IMAGE_PROTOCOL for boot device");
     }
     boot_msg(SystemTable, "[ok]\n");
 
@@ -131,7 +132,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     if (EFI_ERROR(status) || !sfs) {
         boot_msg(SystemTable, "[failed]\n");
-        error_boot(SystemTable, ERR_KERNEL_MOUNT_FAILED, "failed to open efi_simple_file_system_protocol on boot volume");
+        error_boot(SystemTable, ERR_KERNEL_MOUNT_FAILED, "failed to open EFI_SIMPLE_FILE_SYSTEM_PROTOCOL on boot volume");
     }
 
     EFI_FILE_PROTOCOL *root_dir = NULL;
@@ -162,11 +163,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     boot_msg(SystemTable, "[bootmgfw] found kernel! loading kernel... [ok]\n");
 
-    /* 8. Allocate Physical Memory Pages for Kernel */
+    /* 8. Read Kernel Binary */
     boot_msg(SystemTable, "[bootmgfw] allocating physical memory pages for kernel... ");
 
     EFI_PHYSICAL_ADDRESS kernel_buffer = 0;
-    UINTN pages = 64;
+    UINTN pages = 128; /* 512KB */
     status = SystemTable->BootServices->AllocatePages(
         AllocateAnyPages,
         EfiLoaderCode,
@@ -186,11 +187,19 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     boot_msg(SystemTable, "[ok]\n");
 
-    /* 9. Transfer Execution to Kernel */
+    /* 9. Execute Kernel Entry Point */
     boot_msg(SystemTable, "[bootmgfw] transferring execution to pseuDOS kernel...\n\n");
     boot_msg(SystemTable, "====================================\n\n");
 
-    kernel_main(ImageHandle, SystemTable);
+    uint8_t *raw = (uint8_t *)(uintptr_t)kernel_buffer;
+    uint32_t pe_offset = *(uint32_t *)(raw + 0x3C);
+    if (raw[pe_offset] == 'P' && raw[pe_offset + 1] == 'E') {
+        uint32_t entry_rva = *(uint32_t *)(raw + pe_offset + 0x28);
+        EFI_IMAGE_ENTRY_POINT entry = (EFI_IMAGE_ENTRY_POINT)(raw + entry_rva);
+        entry(ImageHandle, SystemTable);
+    } else {
+        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "invalid PE32+ header signature in kernel.bin");
+    }
 
     error_boot(SystemTable, ERR_GENERIC_BOOT_FAILURE, "pseuDOS kernel unexpectedly exited to bootloader");
 

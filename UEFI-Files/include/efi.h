@@ -21,6 +21,14 @@ typedef uint8_t   CHAR8;
 typedef uint8_t   BOOLEAN;
 typedef void      VOID;
 
+#ifndef TRUE
+#define TRUE  1
+#endif
+
+#ifndef FALSE
+#define FALSE 0
+#endif
+
 typedef UINT64    EFI_STATUS;
 typedef VOID*     EFI_HANDLE;
 typedef VOID*     EFI_EVENT;
@@ -397,6 +405,21 @@ typedef EFI_STATUS (EFIAPI *EFI_FREE_POOL)(
     VOID *Buffer
 );
 
+typedef EFI_STATUS (EFIAPI *EFI_IMAGE_LOAD)(
+    BOOLEAN BootPolicy,
+    EFI_HANDLE ParentImageHandle,
+    EFI_DEVICE_PATH_PROTOCOL *FilePath,
+    VOID *SourceBuffer,
+    UINTN SourceSize,
+    EFI_HANDLE *ImageHandle
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_IMAGE_START)(
+    EFI_HANDLE ImageHandle,
+    UINTN *ExitDataSize,
+    CHAR16 **ExitData
+);
+
 typedef EFI_STATUS (EFIAPI *EFI_SET_WATCHDOG_TIMER)(
     UINTN Timeout,
     UINT64 WatchdogCode,
@@ -433,8 +456,8 @@ typedef struct _EFI_BOOT_SERVICES {
     VOID                            *LocateHandle;
     VOID                            *LocateDevicePath;
     VOID                            *InstallConfigurationTable;
-    VOID                            *LoadImage;
-    VOID                            *StartImage;
+    EFI_IMAGE_LOAD                  LoadImage;
+    EFI_IMAGE_START                 StartImage;
     VOID                            *Exit;
     VOID                            *UnloadImage;
     EFI_EXIT_BOOT_SERVICES          ExitBootServices;
