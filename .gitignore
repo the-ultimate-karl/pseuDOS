@@ -1,0 +1,8 @@
+*.bin
+*.o
+*.so
+*.elf
+*.pyc
+*.md
+*.log
+*.txt
