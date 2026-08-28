@@ -1,94 +1,35 @@
 #include "fs.h"
 #include "lib.h"
 
-const EFI_GUID gEfiLoadedImageProtocolGuid = {
-    0x5B1B31A1, 0x9562, 0x11D2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}
-};
+const EFI_GUID gEfiLoadedImageProtocolGuid =
+    { 0x5B1B31A1, 0x9562, 0x11D2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B} };
 
-const EFI_GUID gEfiDevicePathProtocolGuid = {
-    0x09576E91, 0x6D3F, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}
-};
+const EFI_GUID gEfiDevicePathProtocolGuid =
+    { 0x09576E91, 0x6D3F, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B} };
 
-const EFI_GUID gEfiDevicePathToTextProtocolGuid = {
-    0x8B843E20, 0x8132, 0x4852, {0x90, 0xCC, 0x55, 0x1A, 0x4E, 0x4A, 0x7F, 0x1C}
-};
+const EFI_GUID gEfiDevicePathToTextProtocolGuid =
+    { 0x8B843E20, 0x8132, 0x4852, {0x90, 0xCC, 0x55, 0x1A, 0x4E, 0x4A, 0x7F, 0x1C} };
+
+const EFI_GUID gEfiSimpleFileSystemProtocolGuid =
+    { 0x0964E5B22, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B} };
+
+const EFI_GUID gEfiFileInfoGuid =
+    { 0x09576E92, 0x6D3F, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B} };
 
 BootLocationInfo g_boot_location = {
-    .partition_path = "\\EFI\\BOOT\\BOOTX64.EFI",
-    .hardware_path = "PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)/HD(1,GPT)/\\EFI\\BOOT\\BOOTX64.EFI",
-    .use_hardware_path = 0
+    .base_hardware_path = "PciRoot(0x0)/Pci(0x1,0x1)/Ata(0x0)/CDROM(0x0)",
+    .partition_boot_file = "\\EFI\\pseuDOS\\kernel.bin",
+    .mode = DEVPATH_MODE_FIRMWARE
 };
 
-/* Convert Unicode CHAR16 to ASCII */
 static void unicode_to_ascii(const CHAR16 *src, char *dst, size_t max_len) {
-    if (!src || !dst || max_len == 0) return;
     size_t i = 0;
+    if (!src || !dst || max_len == 0) return;
     while (src[i] != 0 && i + 1 < max_len) {
         dst[i] = (char)(src[i] & 0x7F);
         i++;
     }
     dst[i] = '\0';
-}
-
-/* Parse a Device Path Node manually into text */
-static void manual_device_path_to_text(const EFI_DEVICE_PATH_PROTOCOL *dp, char *out, size_t max_len) {
-    out[0] = '\0';
-    if (!dp) return;
-
-    const EFI_DEVICE_PATH_PROTOCOL *node = dp;
-    while (node && node->Type != EFI_DEVICE_PATH_TYPE_END) {
-        UINT16 length = (UINT16)(node->Length[0] | (node->Length[1] << 8));
-        if (length < 4) break;
-
-        char seg[128];
-        seg[0] = '\0';
-
-        if (node->Type == EFI_DEVICE_PATH_TYPE_HARDWARE) {
-            if (node->SubType == 0x01) { /* PCI */
-                const UINT8 *data = (const UINT8 *)node;
-                UINT8 func = data[4];
-                UINT8 dev = data[5];
-                snprintf(seg, sizeof(seg), "/Pci(0x%x,0x%x)", dev, func);
-            }
-        } else if (node->Type == EFI_DEVICE_PATH_TYPE_ACPI) {
-            if (node->SubType == 0x01) { /* ACPI HID */
-                snprintf(seg, sizeof(seg), "PciRoot(0x0)");
-            }
-        } else if (node->Type == EFI_DEVICE_PATH_TYPE_MESSAGING) {
-            if (node->SubType == 0x01) { /* ATAPI */
-                const UINT8 *data = (const UINT8 *)node;
-                snprintf(seg, sizeof(seg), "/Ata(%s,%s,0x%x)",
-                         (data[4] == 0) ? "Primary" : "Secondary",
-                         (data[5] == 0) ? "Master" : "Slave",
-                         data[6]);
-            } else if (node->SubType == 0x17) { /* NVMe */
-                snprintf(seg, sizeof(seg), "/NVMe(0x1)");
-            } else if (node->SubType == 0x05) { /* USB */
-                snprintf(seg, sizeof(seg), "/USB(0x0)");
-            }
-        } else if (node->Type == EFI_DEVICE_PATH_TYPE_MEDIA) {
-            if (node->SubType == 0x01) { /* Hard Drive Partition */
-                const UINT8 *data = (const UINT8 *)node;
-                UINT32 part_num = *(const UINT32 *)(data + 4);
-                snprintf(seg, sizeof(seg), "/HD(%u,GPT)", part_num);
-            } else if (node->SubType == 0x02) { /* CD-ROM */
-                snprintf(seg, sizeof(seg), "/CDROM(0x1)");
-            } else if (node->SubType == 0x04) { /* File Path */
-                const CHAR16 *path16 = (const CHAR16 *)((const UINT8 *)node + 4);
-                char path_ascii[128];
-                unicode_to_ascii(path16, path_ascii, sizeof(path_ascii));
-                snprintf(seg, sizeof(seg), "/%s", path_ascii);
-            }
-        }
-
-        if (seg[0] != '\0') {
-            if (strlen(out) + strlen(seg) < max_len - 1) {
-                strcat(out, seg);
-            }
-        }
-
-        node = (const EFI_DEVICE_PATH_PROTOCOL *)((const UINT8 *)node + length);
-    }
 }
 
 EFI_STATUS fs_init_boot_location(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
@@ -101,61 +42,93 @@ EFI_STATUS fs_init_boot_location(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Syste
         (VOID **)&loaded_image
     );
 
-    if (EFI_ERROR(status) || !loaded_image) {
-        return status;
-    }
+    if (!EFI_ERROR(status) && loaded_image) {
+        /* Extract FilePath if present */
+        if (loaded_image->FilePath) {
+            EFI_DEVICE_PATH_PROTOCOL *dp = loaded_image->FilePath;
+            while (dp && dp->Type != EFI_DEVICE_PATH_TYPE_END) {
+                if (dp->Type == EFI_DEVICE_PATH_TYPE_MEDIA && dp->SubType == 0x04) {
+                    const CHAR16 *file_str = (const CHAR16 *)((const uint8_t *)dp + 4);
+                    unicode_to_ascii(file_str, g_boot_location.partition_boot_file, sizeof(g_boot_location.partition_boot_file));
+                    break;
+                }
+                uint16_t len = (uint16_t)(dp->Length[0] | (dp->Length[1] << 8));
+                if (len < 4) break;
+                dp = (EFI_DEVICE_PATH_PROTOCOL *)((uint8_t *)dp + len);
+            }
+        }
 
-    /* Extract Partition File Path from FilePath device path node */
-    if (loaded_image->FilePath) {
-        char fpath[256];
-        manual_device_path_to_text(loaded_image->FilePath, fpath, sizeof(fpath));
-        if (fpath[0] != '\0') {
-            if (fpath[0] == '/') {
-                /* Format as Windows/DOS backslash path */
-                for (size_t i = 0; fpath[i]; i++) {
-                    if (fpath[i] == '/') fpath[i] = '\\';
+        /* Check DeviceHandle for hardware device path */
+        if (loaded_image->DeviceHandle) {
+            EFI_DEVICE_PATH_PROTOCOL *dev_dp = NULL;
+            status = SystemTable->BootServices->HandleProtocol(
+                loaded_image->DeviceHandle,
+                &gEfiDevicePathProtocolGuid,
+                (VOID **)&dev_dp
+            );
+
+            if (!EFI_ERROR(status) && dev_dp) {
+                EFI_DEVICE_PATH_TO_TEXT_PROTOCOL *dp_to_text = NULL;
+                status = SystemTable->BootServices->LocateProtocol(
+                    &gEfiDevicePathToTextProtocolGuid,
+                    NULL,
+                    (VOID **)&dp_to_text
+                );
+
+                if (!EFI_ERROR(status) && dp_to_text && dp_to_text->ConvertDevicePathToText) {
+                    CHAR16 *text_u16 = dp_to_text->ConvertDevicePathToText(dev_dp, 1, 0);
+                    if (text_u16) {
+                        unicode_to_ascii(text_u16, g_boot_location.base_hardware_path, sizeof(g_boot_location.base_hardware_path));
+                    }
                 }
             }
-            strncpy(g_boot_location.partition_path, fpath, sizeof(g_boot_location.partition_path) - 1);
         }
     }
 
-    /* Extract Absolute Hardware Device Path */
-    char dev_text[256] = "";
-    if (loaded_image->DeviceHandle) {
-        EFI_DEVICE_PATH_PROTOCOL *dev_path = NULL;
-        status = SystemTable->BootServices->HandleProtocol(
-            loaded_image->DeviceHandle,
-            &gEfiDevicePathProtocolGuid,
-            (VOID **)&dev_path
-        );
-
-        if (!EFI_ERROR(status) && dev_path) {
-            manual_device_path_to_text(dev_path, dev_text, sizeof(dev_text));
-        }
-    }
-
-    if (dev_text[0] != '\0') {
-        snprintf(g_boot_location.hardware_path, sizeof(g_boot_location.hardware_path),
-                 "%s/%s", dev_text, g_boot_location.partition_path);
-    } else {
-        snprintf(g_boot_location.hardware_path, sizeof(g_boot_location.hardware_path),
-                 "PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)/HD(1,GPT)/%s",
-                 g_boot_location.partition_path);
-    }
-
-    g_boot_location.use_hardware_path = 0; /* Default to partition path */
     return EFI_SUCCESS;
 }
 
-const char *fs_get_active_path(void) {
-    if (g_boot_location.use_hardware_path) {
-        return g_boot_location.hardware_path;
-    }
-    return g_boot_location.partition_path;
+void devpath_set_mode(devpath_mode_t mode) {
+    g_boot_location.mode = mode;
 }
 
-int fs_toggle_path_mode(void) {
-    g_boot_location.use_hardware_path = !g_boot_location.use_hardware_path;
-    return g_boot_location.use_hardware_path;
+devpath_mode_t devpath_get_mode(void) {
+    return g_boot_location.mode;
+}
+
+void fs_get_prompt_path(char *out_buf, size_t max_len) {
+    if (!out_buf || max_len == 0) return;
+
+    const char *cwd = vfs_getcwd();
+
+    /* Convert cwd to DOS-style backslashes for firmware and hardware modes */
+    char dos_cwd[256];
+    size_t i = 0;
+    while (cwd[i] != '\0' && i < sizeof(dos_cwd) - 1) {
+        dos_cwd[i] = (cwd[i] == '/') ? '\\' : cwd[i];
+        i++;
+    }
+    dos_cwd[i] = '\0';
+    if (dos_cwd[0] == '\0') {
+        dos_cwd[0] = '\\';
+        dos_cwd[1] = '\0';
+    }
+
+    switch (g_boot_location.mode) {
+        case DEVPATH_MODE_HARDWARE:
+            if (strcmp(dos_cwd, "\\") == 0) {
+                snprintf(out_buf, max_len, "%s\\", g_boot_location.base_hardware_path);
+            } else {
+                snprintf(out_buf, max_len, "%s%s", g_boot_location.base_hardware_path, dos_cwd);
+            }
+            break;
+        case DEVPATH_MODE_SOFTWARE:
+            strncpy(out_buf, cwd, max_len - 1);
+            break;
+        case DEVPATH_MODE_FIRMWARE:
+        default:
+            strncpy(out_buf, dos_cwd, max_len - 1);
+            break;
+    }
+    out_buf[max_len - 1] = '\0';
 }

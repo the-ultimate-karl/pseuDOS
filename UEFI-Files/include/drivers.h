@@ -20,4 +20,8 @@ void cpu_print_info(void);
 void memory_print_info(EFI_SYSTEM_TABLE *SystemTable);
 void pci_scan_bus(void);
 
+/* Power Management */
+void acpi_reboot(EFI_SYSTEM_TABLE *SystemTable);
+void acpi_shutdown(EFI_SYSTEM_TABLE *SystemTable);
+
 #endif /* DRIVERS_H */

@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 #!/usr/bin/env python3
 import struct
 import os
@@ -6,7 +7,7 @@ import subprocess
 import tempfile
 import argparse
 
-def make_fat12_esp(output_path, efi_binary_path, size_kb=2880):
+def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_kb=2880):
     sector_size = 512
     total_sectors = (size_kb * 1024) // sector_size
     sec_per_clus = 2
@@ -77,17 +78,25 @@ def make_fat12_esp(output_path, efi_binary_path, size_kb=2880):
     with open(efi_binary_path, "rb") as f:
         efi_data = f.read()
 
+    kernel_data = None
+    if kernel_binary_path and os.path.exists(kernel_binary_path):
+        with open(kernel_binary_path, "rb") as f:
+            kernel_data = f.read()
+
     efi_clus = alloc(1)
     boot_clus = alloc(1)
+    pseudos_clus = alloc(1) if kernel_data else 0
     
     root_off = (rsvd_sec + num_fats * sec_per_fat) * sector_size
     image[root_off:root_off+32] = mkentry("EFI        ", 0x10, efi_clus, 0)
     
-    # EFI dir
+    # EFI dir contains BOOT and PSEUDOS subdirectories
     d = bytearray(sec_per_clus * sector_size)
     d[0:32] = mkentry(".          ", 0x10, efi_clus, 0)
     d[32:64] = mkentry("..         ", 0x10, 0, 0)
     d[64:96] = mkentry("BOOT       ", 0x10, boot_clus, 0)
+    if kernel_data:
+        d[96:128] = mkentry("PSEUDOS    ", 0x10, pseudos_clus, 0)
     write_clus(efi_clus, d)
     
     # BOOT dir with BOOTX64.EFI
@@ -100,6 +109,18 @@ def make_fat12_esp(output_path, efi_binary_path, size_kb=2880):
     d2[32:64] = mkentry("..         ", 0x10, efi_clus, 0)
     d2[64:96] = mkentry("BOOTX64 EFI", 0x20, c_start, len(efi_data))
     write_clus(boot_clus, d2)
+
+    # PSEUDOS dir with KERNEL.BIN
+    if kernel_data:
+        k_cnt = (len(kernel_data) + sec_per_clus * sector_size - 1) // (sec_per_clus * sector_size)
+        k_start = alloc(k_cnt)
+        write_clus(k_start, kernel_data)
+
+        d3 = bytearray(sec_per_clus * sector_size)
+        d3[0:32] = mkentry(".          ", 0x10, pseudos_clus, 0)
+        d3[32:64] = mkentry("..         ", 0x10, efi_clus, 0)
+        d3[64:96] = mkentry("KERNEL  BIN", 0x20, k_start, len(kernel_data))
+        write_clus(pseudos_clus, d3)
     
     fat1_off = rsvd_sec * sector_size
     fat2_off = (rsvd_sec + sec_per_fat) * sector_size
@@ -112,6 +133,7 @@ def make_fat12_esp(output_path, efi_binary_path, size_kb=2880):
 def main():
     parser = argparse.ArgumentParser(description="Create UEFI El Torito Bootable ISO")
     parser.add_argument("--efi", required=True, help="Path to BOOTX64.EFI")
+    parser.add_argument("--kernel", required=False, help="Path to kernel.bin")
     parser.add_argument("--iso", required=True, help="Output ISO path")
     args = parser.parse_args()
 
@@ -123,7 +145,7 @@ def main():
         os.makedirs(iso_root, exist_ok=True)
         efiboot_img = os.path.join(iso_root, "efiboot.img")
 
-        make_fat12_esp(efiboot_img, args.efi)
+        make_fat12_esp(efiboot_img, args.efi, args.kernel)
 
         cmd = [
             "genisoimage",

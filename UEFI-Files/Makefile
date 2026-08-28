@@ -25,18 +25,22 @@ LDFLAGS = -nostdlib \
 SRCS = src/boot/bootloader.c \
        src/boot/errtext.c \
        src/lib/string.c \
+       src/lib/heap.c \
+       src/fs/vfs.c \
        src/fs/devpath.c \
        src/drivers/console.c \
        src/drivers/keyboard.c \
        src/drivers/cpu.c \
        src/drivers/memory.c \
        src/drivers/pci.c \
+       src/drivers/acpi.c \
        src/kernel/kernel.c \
        src/kernel/shell.c
 
 OBJS = $(patsubst src/%.c, bin/%.o, $(SRCS))
 
 TARGET_EFI = bin/BOOTX64.EFI
+TARGET_KERNEL = bin/kernel.bin
 TARGET_ISO = build/pseuDOS.iso
 
 OVMF_BIOS ?= /usr/share/ovmf/OVMF.fd
@@ -45,13 +49,17 @@ OVMF_BIOS ?= /usr/share/ovmf/OVMF.fd
 
 all: $(TARGET_ISO)
 
-$(TARGET_ISO): $(TARGET_EFI)
+$(TARGET_ISO): $(TARGET_EFI) $(TARGET_KERNEL)
 	@mkdir -p build
-	$(PYTHON) scripts/make_iso.py --efi $(TARGET_EFI) --iso $(TARGET_ISO)
+	$(PYTHON) scripts/make_iso.py --efi $(TARGET_EFI) --kernel $(TARGET_KERNEL) --iso $(TARGET_ISO)
 
 $(TARGET_EFI): $(OBJS)
 	@mkdir -p bin
 	$(LD) $(LDFLAGS) -o $@ $^
+
+$(TARGET_KERNEL): $(TARGET_EFI)
+	@mkdir -p bin
+	@cp $(TARGET_EFI) $(TARGET_KERNEL)
 
 bin/boot/%.o: src/boot/%.c
 	@mkdir -p bin/boot
@@ -80,4 +88,4 @@ run-serial: $(TARGET_ISO)
 	qemu-system-x86_64 -display none -serial stdio -bios $(OVMF_BIOS) -cdrom $(TARGET_ISO) -net none
 
 clean:
-	rm -rf bin/boot bin/lib bin/fs bin/drivers bin/kernel bin/*.o bin/*.so bin/*.EFI bin/*.efi build/*.iso build/*.img
+	rm -rf bin/boot bin/lib bin/fs bin/drivers bin/kernel bin/*.o bin/*.so bin/*.EFI bin/*.efi bin/*.bin build/*.iso build/*.img

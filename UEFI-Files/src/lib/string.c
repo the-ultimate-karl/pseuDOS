@@ -112,6 +112,28 @@ char *strchr(const char *s, int c) {
     return (c == 0) ? (char *)s : NULL;
 }
 
+char *strrchr(const char *s, int c) {
+    if (!s) return NULL;
+    const char *last = NULL;
+    while (*s) {
+        if (*s == (char)c) {
+            last = s;
+        }
+        s++;
+    }
+    return (c == 0) ? (char *)s : (char *)last;
+}
+
+char *strdup(const char *s) {
+    if (!s) return NULL;
+    size_t len = strlen(s);
+    char *copy = (char *)kmalloc(len + 1);
+    if (copy) {
+        memcpy(copy, s, len + 1);
+    }
+    return copy;
+}
+
 char *trim(char *str) {
     if (!str) return NULL;
     while (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n') {

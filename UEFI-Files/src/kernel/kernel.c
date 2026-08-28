@@ -1,21 +1,29 @@
 #include "kernel.h"
 #include "drivers.h"
 #include "fs.h"
+#include "lib.h"
 
-void kernel_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
-    /* Initialize subsystems */
+EFI_STATUS EFIAPI kernel_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
+    if (!SystemTable || !SystemTable->BootServices) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    /* 1. Initialize Dynamic Memory Heap (16MB) */
+    heap_init(SystemTable, 16 * 1024 * 1024);
+
+    /* 2. Initialize Console & Keyboard */
     console_init(SystemTable);
     keyboard_init(SystemTable);
+
+    /* 3. Discover boot location and physical device path */
     fs_init_boot_location(ImageHandle, SystemTable);
 
-    console_printf("pseuDOS Kernel v0.2.0-native (x86_64 UEFI)\n");
-    console_printf("Type 'help' to view available commands.\n\n");
+    /* 4. Initialize Virtual File System with physical storage volume integration */
+    vfs_init(ImageHandle, SystemTable);
 
-    /* Enter interactive kernel shell */
+    /* 5. Initialize & Launch Interactive Kernel Shell */
+    shell_init(SystemTable);
     shell_run(SystemTable);
 
-    /* Should never reach here */
-    while (1) {
-        __asm__ volatile ("cli; hlt");
-    }
+    return EFI_SUCCESS;
 }

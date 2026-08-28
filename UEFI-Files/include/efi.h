@@ -76,6 +76,8 @@ struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
 struct _EFI_BOOT_SERVICES;
 struct _EFI_RUNTIME_SERVICES;
 struct _EFI_DEVICE_PATH_PROTOCOL;
+struct _EFI_FILE_PROTOCOL;
+struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
 
 /* Input Key */
 typedef struct {
@@ -265,6 +267,75 @@ typedef struct {
     VOID                    *Unload;
 } EFI_LOADED_IMAGE_PROTOCOL;
 
+/* File Protocols */
+#define EFI_FILE_MODE_READ      0x0000000000000001ULL
+#define EFI_FILE_MODE_WRITE     0x0000000000000002ULL
+#define EFI_FILE_MODE_CREATE    0x8000000000000000ULL
+
+#define EFI_FILE_READ_ONLY      0x0000000000000001ULL
+#define EFI_FILE_HIDDEN         0x0000000000000002ULL
+#define EFI_FILE_SYSTEM         0x0000000000000004ULL
+#define EFI_FILE_RESERVED       0x0000000000000008ULL
+#define EFI_FILE_DIRECTORY      0x0000000000000010ULL
+#define EFI_FILE_ARCHIVE        0x0000000000000020ULL
+
+typedef struct {
+    UINT64 Size;
+    UINT64 FileSize;
+    UINT64 PhysicalSize;
+    UINT8  CreateTime[16];
+    UINT8  LastAccessTime[16];
+    UINT8  ModificationTime[16];
+    UINT64 Attribute;
+    CHAR16 FileName[1];
+} EFI_FILE_INFO;
+
+typedef struct _EFI_FILE_PROTOCOL {
+    UINT64 Revision;
+    EFI_STATUS (EFIAPI *Open)(
+        struct _EFI_FILE_PROTOCOL *This,
+        struct _EFI_FILE_PROTOCOL **NewHandle,
+        const CHAR16 *FileName,
+        UINT64 OpenMode,
+        UINT64 Attributes
+    );
+    EFI_STATUS (EFIAPI *Close)(struct _EFI_FILE_PROTOCOL *This);
+    EFI_STATUS (EFIAPI *Delete)(struct _EFI_FILE_PROTOCOL *This);
+    EFI_STATUS (EFIAPI *Read)(
+        struct _EFI_FILE_PROTOCOL *This,
+        UINTN *BufferSize,
+        VOID *Buffer
+    );
+    EFI_STATUS (EFIAPI *Write)(
+        struct _EFI_FILE_PROTOCOL *This,
+        UINTN *BufferSize,
+        const VOID *Buffer
+    );
+    EFI_STATUS (EFIAPI *GetPosition)(struct _EFI_FILE_PROTOCOL *This, UINT64 *Position);
+    EFI_STATUS (EFIAPI *SetPosition)(struct _EFI_FILE_PROTOCOL *This, UINT64 Position);
+    EFI_STATUS (EFIAPI *GetInfo)(
+        struct _EFI_FILE_PROTOCOL *This,
+        const EFI_GUID *InformationType,
+        UINTN *BufferSize,
+        VOID *Buffer
+    );
+    EFI_STATUS (EFIAPI *SetInfo)(
+        struct _EFI_FILE_PROTOCOL *This,
+        const EFI_GUID *InformationType,
+        UINTN BufferSize,
+        const VOID *Buffer
+    );
+    EFI_STATUS (EFIAPI *Flush)(struct _EFI_FILE_PROTOCOL *This);
+} EFI_FILE_PROTOCOL;
+
+typedef struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
+    UINT64 Revision;
+    EFI_STATUS (EFIAPI *OpenVolume)(
+        struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *This,
+        EFI_FILE_PROTOCOL **Root
+    );
+} EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
+
 /* Device Path To Text Protocol */
 typedef CHAR16* (EFIAPI *EFI_DEVICE_PATH_TO_TEXT_NODE)(
     const EFI_DEVICE_PATH_PROTOCOL *DeviceNode,
@@ -407,5 +478,7 @@ typedef struct {
 extern const EFI_GUID gEfiLoadedImageProtocolGuid;
 extern const EFI_GUID gEfiDevicePathProtocolGuid;
 extern const EFI_GUID gEfiDevicePathToTextProtocolGuid;
+extern const EFI_GUID gEfiSimpleFileSystemProtocolGuid;
+extern const EFI_GUID gEfiFileInfoGuid;
 
 #endif /* EFI_H */

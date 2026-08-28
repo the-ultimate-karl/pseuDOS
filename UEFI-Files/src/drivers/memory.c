@@ -2,80 +2,107 @@
 #include "lib.h"
 
 void memory_print_info(EFI_SYSTEM_TABLE *SystemTable) {
-    if (!SystemTable || !SystemTable->BootServices || !SystemTable->BootServices->GetMemoryMap) {
-        console_printf("Memory information unavailable (BootServices not present)\n");
+    if (!SystemTable || !SystemTable->BootServices) {
+        console_printf("memory: boot services not available\n");
         return;
     }
 
-    UINT8 map_buffer[16384];
-    UINTN map_size = sizeof(map_buffer);
+    UINTN memory_map_size = 0;
     UINTN map_key = 0;
-    UINTN desc_size = 0;
-    UINT32 desc_ver = 0;
+    UINTN descriptor_size = 0;
+    UINT32 descriptor_version = 0;
 
+    /* Query buffer size needed */
     EFI_STATUS status = SystemTable->BootServices->GetMemoryMap(
-        &map_size,
-        (EFI_MEMORY_DESCRIPTOR *)map_buffer,
+        &memory_map_size,
+        NULL,
         &map_key,
-        &desc_size,
-        &desc_ver
+        &descriptor_size,
+        &descriptor_version
+    );
+
+    if (status != EFI_BUFFER_TOO_SMALL && !EFI_ERROR(status)) {
+        console_printf("memory: failed to query memory map size\n");
+        return;
+    }
+
+    /* Allocate buffer with extra margin for memory allocation itself */
+    memory_map_size += 2 * descriptor_size;
+    uint8_t *map_buf = (uint8_t *)kmalloc(memory_map_size);
+    if (!map_buf) {
+        console_printf("memory: failed to allocate temporary buffer for memory map\n");
+        return;
+    }
+
+    status = SystemTable->BootServices->GetMemoryMap(
+        &memory_map_size,
+        (EFI_MEMORY_DESCRIPTOR *)map_buf,
+        &map_key,
+        &descriptor_size,
+        &descriptor_version
     );
 
     if (EFI_ERROR(status)) {
-        console_printf("Failed to query UEFI memory map (status: 0x%llx)\n", status);
+        console_printf("memory: GetMemoryMap failed (status: 0x%lx)\n", (unsigned long)status);
+        kfree(map_buf);
         return;
     }
 
-    UINT64 total_usable = 0;
-    UINT64 total_boot_services = 0;
-    UINT64 total_runtime_services = 0;
-    UINT64 total_acpi = 0;
-    UINT64 total_reserved = 0;
-    UINT64 total_system_ram = 0;
+    uint64_t total_system_bytes = 0;
+    uint64_t usable_bytes = 0;
+    uint64_t boot_services_bytes = 0;
+    uint64_t runtime_services_bytes = 0;
+    uint64_t acpi_bytes = 0;
+    uint64_t reserved_mmio_bytes = 0;
+    uint32_t descriptor_count = 0;
 
-    UINTN count = map_size / desc_size;
-    for (UINTN i = 0; i < count; i++) {
-        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)(map_buffer + (i * desc_size));
-        UINT64 bytes = desc->NumberOfPages * 4096;
+    size_t num_entries = memory_map_size / descriptor_size;
+    for (size_t i = 0; i < num_entries; i++) {
+        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)(map_buf + (i * descriptor_size));
+        uint64_t size_bytes = desc->NumberOfPages * 4096;
+        descriptor_count++;
 
         switch (desc->Type) {
             case EfiConventionalMemory:
+                usable_bytes += size_bytes;
+                total_system_bytes += size_bytes;
+                break;
             case EfiLoaderCode:
             case EfiLoaderData:
-                total_usable += bytes;
-                total_system_ram += bytes;
-                break;
             case EfiBootServicesCode:
             case EfiBootServicesData:
-                total_boot_services += bytes;
-                total_system_ram += bytes;
+                boot_services_bytes += size_bytes;
+                total_system_bytes += size_bytes;
                 break;
             case EfiRuntimeServicesCode:
             case EfiRuntimeServicesData:
-                total_runtime_services += bytes;
-                total_system_ram += bytes;
+                runtime_services_bytes += size_bytes;
+                total_system_bytes += size_bytes;
                 break;
             case EfiACPIReclaimMemory:
             case EfiACPIMemoryNVS:
-                total_acpi += bytes;
-                total_system_ram += bytes;
+                acpi_bytes += size_bytes;
+                total_system_bytes += size_bytes;
                 break;
             case EfiReservedMemoryType:
             case EfiMemoryMappedIO:
             case EfiMemoryMappedIOPortSpace:
             case EfiUnusableMemory:
             default:
-                total_reserved += bytes;
+                reserved_mmio_bytes += size_bytes;
                 break;
         }
     }
 
-    console_printf("Physical Memory Statistics (UEFI Memory Map):\n");
-    console_printf("  Total System RAM  : %llu MB (%llu bytes)\n", total_system_ram / (1024 * 1024), total_system_ram);
-    console_printf("  Usable / Free RAM : %llu MB (%llu bytes)\n", total_usable / (1024 * 1024), total_usable);
-    console_printf("  Boot Services RAM : %llu MB (%llu bytes)\n", total_boot_services / (1024 * 1024), total_boot_services);
-    console_printf("  Runtime Svcs RAM  : %llu KB (%llu bytes)\n", total_runtime_services / 1024, total_runtime_services);
-    console_printf("  ACPI Tables / NVS : %llu KB (%llu bytes)\n", total_acpi / 1024, total_acpi);
-    console_printf("  Reserved / MMIO   : %llu MB (%llu bytes)\n", total_reserved / (1024 * 1024), total_reserved);
-    console_printf("  Memory Map Descs  : %u entries (descriptor size: %u bytes)\n", (uint32_t)count, (uint32_t)desc_size);
+    kfree(map_buf);
+
+    console_printf("physical memory statistics (uefi memory map):\n");
+    console_printf("  total system ram  : %lu mb (%lu bytes)\n", total_system_bytes / (1024 * 1024), total_system_bytes);
+    console_printf("  usable / free ram : %lu mb (%lu bytes)\n", usable_bytes / (1024 * 1024), usable_bytes);
+    console_printf("  boot services ram : %lu mb (%lu bytes)\n", boot_services_bytes / (1024 * 1024), boot_services_bytes);
+    console_printf("  runtime svcs ram  : %lu kb (%lu bytes)\n", runtime_services_bytes / 1024, runtime_services_bytes);
+    console_printf("  acpi tables / nvs : %lu kb (%lu bytes)\n", acpi_bytes / 1024, acpi_bytes);
+    console_printf("  reserved / mmio   : %lu mb (%lu bytes)\n", reserved_mmio_bytes / (1024 * 1024), reserved_mmio_bytes);
+    console_printf("  memory map descs  : %u entries (descriptor size: %lu bytes)\n", descriptor_count, descriptor_size);
+    console_printf("  kernel heap used  : %lu kb / %lu kb total\n", heap_get_used() / 1024, heap_get_total() / 1024);
 }
