@@ -18,6 +18,7 @@ static void cmd_help(void) {
     console_puts("write             :     write or append text to a file\n");
     console_puts("del               :     delete a file or directory (-r, -f, -rf)\n");
     console_puts("fs                :     display active filesystem and mount information\n");
+    console_puts("screenres         :     adjust or display screen resolution\n");
     console_puts("cpu               :     display CPU model, vendor, and feature flags\n");
     console_puts("mem               :     display physical memory map and statistics\n");
     console_puts("pci               :     scan and list connected PCI / PCIe bus devices\n");
@@ -27,6 +28,80 @@ static void cmd_help(void) {
     console_puts("shutdown          :     perform bare-metal ACPI system power-off\n");
     console_puts("halt              :     halt CPU execution\n");
     console_puts("===========================\n");
+}
+
+static void cmd_screenres(const char *arg) {
+    if (!arg || arg[0] == '\0') {
+        console_printf("active screen resolution: %ux%u\n", fb_get_width(), fb_get_height());
+        console_puts("usage: screenres <width> <height>\n");
+        console_puts("example: screenres 1920 1080\n");
+        return;
+    }
+
+    char w_str[32];
+    char h_str[32];
+    w_str[0] = '\0';
+    h_str[0] = '\0';
+
+    size_t i = 0;
+    size_t w_idx = 0;
+    while (arg[i] != '\0' && arg[i] != ' ' && w_idx < sizeof(w_str) - 1) {
+        w_str[w_idx++] = arg[i++];
+    }
+    w_str[w_idx] = '\0';
+
+    while (arg[i] == ' ') i++;
+
+    size_t h_idx = 0;
+    while (arg[i] != '\0' && arg[i] != ' ' && h_idx < sizeof(h_str) - 1) {
+        h_str[h_idx++] = arg[i++];
+    }
+    h_str[h_idx] = '\0';
+
+    long target_w = strtol(w_str, NULL, 10);
+    long target_h = strtol(h_str, NULL, 10);
+
+    if (target_w <= 0 || target_h <= 0) {
+        console_printf("active screen resolution: %ux%u\n", fb_get_width(), fb_get_height());
+        console_puts("usage: screenres <width> <height>\n");
+        console_puts("example: screenres 1920 1080\n");
+        return;
+    }
+
+    /* Tier 1: Attempt requested resolution */
+    int res = fb_set_resolution((uint32_t)target_w, (uint32_t)target_h);
+    if (res == 0) {
+        console_printf("screenres: successfully switched resolution to %ux%u\n", (uint32_t)target_w, (uint32_t)target_h);
+        return;
+    }
+
+    /* Tier 2: Attempt restoring last known good resolution */
+    console_printf("screenres: failed to switch to %ldx%ld\n", target_w, target_h);
+    console_puts("screenres: switching back to last known good resolution...\n");
+    uint32_t last_w = fb_get_last_good_width();
+    uint32_t last_h = fb_get_last_good_height();
+    res = fb_set_resolution(last_w, last_h);
+    if (res == 0) {
+        console_printf("screenres: successfully switched back to %ux%u\n", last_w, last_h);
+        return;
+    }
+
+    /* Tier 3: Attempt universal Safe-Mode resolution (800x600) */
+    console_puts("screenres: failed to restore last known resolution!\n");
+    console_puts("screenres: recovering in safe-mode (800x600)...\n");
+    res = fb_set_resolution(800, 600);
+    if (res == 0) {
+        console_puts("screenres: successfully recovered in safe-mode 800x600\n");
+        return;
+    }
+
+    /* Tier 4: Fatal Error - System Halt */
+    console_puts("screenres: fatal graphics error: unable to restore video mode!\n");
+    console_puts("screenres: system halted to prevent display corruption.\n");
+    __asm__ volatile ("cli");
+    while (1) {
+        __asm__ volatile ("hlt");
+    }
 }
 
 static void cmd_fs(void) {
@@ -237,14 +312,15 @@ void shell_run(const BootInfo *boot_info) {
     char prompt_buf[512];
     char prompt_path[256];
 
-    console_puts("pseuDOS kernel v0.4.0-baremetal (x86_64 uefi / bare-metal)\n");
-    console_puts("what's new (kernel version 0.4.0):\n");
+    console_puts("pseuDOS kernel v0.4.1-baremetal (x86_64 uefi / bare-metal)\n");
+    console_puts("what's new (kernel version 0.4.1):\n");
+    console_puts("- dynamic runtime screen resolution switcher (screenres) with Multi-Tier fallback\n");
+    console_puts("- seamless text buffer preservation across resolution changes\n");
     console_puts("- full bare-metal execution via ExitBootServices()\n");
-    console_puts("- 1280x720 32-bit linear framebuffer console\n");
-    console_puts("- embedded 8x16 bitmap font engine\n");
+    console_puts("- 1280x720 32-bit linear framebuffer console & 8x16 bitmap font engine\n");
     console_puts("- 64-bit IDT (Interrupt Descriptor Table) & exception handlers\n");
     console_puts("- remapped 8259 PIC & IRQ 1 PS/2 keyboard interrupt driver\n");
-    console_puts("- linux-style 2-stage initramfs in-memory VFS\n");
+    console_puts("- linux-style 2-stage initramfs in-memory VFS & fs inspection command\n");
     console_puts("- physical RAM and PCIe MMIO aperture memory reporting\n");
     console_puts("- bare-metal ACPI shutdown and hardware reboot\n\n");
     console_puts("type 'help' to view available commands.\n\n");
@@ -268,6 +344,8 @@ void shell_run(const BootInfo *boot_info) {
 
         if (strcmp(cmd, "help") == 0) {
             cmd_help();
+        } else if (strcmp(cmd, "screenres") == 0) {
+            cmd_screenres(arg);
         } else if (strcmp(cmd, "fs") == 0 || strcmp(cmd, "mount") == 0 || strcmp(cmd, "df") == 0) {
             cmd_fs();
         } else if (strcmp(cmd, "devpath") == 0) {

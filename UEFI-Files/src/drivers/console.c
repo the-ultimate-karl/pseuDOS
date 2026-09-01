@@ -6,6 +6,11 @@
 #define COLOR_WHITE 0xFFFFFF
 #define COLOR_BLACK 0x000000
 
+#define CONSOLE_BUF_MAX_ROWS 256
+#define CONSOLE_BUF_MAX_COLS 300
+
+static char g_text_buffer[CONSOLE_BUF_MAX_ROWS][CONSOLE_BUF_MAX_COLS];
+
 static uint32_t g_cursor_x = 0;
 static uint32_t g_cursor_y = 0;
 
@@ -54,8 +59,13 @@ void console_init(void) {
         g_max_rows = 25;
     }
 
+    if (g_max_cols > CONSOLE_BUF_MAX_COLS) g_max_cols = CONSOLE_BUF_MAX_COLS;
+    if (g_max_rows > CONSOLE_BUF_MAX_ROWS) g_max_rows = CONSOLE_BUF_MAX_ROWS;
+
     g_cursor_x = 0;
     g_cursor_y = 0;
+    memset(g_text_buffer, 0, sizeof(g_text_buffer));
+
     fb_clear(g_bg_color);
     uart_puts("\033[2J\033[H");
 }
@@ -64,7 +74,40 @@ void console_clear(void) {
     fb_clear(g_bg_color);
     g_cursor_x = 0;
     g_cursor_y = 0;
+    memset(g_text_buffer, 0, sizeof(g_text_buffer));
     uart_puts("\033[2J\033[H");
+}
+
+void console_rebuild_layout(void) {
+    uint32_t w = fb_get_width();
+    uint32_t h = fb_get_height();
+
+    if (w > 0 && h > 0) {
+        g_max_cols = w / FONT_WIDTH;
+        g_max_rows = h / FONT_HEIGHT;
+    } else {
+        g_max_cols = 80;
+        g_max_rows = 25;
+    }
+
+    if (g_max_cols > CONSOLE_BUF_MAX_COLS) g_max_cols = CONSOLE_BUF_MAX_COLS;
+    if (g_max_rows > CONSOLE_BUF_MAX_ROWS) g_max_rows = CONSOLE_BUF_MAX_ROWS;
+
+    /* Wipe the physical video RAM to prevent shearing */
+    fb_clear(g_bg_color);
+
+    /* Redraw all preserved text history onto the newly sized display */
+    uint32_t rows_to_draw = g_cursor_y + 1;
+    if (rows_to_draw > g_max_rows) rows_to_draw = g_max_rows;
+
+    for (uint32_t r = 0; r < rows_to_draw; r++) {
+        for (uint32_t c = 0; c < g_max_cols; c++) {
+            char ch = g_text_buffer[r][c];
+            if (ch >= 32 && ch <= 126) {
+                fb_draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ch, g_fg_color, g_bg_color);
+            }
+        }
+    }
 }
 
 void console_putc(char c) {
@@ -79,6 +122,8 @@ void console_putc(char c) {
         g_cursor_y++;
         if (g_cursor_y >= g_max_rows) {
             fb_scroll_up(FONT_HEIGHT, g_bg_color);
+            memmove(&g_text_buffer[0], &g_text_buffer[1], sizeof(g_text_buffer[0]) * (CONSOLE_BUF_MAX_ROWS - 1));
+            memset(g_text_buffer[CONSOLE_BUF_MAX_ROWS - 1], 0, sizeof(g_text_buffer[0]));
             g_cursor_y = g_max_rows - 1;
         }
         uart_putc('\r');
@@ -89,6 +134,7 @@ void console_putc(char c) {
     if (c == '\b') {
         if (g_cursor_x > 0) {
             g_cursor_x--;
+            g_text_buffer[g_cursor_y][g_cursor_x] = 0;
             fb_draw_char(g_cursor_x * FONT_WIDTH, g_cursor_y * FONT_HEIGHT, ' ', g_fg_color, g_bg_color);
             uart_putc('\b');
             uart_putc(' ');
@@ -105,6 +151,10 @@ void console_putc(char c) {
         return;
     }
 
+    if (g_cursor_x < CONSOLE_BUF_MAX_COLS && g_cursor_y < CONSOLE_BUF_MAX_ROWS) {
+        g_text_buffer[g_cursor_y][g_cursor_x] = c;
+    }
+
     fb_draw_char(g_cursor_x * FONT_WIDTH, g_cursor_y * FONT_HEIGHT, c, g_fg_color, g_bg_color);
     uart_putc(c);
 
@@ -114,6 +164,8 @@ void console_putc(char c) {
         g_cursor_y++;
         if (g_cursor_y >= g_max_rows) {
             fb_scroll_up(FONT_HEIGHT, g_bg_color);
+            memmove(&g_text_buffer[0], &g_text_buffer[1], sizeof(g_text_buffer[0]) * (CONSOLE_BUF_MAX_ROWS - 1));
+            memset(g_text_buffer[CONSOLE_BUF_MAX_ROWS - 1], 0, sizeof(g_text_buffer[0]));
             g_cursor_y = g_max_rows - 1;
         }
     }

@@ -185,6 +185,61 @@ void to_lowercase(char *str) {
     }
 }
 
+long strtol(const char *nptr, char **endptr, int base) {
+    if (!nptr) return 0;
+    const char *s = nptr;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
+        s++;
+    }
+
+    int neg = 0;
+    if (*s == '-') {
+        neg = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+
+    if (base == 0) {
+        if (*s == '0' && (s[1] == 'x' || s[1] == 'X')) {
+            base = 16;
+            s += 2;
+        } else if (*s == '0') {
+            base = 8;
+            s++;
+        } else {
+            base = 10;
+        }
+    } else if (base == 16 && *s == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    }
+
+    long val = 0;
+    while (*s) {
+        int digit = -1;
+        if (*s >= '0' && *s <= '9') {
+            digit = *s - '0';
+        } else if (*s >= 'a' && *s <= 'z') {
+            digit = *s - 'a' + 10;
+        } else if (*s >= 'A' && *s <= 'Z') {
+            digit = *s - 'A' + 10;
+        }
+
+        if (digit < 0 || digit >= base) {
+            break;
+        }
+
+        val = val * base + digit;
+        s++;
+    }
+
+    if (endptr) {
+        *endptr = (char *)s;
+    }
+
+    return neg ? -val : val;
+}
+
 /* Number to string formatting helper */
 static int utoa(uint64_t val, char *buf, int base, int uppercase, int min_width, char pad) {
     char tmp[65];

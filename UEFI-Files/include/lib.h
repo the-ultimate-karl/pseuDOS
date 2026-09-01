@@ -34,6 +34,7 @@ char *strrchr(const char *s, int c);
 char *strdup(const char *s);
 char *trim(char *str);
 void to_lowercase(char *str);
+long strtol(const char *nptr, char **endptr, int base);
 
 /* Formatted print routines */
 int vsnprintf(char *str, size_t size, const char *format, va_list ap);

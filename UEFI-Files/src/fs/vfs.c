@@ -437,7 +437,7 @@ int vfs_init_initramfs(void) {
     /* 5. Create default system configuration and documents */
     vfs_write_file("/home/readme.txt", "welcome to pseuDOS bare-metal kernel filesystem!\ntype 'help' to view available commands.\n", 0);
     vfs_write_file("/etc/hostname", "pseuDOS\n", 0);
-    vfs_write_file("/etc/os-release", "NAME=pseuDOS\nVERSION=0.4.0-baremetal\nARCH=x86_64\nEDITION=bare-metal\n", 0);
+    vfs_write_file("/etc/os-release", "NAME=pseuDOS\nVERSION=0.4.1-baremetal\nARCH=x86_64\nEDITION=bare-metal\n", 0);
     vfs_write_file("/protected/bootmgr/config.sys", "boot_default=pseuDOS\ntimeout=5\ndebug=0\n", 0);
 
     return 0;

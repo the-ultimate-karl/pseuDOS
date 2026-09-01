@@ -1,14 +1,45 @@
 #include "bootinfo.h"
+#include "drivers.h"
 #include "font.h"
+#include "io.h"
 #include "lib.h"
+
+#define VBE_DISPI_IOPORT_INDEX 0x01CE
+#define VBE_DISPI_IOPORT_DATA  0x01CF
+
+#define VBE_DISPI_INDEX_ID     0
+#define VBE_DISPI_INDEX_XRES   1
+#define VBE_DISPI_INDEX_YRES   2
+#define VBE_DISPI_INDEX_BPP    3
+#define VBE_DISPI_INDEX_ENABLE 4
+
+#define VBE_DISPI_DISABLED     0x00
+#define VBE_DISPI_ENABLED      0x01
+#define VBE_DISPI_LFB_ENABLED  0x40
 
 static FramebufferInfo g_fb;
 static int g_fb_initialized = 0;
+
+static uint32_t g_last_good_width = 1280;
+static uint32_t g_last_good_height = 720;
+
+static void vbe_write(uint16_t index, uint16_t data) {
+    outw(VBE_DISPI_IOPORT_INDEX, index);
+    outw(VBE_DISPI_IOPORT_DATA, data);
+}
+
+static uint16_t vbe_read(uint16_t index) {
+    outw(VBE_DISPI_IOPORT_INDEX, index);
+    return inw(VBE_DISPI_IOPORT_DATA);
+}
 
 void fb_init(const FramebufferInfo *fb_info) {
     if (!fb_info || fb_info->physical_base == 0) return;
     memcpy(&g_fb, fb_info, sizeof(FramebufferInfo));
     g_fb_initialized = 1;
+
+    g_last_good_width = g_fb.width;
+    g_last_good_height = g_fb.height;
 }
 
 uint32_t fb_get_width(void) {
@@ -17,6 +48,53 @@ uint32_t fb_get_width(void) {
 
 uint32_t fb_get_height(void) {
     return g_fb_initialized ? g_fb.height : 0;
+}
+
+uint32_t fb_get_last_good_width(void) {
+    return g_last_good_width;
+}
+
+uint32_t fb_get_last_good_height(void) {
+    return g_last_good_height;
+}
+
+int fb_set_resolution(uint32_t width, uint32_t height) {
+    if (!g_fb_initialized) return -1;
+
+    /* Validate safety bounds (640x480 to 3840x2160) */
+    if (width < 640 || width > 3840 || height < 480 || height > 2160) {
+        return -1;
+    }
+
+    /* Probe Bochs / VBE Dispi virtual GPU hardware */
+    uint16_t vbe_id = vbe_read(VBE_DISPI_INDEX_ID);
+    if (vbe_id >= 0xB0C0 && vbe_id <= 0xB0CF) {
+        vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+        vbe_write(VBE_DISPI_INDEX_XRES, (uint16_t)width);
+        vbe_write(VBE_DISPI_INDEX_YRES, (uint16_t)height);
+        vbe_write(VBE_DISPI_INDEX_BPP, 32);
+        vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+
+        uint16_t cur_x = vbe_read(VBE_DISPI_INDEX_XRES);
+        uint16_t cur_y = vbe_read(VBE_DISPI_INDEX_YRES);
+        if (cur_x != (uint16_t)width || cur_y != (uint16_t)height) {
+            return -1;
+        }
+    }
+
+    /* Update active framebuffer coordinates and scanline pitch */
+    g_fb.width = width;
+    g_fb.height = height;
+    g_fb.pixels_per_scanline = width;
+
+    /* Recalibrate text console matrix, redraw preserved history */
+    console_rebuild_layout();
+
+    /* Record last known good resolution */
+    g_last_good_width = width;
+    g_last_good_height = height;
+
+    return 0;
 }
 
 static inline uint32_t color_to_raw(uint32_t rgb) {

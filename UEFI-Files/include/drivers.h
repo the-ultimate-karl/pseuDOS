@@ -9,6 +9,9 @@
 void fb_init(const FramebufferInfo *fb_info);
 uint32_t fb_get_width(void);
 uint32_t fb_get_height(void);
+uint32_t fb_get_last_good_width(void);
+uint32_t fb_get_last_good_height(void);
+int fb_set_resolution(uint32_t width, uint32_t height);
 void fb_clear(uint32_t color);
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color);
 void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
@@ -18,6 +21,7 @@ void fb_scroll_up(uint32_t pixels, uint32_t bg_color);
 /* Text Console Output */
 void console_init(void);
 void console_clear(void);
+void console_rebuild_layout(void);
 void console_putc(char c);
 void console_puts(const char *str);
 void console_printf(const char *fmt, ...);
