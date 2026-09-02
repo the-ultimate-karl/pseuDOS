@@ -51,6 +51,7 @@ int vfs_remove_node(const char *path);
 int vfs_chdir(const char *path);
 const char *vfs_getcwd(void);
 void vfs_listdir(const char *path);
+void vfs_get_stats(uint32_t *out_nodes, uint32_t *out_dirs, uint32_t *out_files, uint64_t *out_bytes);
 
 /* Boot Device & Prompt Path Resolution */
 void fs_init_devpath(const BootInfo *boot_info);

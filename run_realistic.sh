@@ -2,21 +2,27 @@
 set -e
 
 # ==============================================================================
-# pseuDOS UEFI Launcher - Normal Mode
-# Displays the live boot process directly in your terminal by default,
-# or in a GUI window if requested with --gui.
+# pseuDOS UEFI Launcher - Strict Bare-Metal Hardware Simulation Mode
+#
+# Simulates unforgiving bare-metal hardware conditions:
+# - Strict modern Q35 PCIe machine type with System Management Mode (SMM)
+# - Intel IOMMU (VT-d) with DMA remapping & Device-IOTLB enabled
+# - Fragmented non-contiguous physical RAM with NUMA nodes & ACPI memory holes
+# - Downstream PCIe Root Ports topology for high-speed storage buses
+# - Hardware RTC timer clock tracking with host drift
+# - Full parameter parity with run_normal.sh
 #
 # Usage:
-#   ./run_normal.sh          (Live terminal console output)
-#   ./run_normal.sh --gui    (Graphical GTK/SDL window)
-#   ./run_normal.sh --curses (Full terminal curses screen)
+#   ./run_realistic.sh          (Live terminal console output)
+#   ./run_realistic.sh --gui    (Graphical GTK/SDL window)
+#   ./run_realistic.sh --curses (Full terminal curses screen)
 #
 # Storage Drive Options (500 MB persistent virtual disks):
-#   --sata                   (Attach internal AHCI SATA hard disk)
-#   --nvme                   (Attach internal NVMe PCIe SSD)
-#   --usb / --scsi           (Attach external USB 3.0/3.1 Mass Storage drive)
-#   --usb2                   (Attach external USB 2.0 Mass Storage drive)
-#   --all                    (Attach SATA, NVMe, and USB 3.0 drives simultaneously)
+#   --sata                      (Attach internal AHCI SATA hard disk on PCIe)
+#   --nvme                      (Attach internal NVMe PCIe SSD on PCIe Root Port)
+#   --usb / --scsi              (Attach external USB 3.0/3.1 Mass Storage drive)
+#   --usb2                      (Attach external USB 2.0 Mass Storage drive)
+#   --all                       (Attach SATA, NVMe, and USB 3.0 drives simultaneously)
 # ==============================================================================
 
 # Sanitize Snap environment variables that cause GTK/glibc library version mismatches
@@ -98,6 +104,13 @@ for arg in "$@"; do
 done
 
 STORAGE_ARGS=()
+ROOT_PORTS=()
+
+# Setup PCIe Root Ports
+ROOT_PORTS+=(
+    -device "pcie-root-port,id=rp1,slot=1,chassis=1"
+    -device "pcie-root-port,id=rp2,slot=2,chassis=2"
+)
 
 # 1. AHCI SATA Drive (500 MB)
 if [ "$ATTACH_SATA" -eq 1 ]; then
@@ -112,7 +125,7 @@ if [ "$ATTACH_SATA" -eq 1 ]; then
     )
 fi
 
-# 2. NVMe PCIe SSD (500 MB)
+# 2. NVMe PCIe SSD on dedicated PCIe Root Port (500 MB)
 if [ "$ATTACH_NVME" -eq 1 ]; then
     NVME_IMG="${DISKS_DIR}/nvme_disk.img"
     if [ ! -f "$NVME_IMG" ]; then
@@ -120,18 +133,18 @@ if [ "$ATTACH_NVME" -eq 1 ]; then
     fi
     STORAGE_ARGS+=(
         -drive "file=${NVME_IMG},if=none,id=nvm0,format=raw"
-        -device "nvme,serial=970EVO500M,drive=nvm0"
+        -device "nvme,bus=rp1,serial=970EVO500M,drive=nvm0"
     )
 fi
 
-# 3. USB 3.0/3.1 xHCI Mass Storage (500 MB)
+# 3. USB 3.0/3.1 xHCI Mass Storage on PCIe Root Port (500 MB)
 if [ "$ATTACH_USB3" -eq 1 ]; then
     USB_IMG="${DISKS_DIR}/usb_disk.img"
     if [ ! -f "$USB_IMG" ]; then
         truncate -s 500M "$USB_IMG"
     fi
     STORAGE_ARGS+=(
-        -device "qemu-xhci,id=xhci"
+        -device "qemu-xhci,id=xhci,bus=rp2"
         -drive "file=${USB_IMG},if=none,id=usb0,format=raw"
         -device "usb-storage,bus=xhci.0,drive=usb0"
     )
@@ -150,18 +163,43 @@ if [ "$ATTACH_USB2" -eq 1 ]; then
     )
 fi
 
+# Multi-Node NUMA Memory Topology (forces non-contiguous physical RAM & ACPI memory holes)
+NUMA_ARGS=(
+    -m 1024M
+    -smp cpus=2,sockets=2,cores=1,threads=1
+    -object memory-backend-ram,id=mem0,size=512M
+    -object memory-backend-ram,id=mem1,size=512M
+    -numa node,nodeid=0,cpus=0,memdev=mem0
+    -numa node,nodeid=1,cpus=1,memdev=mem1
+)
+
+# Hardware Simulation Flags (IOMMU, SMM, Host RTC, Strict Hardware Reset)
+HARDWARE_SIM_ARGS=(
+    -machine q35,smm=on
+    -global ICH9-LPC.disable_s3=1
+    -global ICH9-LPC.disable_s4=1
+    -device intel-iommu,intremap=on,caching-mode=on,device-iotlb=on
+    -rtc base=localtime,clock=host,driftfix=slew
+    -boot menu=off,splash-time=1500
+    -cpu max
+    -net none
+)
+
 echo "============================================================"
-echo " Starting pseuDOS (Normal Mode)"
-echo " ISO:  ${ISO_PATH}"
-echo " BIOS: ${OVMF_BIOS}"
+echo " Starting pseuDOS (Strict Bare-Metal Hardware Simulation)"
+echo " ISO:     ${ISO_PATH}"
+echo " BIOS:    ${OVMF_BIOS}"
+echo " Chipset: Intel Q35 with System Management Mode (SMM)"
+echo " IOMMU:   Intel VT-d DMA Remapping & Device-IOTLB Active"
+echo " Memory:  Multi-Node NUMA (1024MB split with physical RAM holes)"
 if [ "$ATTACH_SATA" -eq 1 ]; then
     echo " Storage: [Attached] 500 MB AHCI SATA Disk"
 fi
 if [ "$ATTACH_NVME" -eq 1 ]; then
-    echo " Storage: [Attached] 500 MB NVMe PCIe SSD"
+    echo " Storage: [Attached] 500 MB NVMe SSD on PCIe Root Port 1"
 fi
 if [ "$ATTACH_USB3" -eq 1 ]; then
-    echo " Storage: [Attached] 500 MB USB 3.0/3.1 (xHCI) Drive"
+    echo " Storage: [Attached] 500 MB USB 3.0/3.1 on PCIe Root Port 2"
 fi
 if [ "$ATTACH_USB2" -eq 1 ]; then
     echo " Storage: [Attached] 500 MB USB 2.0 (EHCI) Drive"
@@ -179,34 +217,31 @@ if [ "$MODE" = "gui" ]; then
     exec qemu-system-x86_64 \
         -bios "$OVMF_BIOS" \
         -cdrom "$ISO_PATH" \
-        -m 512M \
-        -smp 2 \
-        -cpu max \
-        -net none \
         -display gtk \
         -serial mon:stdio \
+        "${HARDWARE_SIM_ARGS[@]}" \
+        "${NUMA_ARGS[@]}" \
+        "${ROOT_PORTS[@]}" \
         "${STORAGE_ARGS[@]}" \
         "${EXTRA_ARGS[@]}"
 elif [ "$MODE" = "curses" ]; then
     exec qemu-system-x86_64 \
         -bios "$OVMF_BIOS" \
         -cdrom "$ISO_PATH" \
-        -m 512M \
-        -smp 2 \
-        -cpu max \
-        -net none \
         -display curses \
+        "${HARDWARE_SIM_ARGS[@]}" \
+        "${NUMA_ARGS[@]}" \
+        "${ROOT_PORTS[@]}" \
         "${STORAGE_ARGS[@]}" \
         "${EXTRA_ARGS[@]}"
 else
     exec qemu-system-x86_64 \
         -bios "$OVMF_BIOS" \
         -cdrom "$ISO_PATH" \
-        -m 512M \
-        -smp 2 \
-        -cpu max \
-        -net none \
         -nographic \
+        "${HARDWARE_SIM_ARGS[@]}" \
+        "${NUMA_ARGS[@]}" \
+        "${ROOT_PORTS[@]}" \
         "${STORAGE_ARGS[@]}" \
         "${EXTRA_ARGS[@]}"
 fi

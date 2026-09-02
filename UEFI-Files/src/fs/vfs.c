@@ -437,8 +437,37 @@ int vfs_init_initramfs(void) {
     /* 5. Create default system configuration and documents */
     vfs_write_file("/home/readme.txt", "welcome to pseuDOS bare-metal kernel filesystem!\ntype 'help' to view available commands.\n", 0);
     vfs_write_file("/etc/hostname", "pseuDOS\n", 0);
-    vfs_write_file("/etc/os-release", "NAME=pseuDOS\nVERSION=0.4.1-baremetal\nARCH=x86_64\nEDITION=bare-metal\n", 0);
+    vfs_write_file("/etc/os-release", "NAME=pseuDOS\nVERSION=0.5.0-baremetal\nARCH=x86_64\nEDITION=bare-metal\n", 0);
     vfs_write_file("/protected/bootmgr/config.sys", "boot_default=pseuDOS\ntimeout=5\ndebug=0\n", 0);
 
     return 0;
 }
+
+static void vfs_crawl_stats(vfs_node_t *node, uint32_t *nodes, uint32_t *dirs, uint32_t *files, uint64_t *bytes) {
+    if (!node) return;
+    (*nodes)++;
+    if (node->type == VFS_NODE_DIRECTORY) {
+        (*dirs)++;
+    } else {
+        (*files)++;
+        *bytes += node->size;
+    }
+    vfs_node_t *child = node->first_child;
+    while (child) {
+        vfs_crawl_stats(child, nodes, dirs, files, bytes);
+        child = child->next_sibling;
+    }
+}
+
+void vfs_get_stats(uint32_t *out_nodes, uint32_t *out_dirs, uint32_t *out_files, uint64_t *out_bytes) {
+    uint32_t nodes = 0, dirs = 0, files = 0;
+    uint64_t bytes = 0;
+    if (g_vfs_root) {
+        vfs_crawl_stats(g_vfs_root, &nodes, &dirs, &files, &bytes);
+    }
+    if (out_nodes) *out_nodes = nodes;
+    if (out_dirs) *out_dirs = dirs;
+    if (out_files) *out_files = files;
+    if (out_bytes) *out_bytes = bytes;
+}
+

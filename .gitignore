@@ -1,12 +1,15 @@
 *.bin
 *.o
+*.d
 *.so
 *.elf
 *.pyc
 *.md
 *.log
 *.txt
+*.img
 UEFI-Bootlogs/
+UEFI-Files/build/disks/
 __pycache__/
 *.gitignore
 AGENTS.md

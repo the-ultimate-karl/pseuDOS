@@ -3,3 +3,10 @@ ANTIGRAVITY (2026-08-28 23:41)
 
 [IMPORTANT-BUGS]
 - Double character input caused by dual ISR and manual I/O port polling in drivers/keyboard.c
+
+ANTIGRAVITY (2026-09-02 21:38)
+- vsnprintf table column specifier corruption caused by missing left-alignment flag handler [FIXED + 2026-09-02 21:25]
+- NVMe write sector failure caused by unaligned heap buffers crossing 4KB page boundaries and non-standard CQ phase polling [FIXED + 2026-09-02 21:38]
+
+[IMPORTANT-BUGS]
+- NVMe 4KB page alignment requirement on PRPs for multi-sector DMA transfers

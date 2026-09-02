@@ -43,6 +43,9 @@ typedef struct {
     uint64_t acpi_rsdp_address;
     uint64_t smbios_address;
 
+    uint64_t kernel_physical_base;
+    uint64_t kernel_image_size;
+
     char hardware_devpath[384];
     char boot_file_path[128];
 } BootInfo;

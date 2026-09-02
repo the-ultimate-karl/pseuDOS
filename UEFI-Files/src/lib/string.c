@@ -185,6 +185,26 @@ void to_lowercase(char *str) {
     }
 }
 
+int atoi(const char *str) {
+    if (!str) return 0;
+    while (*str == ' ' || *str == '\t' || *str == '\r' || *str == '\n') {
+        str++;
+    }
+    int neg = 0;
+    if (*str == '-') {
+        neg = 1;
+        str++;
+    } else if (*str == '+') {
+        str++;
+    }
+    int res = 0;
+    while (*str >= '0' && *str <= '9') {
+        res = res * 10 + (*str - '0');
+        str++;
+    }
+    return neg ? -res : res;
+}
+
 long strtol(const char *nptr, char **endptr, int base) {
     if (!nptr) return 0;
     const char *s = nptr;
@@ -287,10 +307,16 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
         }
 
         p++; /* Skip '%' */
+        int left_align = 0;
         char pad = ' ';
         int width = 0;
 
-        if (*p == '0') {
+        if (*p == '-') {
+            left_align = 1;
+            p++;
+        }
+
+        if (*p == '0' && !left_align) {
             pad = '0';
             p++;
         }
@@ -317,13 +343,21 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
             case 's': {
                 const char *s = va_arg(ap, const char *);
                 if (!s) s = "(null)";
-                size_t slen = strlen(s);
-                while (width > (int)slen && out_idx + 1 < size) {
-                    str[out_idx++] = ' ';
-                    width--;
+                int slen = (int)strlen(s);
+                if (!left_align) {
+                    while (width > slen && out_idx + 1 < size) {
+                        str[out_idx++] = ' ';
+                        width--;
+                    }
                 }
                 while (*s && out_idx + 1 < size) {
                     str[out_idx++] = *s++;
+                }
+                if (left_align) {
+                    while (width > slen && out_idx + 1 < size) {
+                        str[out_idx++] = ' ';
+                        width--;
+                    }
                 }
                 break;
             }
@@ -335,34 +369,58 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
             case 'd':
             case 'i': {
                 int64_t v = (is_long >= 2) ? va_arg(ap, int64_t) : (is_long == 1 ? va_arg(ap, long) : va_arg(ap, int));
-                num_len = itoa_s(v, num_buf, width, pad);
+                num_len = itoa_s(v, num_buf, left_align ? 0 : width, pad);
                 for (int i = 0; i < num_len && out_idx + 1 < size; i++) {
                     str[out_idx++] = num_buf[i];
+                }
+                if (left_align) {
+                    while (width > num_len && out_idx + 1 < size) {
+                        str[out_idx++] = ' ';
+                        width--;
+                    }
                 }
                 break;
             }
             case 'u': {
                 uint64_t v = (is_long >= 2) ? va_arg(ap, uint64_t) : (is_long == 1 ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int));
-                num_len = utoa(v, num_buf, 10, 0, width, pad);
+                num_len = utoa(v, num_buf, 10, 0, left_align ? 0 : width, pad);
                 for (int i = 0; i < num_len && out_idx + 1 < size; i++) {
                     str[out_idx++] = num_buf[i];
+                }
+                if (left_align) {
+                    while (width > num_len && out_idx + 1 < size) {
+                        str[out_idx++] = ' ';
+                        width--;
+                    }
                 }
                 break;
             }
             case 'x':
             case 'p': {
                 uint64_t v = (*p == 'p' || is_long >= 2) ? va_arg(ap, uint64_t) : (is_long == 1 ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int));
-                num_len = utoa(v, num_buf, 16, 0, width, pad);
+                num_len = utoa(v, num_buf, 16, 0, left_align ? 0 : width, pad);
                 for (int i = 0; i < num_len && out_idx + 1 < size; i++) {
                     str[out_idx++] = num_buf[i];
+                }
+                if (left_align) {
+                    while (width > num_len && out_idx + 1 < size) {
+                        str[out_idx++] = ' ';
+                        width--;
+                    }
                 }
                 break;
             }
             case 'X': {
                 uint64_t v = (is_long >= 2) ? va_arg(ap, uint64_t) : (is_long == 1 ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int));
-                num_len = utoa(v, num_buf, 16, 1, width, pad);
+                num_len = utoa(v, num_buf, 16, 1, left_align ? 0 : width, pad);
                 for (int i = 0; i < num_len && out_idx + 1 < size; i++) {
                     str[out_idx++] = num_buf[i];
+                }
+                if (left_align) {
+                    while (width > num_len && out_idx + 1 < size) {
+                        str[out_idx++] = ' ';
+                        width--;
+                    }
                 }
                 break;
             }

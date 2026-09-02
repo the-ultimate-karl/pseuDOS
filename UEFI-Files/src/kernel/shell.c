@@ -1,6 +1,7 @@
 #include "kernel.h"
 #include "bootinfo.h"
 #include "drivers.h"
+#include "storage.h"
 #include "fs.h"
 #include "lib.h"
 
@@ -17,8 +18,11 @@ static void cmd_help(void) {
     console_puts("touch             :     create an empty file\n");
     console_puts("write             :     write or append text to a file\n");
     console_puts("del               :     delete a file or directory (-r, -f, -rf)\n");
-    console_puts("fs                :     display active filesystem and mount information\n");
+    console_puts("fs                :     query filesystem, in-memory VFS stats, and disk partitions\n");
     console_puts("screenres         :     adjust or display screen resolution\n");
+    console_puts("switch-target     :     switch storage target (--internal | --external)\n");
+    console_puts("attached-drives   :     list attached storage drives (--internal | --external | --all)\n");
+    console_puts("flash             :     install pseuDOS onto a selected mass storage drive\n");
     console_puts("cpu               :     display CPU model, vendor, and feature flags\n");
     console_puts("mem               :     display physical memory map and statistics\n");
     console_puts("pci               :     scan and list connected PCI / PCIe bus devices\n");
@@ -28,6 +32,210 @@ static void cmd_help(void) {
     console_puts("shutdown          :     perform bare-metal ACPI system power-off\n");
     console_puts("halt              :     halt CPU execution\n");
     console_puts("===========================\n");
+}
+
+static void cmd_switch_target(const char *arg) {
+    if (!arg || arg[0] == '\0') {
+        TargetFilterMode cur = storage_get_target_mode();
+        console_printf("active storage target: %s\n", cur == TARGET_MODE_INTERNAL ? "internal storage devices only" : "external USB devices only");
+        console_puts("usage: switch-target [--internal | --external]\n");
+        return;
+    }
+
+    if (strcmp(arg, "--internal") == 0) {
+        storage_set_target_mode(TARGET_MODE_INTERNAL);
+        console_puts("switch-target: active storage target switched to internal devices only\n");
+    } else if (strcmp(arg, "--external") == 0) {
+        storage_set_target_mode(TARGET_MODE_EXTERNAL);
+        console_puts("switch-target: active storage target switched to external USB devices only\n");
+    } else {
+        console_printf("switch-target: unknown parameter '%s'\n", arg);
+        console_puts("usage: switch-target [--internal | --external]\n");
+    }
+}
+
+static void cmd_attached_drives(const char *arg) {
+    int show_internal = 0;
+    int show_external = 0;
+
+    if (!arg || arg[0] == '\0') {
+        TargetFilterMode cur = storage_get_target_mode();
+        if (cur == TARGET_MODE_INTERNAL) show_internal = 1;
+        else show_external = 1;
+    } else if (strcmp(arg, "--internal") == 0) {
+        show_internal = 1;
+    } else if (strcmp(arg, "--external") == 0) {
+        show_external = 1;
+    } else if (strcmp(arg, "--all") == 0) {
+        show_internal = 1;
+        show_external = 1;
+    } else {
+        console_printf("attached-drives: unknown option '%s'\n", arg);
+        console_puts("usage: attached-drives [--internal | --external | --all]\n");
+        return;
+    }
+
+    uint32_t count = storage_get_device_count();
+    uint32_t match_count = 0;
+
+    console_puts("\n[NO]  |  [TYPE]    |  [DEVICE_NAME]                    |  [SIZE]    |  [BUS_SPEED]\n");
+    console_puts("------+------------+-----------------------------------+------------+--------------------\n");
+
+    for (uint32_t i = 0; i < count; i++) {
+        StorageDevice *dev = storage_get_device(i);
+        if (!dev) continue;
+
+        int is_int = (dev->type == STORAGE_TYPE_INTERNAL_SATA || dev->type == STORAGE_TYPE_INTERNAL_NVME);
+        int is_ext = (dev->type == STORAGE_TYPE_EXTERNAL_USB);
+
+        if ((is_int && show_internal) || (is_ext && show_external)) {
+            match_count++;
+            console_printf("%-5u |  %-9s |  %-32s |  %-9s |  %s\n",
+                match_count, dev->type_str, dev->name, dev->size_str, dev->bus_speed);
+        }
+    }
+
+    if (match_count == 0) {
+        console_puts("  (no matching mass storage devices detected)\n");
+    }
+    console_puts("\n");
+}
+
+static void install_progress_handler(const char *step_name, int is_ok) {
+    if (is_ok) {
+        console_printf("flash: %s [ok]\n", step_name);
+    } else {
+        console_printf("flash: %s [failed]\n", step_name);
+    }
+}
+
+static void cmd_flash(const char *arg) {
+    (void)arg;
+
+    console_puts("flash: searching for attached internal mass storage devices... ");
+    uint32_t count = storage_get_device_count();
+
+    StorageDevice *matching[32];
+    uint32_t match_count = 0;
+    int is_external_view = 0;
+
+    /* Check internal drives first */
+    for (uint32_t i = 0; i < count; i++) {
+        StorageDevice *dev = storage_get_device(i);
+        if (dev && (dev->type == STORAGE_TYPE_INTERNAL_SATA || dev->type == STORAGE_TYPE_INTERNAL_NVME)) {
+            matching[match_count++] = dev;
+        }
+    }
+
+    if (match_count > 0) {
+        console_puts("done\n");
+        console_puts("flash: identifying mass storage devices... done\n");
+        console_puts("flash: displaying options for internal mass storage devices\n\n");
+    } else {
+        console_puts("none found\n");
+        console_puts("flash: querying universal serial bus (usb) for any connected mass storage devices... ");
+
+        for (uint32_t i = 0; i < count; i++) {
+            StorageDevice *dev = storage_get_device(i);
+            if (dev && dev->type == STORAGE_TYPE_EXTERNAL_USB) {
+                matching[match_count++] = dev;
+            }
+        }
+
+        if (match_count > 0) {
+            console_puts("done\n");
+            console_puts("flash: identifying mass storage devices... done\n");
+            console_puts("flash: displaying options for external mass storage devices\n\n");
+            is_external_view = 1;
+        } else {
+            console_puts("none found\n");
+            console_puts("flash: error: no mass storage devices detected on system!\n");
+            return;
+        }
+    }
+
+    console_puts("                                [pseuDOS Installation]\n");
+    console_puts("==========================================================================\n");
+    console_puts("choose the mass storage device you want to install pseuDOS on:\n\n");
+    console_puts("[NO]    |    [DEVICE_NAME]                      |    [SIZE]\n");
+    console_puts("--------+---------------------------------------+------------\n");
+
+    for (uint32_t i = 0; i < match_count; i++) {
+        console_printf("%-7u |    %-34s |    %s\n", i + 1, matching[i]->name, matching[i]->size_str);
+    }
+    console_puts("\n");
+
+    StorageDevice *selected_dev = NULL;
+    char line_buf[128];
+
+    while (1) {
+        keyboard_readline(line_buf, sizeof(line_buf), "flash > ");
+        char *input = trim(line_buf);
+
+        if (input[0] == '\0') {
+            continue;
+        }
+
+        if (strcmp(input, "cancel") == 0 || strcmp(input, "stop") == 0) {
+            console_puts("flash: cancelling installation...\n");
+            return;
+        }
+
+        long sel_num = strtol(input, NULL, 10);
+        if (sel_num < 1 || sel_num > (long)match_count) {
+            console_puts("flash: error: unknown command\n");
+            continue;
+        }
+
+        selected_dev = matching[sel_num - 1];
+        break;
+    }
+
+    /* USB 3.1 Gen 1 minimum speed verification */
+    if (is_external_view || selected_dev->type == STORAGE_TYPE_EXTERNAL_USB) {
+        if (selected_dev->usb_version < 0x0310) {
+            console_puts("ATTENTION! you are attempting to install pseuDOS to an external universal serial bus drive that does not meet the minimum requirement of USB 3.1 Gen 1. it is highly recommended to use a faster drive to make sure installation does not crawl, and to ensure boot times are at max.\n");
+            console_puts("are you sure you want to do this?\n(y/N) ");
+            keyboard_readline(line_buf, sizeof(line_buf), "");
+            char *ans = trim(line_buf);
+            if (ans[0] != 'y' && ans[0] != 'Y') {
+                console_puts("flash: cancelling installation...\n");
+                return;
+            }
+        }
+    }
+
+    /* Safety Confirmation Warning */
+    console_puts("WARNING!!! ensure you have selected the proper target, as this command will\n");
+    console_puts("erase EVERYTHING on the selected drive!!\n");
+    console_printf("are you sure you want to erase and format %s?\n(y/N) ", selected_dev->name);
+    keyboard_readline(line_buf, sizeof(line_buf), "");
+    char *ans = trim(line_buf);
+    if (ans[0] != 'y' && ans[0] != 'Y') {
+        console_puts("flash: cancelling installation...\n");
+        return;
+    }
+
+    console_puts("\n");
+    int res = gpt_fat32_format_and_install(selected_dev, install_progress_handler);
+    if (res != 0) {
+        console_puts("flash: fatal error: installation failed due to hardware disk write error!\n");
+        return;
+    }
+
+    console_printf("\nflash: successfully installed pseuDOS to %s (devpath: %s)\n", selected_dev->name, selected_dev->devpath);
+    console_puts("flash: please remove the installation media and press ENTER\n");
+
+    /* Strict wait for ENTER key only */
+    while (1) {
+        char c = keyboard_getchar();
+        if (c == '\r' || c == '\n') {
+            break;
+        }
+    }
+
+    console_puts("rebooting system into newly installed pseuDOS...\n");
+    acpi_reboot();
 }
 
 static void cmd_screenres(const char *arg) {
@@ -104,16 +312,132 @@ static void cmd_screenres(const char *arg) {
     }
 }
 
-static void cmd_fs(void) {
-    console_puts("filesystem information:\n");
-    console_puts("  current root (/)  : initramfs (in-memory ramdisk vfs)\n");
-    console_puts("  filesystem type   : tmpfs / initramfs\n");
-    console_puts("  storage medium    : volatile system RAM\n");
-    console_puts("  mount point       : /\n");
-    console_printf("  storage pool size : %lu MB\n", heap_get_total() / (1024 * 1024));
-    console_printf("  used storage      : %lu KB\n", heap_get_used() / 1024);
-    console_puts("  status            : active (read/write)\n");
-    console_puts("  boot stage        : stage-1 early boot filesystem (awaiting switch_root)\n");
+static void cmd_fs(const char *arg) {
+    if (!arg || arg[0] == '\0') {
+        /* 1. Live in-memory VFS Statistics */
+        uint32_t total_nodes = 0, total_dirs = 0, total_files = 0;
+        uint64_t total_bytes = 0;
+        vfs_get_stats(&total_nodes, &total_dirs, &total_files, &total_bytes);
+
+        console_puts("active root filesystem information:\n");
+        console_puts("  current root (/)  : initramfs (in-memory ramdisk vfs)\n");
+        console_puts("  filesystem type   : tmpfs / initramfs\n");
+        console_puts("  storage medium    : volatile system RAM\n");
+        console_puts("  mount point       : /\n");
+        console_printf("  live directory cnt: %u directories\n", total_dirs);
+        console_printf("  live file count   : %u files\n", total_files);
+        console_printf("  stored file data  : %lu B (%lu KB)\n", total_bytes, total_bytes / 1024);
+        console_printf("  storage pool size : %lu MB (dynamic kernel heap)\n", heap_get_total() / (1024 * 1024));
+        console_printf("  allocated storage : %lu KB / %lu MB\n", heap_get_used() / 1024, heap_get_total() / (1024 * 1024));
+        console_puts("  status            : active (read/write)\n");
+        console_puts("  boot stage        : stage-1 early boot filesystem (awaiting switch_root)\n\n");
+
+        /* 2. Attached Block Device Partition Summary */
+        console_puts("attached storage partition summary:\n");
+        uint32_t dev_count = storage_get_device_count();
+        if (dev_count == 0) {
+            console_puts("  (no attached block devices detected)\n");
+        } else {
+            for (uint32_t i = 0; i < dev_count; i++) {
+                StorageDevice *dev = storage_get_device(i);
+                if (!dev) continue;
+
+                StorageFsInfo info;
+                if (storage_inspect_fs(dev, &info) == 0 && info.has_filesystem) {
+                    console_printf("  drive %u (%s - %s): %s [%s / %s] - %s free / %s total (%s)\n",
+                        i + 1, dev->type_str, dev->name, dev->size_str,
+                        info.fs_type, info.vol_label, info.free_str, info.total_str, info.health_status);
+                } else if (info.has_partition_table) {
+                    console_printf("  drive %u (%s - %s): %s [%s / %s] - (unformatted filesystem)\n",
+                        i + 1, dev->type_str, dev->name, dev->size_str,
+                        info.part_table_type, info.part_type_name);
+                } else {
+                    console_printf("  drive %u (%s - %s): %s (unpartitioned / RAW)\n",
+                        i + 1, dev->type_str, dev->name, dev->size_str);
+                }
+            }
+        }
+        console_puts("type 'fs --drives' or 'fs <drive_no>' for detailed partition analysis.\n");
+        return;
+    }
+
+    if (strcmp(arg, "--drives") == 0 || strcmp(arg, "--all") == 0 || strcmp(arg, "-d") == 0) {
+        uint32_t dev_count = storage_get_device_count();
+        console_puts("\n[NO]  |  [TYPE]    |  [DEVICE_NAME]                    |  [PARTITION]  |  [FS_TYPE]  |  [LABEL]       |  [FREE / TOTAL]\n");
+        console_puts("------+------------+-----------------------------------+---------------+-------------+----------------+--------------------\n");
+
+        if (dev_count == 0) {
+            console_puts("  (no mass storage devices detected)\n\n");
+            return;
+        }
+
+        for (uint32_t i = 0; i < dev_count; i++) {
+            StorageDevice *dev = storage_get_device(i);
+            if (!dev) continue;
+
+            StorageFsInfo info;
+            storage_inspect_fs(dev, &info);
+
+            char part_display[16];
+            if (info.has_partition_table) {
+                if (strcmp(info.part_table_type, "GPT") == 0) strcpy(part_display, "GPT / ESP");
+                else strcpy(part_display, "MBR / Part");
+            } else {
+                strcpy(part_display, "RAW / None");
+            }
+
+            char cap_display[24];
+            if (info.has_filesystem) {
+                snprintf(cap_display, sizeof(cap_display), "%s / %s", info.free_str, info.total_str);
+            } else {
+                snprintf(cap_display, sizeof(cap_display), "- / %s", dev->size_str);
+            }
+
+            console_printf("%-5u |  %-9s |  %-34s |  %-12s |  %-10s |  %-14s |  %-18s\n",
+                i + 1, dev->type_str, dev->name, part_display, info.fs_type, info.vol_label, cap_display);
+        }
+        console_puts("\n");
+        return;
+    }
+
+    /* Drive number inspection */
+    int drive_num = atoi(arg);
+    uint32_t dev_count = storage_get_device_count();
+    if (drive_num >= 1 && (uint32_t)drive_num <= dev_count) {
+        StorageDevice *dev = storage_get_device(drive_num - 1);
+        if (!dev) return;
+
+        StorageFsInfo info;
+        storage_inspect_fs(dev, &info);
+
+        console_printf("\nfilesystem inspection: Drive %d (%s - %s)\n", drive_num, dev->name, dev->type_str);
+        console_printf("  hardware devpath    : %s\n", dev->devpath);
+        console_printf("  raw capacity        : %s (%lu sectors @ %uB)\n", dev->size_str, dev->total_sectors, dev->sector_size);
+        console_printf("  bus speed           : %s\n", dev->bus_speed);
+        console_printf("  partition scheme    : %s\n", info.part_table_type);
+        console_printf("  partition type      : %s\n", info.part_type_name);
+        if (info.has_partition_table) {
+            console_printf("  partition range     : LBA %lu - %lu (%lu sectors / %s)\n",
+                info.part_start_lba, info.part_end_lba, info.part_total_sectors, info.total_str);
+        }
+        console_printf("  filesystem format   : %s\n", info.fs_type);
+        if (info.has_filesystem) {
+            console_printf("  volume label        : %s\n", info.vol_label);
+            console_printf("  oem identifier      : %s\n", info.oem_name);
+            console_printf("  bytes per sector    : %u bytes\n", info.bytes_per_sector);
+            console_printf("  sectors per cluster : %u (%u bytes per cluster)\n", info.sectors_per_cluster, info.cluster_size);
+            console_printf("  reserved sectors    : %u (FSInfo @ LBA %lu)\n", info.reserved_sectors, info.part_start_lba + 1);
+            console_printf("  number of FATs      : %u (%u sectors per FAT)\n", info.num_fats, info.fat_size_sectors);
+            console_printf("  root cluster        : %u\n", info.root_cluster);
+            console_printf("  total data clusters : %u clusters (%s)\n", info.total_clusters, info.total_str);
+            console_printf("  free clusters       : %u clusters (%s free)\n", info.free_clusters, info.free_str);
+            console_printf("  used clusters       : %u clusters (%s used)\n", info.used_clusters, info.used_str);
+            console_printf("  filesystem health   : %s\n", info.health_status);
+        }
+        console_puts("\n");
+    } else {
+        console_printf("fs: invalid drive number '%s'. type 'fs --drives' to view available drives.\n", arg);
+    }
 }
 
 static void cmd_devpath(const char *arg) {
@@ -312,17 +636,15 @@ void shell_run(const BootInfo *boot_info) {
     char prompt_buf[512];
     char prompt_path[256];
 
-    console_puts("pseuDOS kernel v0.4.1-baremetal (x86_64 uefi / bare-metal)\n");
-    console_puts("what's new (kernel version 0.4.1):\n");
-    console_puts("- dynamic runtime screen resolution switcher (screenres) with Multi-Tier fallback\n");
-    console_puts("- seamless text buffer preservation across resolution changes\n");
-    console_puts("- full bare-metal execution via ExitBootServices()\n");
-    console_puts("- 1280x720 32-bit linear framebuffer console & 8x16 bitmap font engine\n");
-    console_puts("- 64-bit IDT (Interrupt Descriptor Table) & exception handlers\n");
-    console_puts("- remapped 8259 PIC & IRQ 1 PS/2 keyboard interrupt driver\n");
-    console_puts("- linux-style 2-stage initramfs in-memory VFS & fs inspection command\n");
-    console_puts("- physical RAM and PCIe MMIO aperture memory reporting\n");
-    console_puts("- bare-metal ACPI shutdown and hardware reboot\n\n");
+    console_puts("pseuDOS kernel v0.5.0-baremetal (x86_64 uefi / bare-metal)\n");
+    console_puts("what's new (kernel version 0.5.0):\n");
+    console_puts("- bare-metal AHCI SATA & NVMe PCIe SSD DMA storage drivers\n");
+    console_puts("- USB 3.x xHCI / USB 2.0 EHCI device discovery & bus speed policy\n");
+    console_puts("- GPT partitioning & FAT32 EFI System Partition self-installer engine (flash)\n");
+    console_puts("- storage target filtering (switch-target) & attached drive listing (attached-drives)\n");
+    console_puts("- live VFS metrics traversal & block-device partition deep inspector (fs)\n");
+    console_puts("- strict bare-metal hardware simulator with IOMMU & NUMA memory holes (run_realistic.sh)\n");
+    console_puts("- 500 MB persistent virtual drive options (--sata, --nvme, --usb, --usb2, --all)\n\n");
     console_puts("type 'help' to view available commands.\n\n");
 
     while (1) {
@@ -346,8 +668,14 @@ void shell_run(const BootInfo *boot_info) {
             cmd_help();
         } else if (strcmp(cmd, "screenres") == 0) {
             cmd_screenres(arg);
+        } else if (strcmp(cmd, "switch-target") == 0) {
+            cmd_switch_target(arg);
+        } else if (strcmp(cmd, "attached-drives") == 0) {
+            cmd_attached_drives(arg);
+        } else if (strcmp(cmd, "flash") == 0) {
+            cmd_flash(arg);
         } else if (strcmp(cmd, "fs") == 0 || strcmp(cmd, "mount") == 0 || strcmp(cmd, "df") == 0) {
-            cmd_fs();
+            cmd_fs(arg);
         } else if (strcmp(cmd, "devpath") == 0) {
             cmd_devpath(arg);
         } else if (strcmp(cmd, "ls") == 0 || strcmp(cmd, "dir") == 0) {

@@ -2,8 +2,11 @@
 #include "bootinfo.h"
 #include "idt.h"
 #include "drivers.h"
+#include "storage.h"
 #include "fs.h"
 #include "lib.h"
+
+const BootInfo *g_boot_info_global = NULL;
 
 void kernel_main(BootInfo *boot_info) {
     if (!boot_info || boot_info->magic != BOOTINFO_MAGIC) {
@@ -11,6 +14,8 @@ void kernel_main(BootInfo *boot_info) {
         __asm__ volatile ("cli; hlt");
         return;
     }
+
+    g_boot_info_global = boot_info;
 
     /* 1. Initialize Dynamic Memory Heap (16MB pre-allocated) */
     heap_init(boot_info->mem.heap_physical_start, boot_info->mem.heap_size_bytes);
@@ -31,7 +36,10 @@ void kernel_main(BootInfo *boot_info) {
     /* 6. Mount Stage-1 Initramfs In-Memory VFS */
     vfs_init_initramfs();
 
-    /* 7. Launch Interactive Bare-Metal Kernel Shell */
+    /* 7. Initialize Storage Subsystem (AHCI SATA, NVMe PCIe, USB Mass Storage) */
+    storage_init();
+
+    /* 8. Launch Interactive Bare-Metal Kernel Shell */
     shell_init(boot_info);
     shell_run(boot_info);
 

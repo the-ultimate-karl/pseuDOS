@@ -302,6 +302,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     UINTN read_size = kernel_pages * 4096;
     kernel_file->Read(kernel_file, &read_size, (VOID *)(uintptr_t)kernel_buffer);
+    boot_info.kernel_physical_base = kernel_buffer;
+    boot_info.kernel_image_size = read_size;
     kernel_file->Close(kernel_file);
     root_dir->Close(root_dir);
     boot_msg(SystemTable, "[ok]\n");
