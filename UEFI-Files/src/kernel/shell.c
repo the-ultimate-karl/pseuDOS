@@ -636,11 +636,16 @@ void shell_run(const BootInfo *boot_info) {
     char prompt_buf[512];
     char prompt_path[256];
 
-    console_puts("pseuDOS kernel v0.5.0-baremetal (x86_64 uefi / bare-metal)\n");
-    console_puts("what's new (kernel version 0.5.0):\n");
+    console_puts("pseuDOS kernel v0.5.1-baremetal (x86_64 uefi / bare-metal)\n");
+    console_puts("what's new (kernel version 0.5.1):\n");
+    console_puts("- dynamic ACPI hardware table parser (RSDP -> XSDT/RSDT -> FADT -> DSDT AML)\n");
+    console_puts("- native ACPI S5 shutdown & VMware backdoor (0x5658) poweroff support\n");
+    console_puts("- silent hardware poweroff without legacy 'safe to power off' messages\n");
+    console_puts("- dynamic FAT32 partition & cluster geometry calculation (MS FAT32 spec)\n");
+    console_puts("- dynamic USB port connect verification (PORTSC) & ghost drive elimination\n");
+    console_puts("- dynamic initramfs VFS boot payload file sizing\n");
     console_puts("- bare-metal AHCI SATA & NVMe PCIe SSD DMA storage drivers\n");
-    console_puts("- USB 3.x xHCI / USB 2.0 EHCI device discovery & bus speed policy\n");
-    console_puts("- GPT partitioning & FAT32 EFI System Partition self-installer engine (flash)\n");
+    console_puts("- GPT partitioning & FAT32 EFI System Partition self-installer (flash)\n");
     console_puts("- storage target filtering (switch-target) & attached drive listing (attached-drives)\n");
     console_puts("- live VFS metrics traversal & block-device partition deep inspector (fs)\n");
     console_puts("- strict bare-metal hardware simulator with IOMMU & NUMA memory holes (run_realistic.sh)\n");

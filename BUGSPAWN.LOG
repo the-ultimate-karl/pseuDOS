@@ -10,3 +10,18 @@ ANTIGRAVITY (2026-09-02 21:38)
 
 [IMPORTANT-BUGS]
 - NVMe 4KB page alignment requirement on PRPs for multi-sector DMA transfers
+
+ANTIGRAVITY (2026-09-02 23:02)
+- Hardcoded FAT32 sectors per FAT and ESP size in gpt_fat32.c causing inaccurate geometry and cluster allocation [FIXED + 2026-09-02 23:01]
+- Ghost USB devices registered unconditionally on USB controller discovery without port connect status checks in usb_storage.c [FIXED + 2026-09-02 23:01]
+- Hardcoded VFS boot payload file sizes in vfs.c causing inaccurate VFS disk usage statistics [FIXED + 2026-09-02 23:01]
+
+[IMPORTANT-BUGS]
+- FAT32 dynamic sector and cluster geometry must be computed from partition size to avoid filesystem corruption
+- USB controllers must verify port connect status (PORTSC) before registering mass storage devices
+
+ANTIGRAVITY (2026-09-02 23:07)
+- ACPI shutdown failure on VMware and real hardware caused by hardcoded I/O ports and missing RSDP/FADT/DSDT table parsing [FIXED + 2026-09-02 23:06]
+
+[IMPORTANT-BUGS]
+- ACPI S5 shutdown requires dynamic FADT PM1a_CNT_BLK and DSDT _S5 AML sleep type parsing

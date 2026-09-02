@@ -1,4 +1,5 @@
 #include "fs.h"
+#include "storage.h"
 #include "lib.h"
 #include "drivers.h"
 
@@ -416,11 +417,15 @@ int vfs_init_initramfs(void) {
     vfs_mkdir("/EFI/BOOT");
     vfs_mkdir("/EFI/pseuDOS");
 
+    size_t boot_size = 0;
+    payload_get_bootloader(&boot_size);
     vfs_node_t *boot_efi = vfs_create_file("/EFI/BOOT/BOOTX64.EFI");
-    if (boot_efi) boot_efi->size = 31554;
+    if (boot_efi) boot_efi->size = boot_size;
 
+    size_t krnl_size = 0;
+    payload_get_kernel(&krnl_size);
     vfs_node_t *krnl_bin = vfs_create_file("/EFI/pseuDOS/kernel.bin");
-    if (krnl_bin) krnl_bin->size = 54204;
+    if (krnl_bin) krnl_bin->size = krnl_size;
 
     /* 3. Create Home & Configuration directories */
     vfs_mkdir("/home");
@@ -437,7 +442,7 @@ int vfs_init_initramfs(void) {
     /* 5. Create default system configuration and documents */
     vfs_write_file("/home/readme.txt", "welcome to pseuDOS bare-metal kernel filesystem!\ntype 'help' to view available commands.\n", 0);
     vfs_write_file("/etc/hostname", "pseuDOS\n", 0);
-    vfs_write_file("/etc/os-release", "NAME=pseuDOS\nVERSION=0.5.0-baremetal\nARCH=x86_64\nEDITION=bare-metal\n", 0);
+    vfs_write_file("/etc/os-release", "NAME=pseuDOS\nVERSION=0.5.1-baremetal\nARCH=x86_64\nEDITION=bare-metal\n", 0);
     vfs_write_file("/protected/bootmgr/config.sys", "boot_default=pseuDOS\ntimeout=5\ndebug=0\n", 0);
 
     return 0;
