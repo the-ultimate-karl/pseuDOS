@@ -636,8 +636,11 @@ void shell_run(const BootInfo *boot_info) {
     char prompt_buf[512];
     char prompt_path[256];
 
-    console_puts("pseuDOS kernel v0.5.1-baremetal (x86_64 uefi / bare-metal)\n");
-    console_puts("what's new (kernel version 0.5.1):\n");
+    console_puts("pseuDOS kernel v0.5.2-baremetal (x86_64 uefi / bare-metal)\n");
+    console_puts("what's new (kernel version 0.5.2):\n");
+    console_puts("- VMware AHCI memory alignment fix (1024B CLB, 256B FB, 128B CTBA static pools)\n");
+    console_puts("- AHCI BIOS/OS handoff (BOHC) & bounded timeout loops to prevent hypervisor lockups\n");
+    console_puts("- EFI auto-boot hook (startup.nsh) for instant standalone disk booting\n");
     console_puts("- dynamic ACPI hardware table parser (RSDP -> XSDT/RSDT -> FADT -> DSDT AML)\n");
     console_puts("- native ACPI S5 shutdown & VMware backdoor (0x5658) poweroff support\n");
     console_puts("- silent hardware poweroff without legacy 'safe to power off' messages\n");

@@ -9,9 +9,12 @@
 
 /* AHCI HBA Memory Register Definitions */
 #define HBA_GHC_AE   (1 << 31)  /* AHCI Enable */
+#define HBA_GHC_IE   (1 << 1)   /* Interrupt Enable */
 #define HBA_GHC_HR   (1 << 0)   /* HBA Reset */
 
 #define PORT_CMD_ST  (1 << 0)   /* Start */
+#define PORT_CMD_SUD (1 << 1)   /* Spin-Up Device */
+#define PORT_CMD_POD (1 << 2)   /* Power On Device */
 #define PORT_CMD_FRE (1 << 4)   /* FIS Receive Enable */
 #define PORT_CMD_FR  (1 << 14)  /* FIS Receive Running */
 #define PORT_CMD_CR  (1 << 15)  /* Command List Running */
@@ -22,6 +25,8 @@
 #define ATA_CMD_IDENTIFY      0xEC
 #define ATA_CMD_READ_DMA_EX   0x25
 #define ATA_CMD_WRITE_DMA_EX  0x35
+
+#define AHCI_MAX_PORTS 32
 
 typedef volatile struct {
     uint32_t clb;
@@ -77,7 +82,7 @@ typedef struct {
     uint32_t ctba;
     uint32_t ctbau;
     uint32_t rsv1[4];
-} HbaCmdHeader;
+} __attribute__((packed)) HbaCmdHeader;
 
 typedef struct {
     uint32_t dba;
@@ -86,14 +91,14 @@ typedef struct {
     uint32_t dbc:22;
     uint32_t rsv1:9;
     uint32_t i:1;
-} HbaPrdtEntry;
+} __attribute__((packed)) HbaPrdtEntry;
 
 typedef struct {
     uint8_t cfis[64];
     uint8_t acmd[16];
     uint8_t rsv[48];
     HbaPrdtEntry prdt_entry[1];
-} HbaCmdTable;
+} __attribute__((packed)) HbaCmdTable;
 
 typedef struct {
     HbaMem *hba;
@@ -101,8 +106,14 @@ typedef struct {
     uint8_t port_num;
     HbaCmdHeader *cmd_headers;
     HbaCmdTable *cmd_tables;
-    void *fib_buf;
 } AhciPortDriver;
+
+/* AHCI 1.3 spec hardware alignment guarantees */
+static uint8_t g_ahci_clb_pool[AHCI_MAX_PORTS][1024] __attribute__((aligned(1024)));
+static uint8_t g_ahci_fb_pool[AHCI_MAX_PORTS][256]   __attribute__((aligned(256)));
+static uint8_t g_ahci_ctba_pool[AHCI_MAX_PORTS][sizeof(HbaCmdTable) + 128] __attribute__((aligned(128)));
+static AhciPortDriver g_ahci_drivers[AHCI_MAX_PORTS];
+static uint32_t g_ahci_driver_count = 0;
 
 int storage_register_device(const StorageDevice *dev);
 
@@ -118,17 +129,30 @@ static void pci_write16(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset,
     uint32_t cur = inl(PCI_CONFIG_DATA);
     int shift = (offset & 2) * 8;
     cur = (cur & ~(0xFFFF << shift)) | ((uint32_t)val << shift);
+    outl(PCI_CONFIG_ADDRESS, address);
     outl(PCI_CONFIG_DATA, cur);
 }
 
-static void port_stop_cmd(HbaPort *port) {
+static int port_stop_cmd(HbaPort *port) {
+    /* 1. Clear ST (bit 0) */
     port->cmd &= ~PORT_CMD_ST;
+
+    /* 2. Wait for CR (bit 15) to clear */
+    int timeout = 50000;
+    while ((port->cmd & PORT_CMD_CR) && --timeout > 0);
+
+    /* 3. Clear FRE (bit 4) */
     port->cmd &= ~PORT_CMD_FRE;
-    while (port->cmd & (PORT_CMD_FR | PORT_CMD_CR));
+
+    /* 4. Wait for FR (bit 14) to clear */
+    timeout = 50000;
+    while ((port->cmd & PORT_CMD_FR) && --timeout > 0);
+    return 0;
 }
 
 static void port_start_cmd(HbaPort *port) {
-    while (port->cmd & PORT_CMD_CR);
+    int timeout = 50000;
+    while ((port->cmd & PORT_CMD_CR) && --timeout > 0);
     port->cmd |= PORT_CMD_FRE;
     port->cmd |= PORT_CMD_ST;
 }
@@ -138,10 +162,13 @@ static int ahci_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t cou
     AhciPortDriver *driver = (AhciPortDriver *)dev->driver_priv;
     HbaPort *port = driver->port;
 
+    /* Clear pending interrupt flags and errors */
     port->is = (uint32_t)-1;
+    port->serr = (uint32_t)-1;
+
     HbaCmdHeader *cmd_header = &driver->cmd_headers[0];
     cmd_header->cfl = sizeof(uint32_t) * 5 / 4;
-    cmd_header->w = 0;
+    cmd_header->w = 0; /* Read */
     cmd_header->prdtl = 1;
 
     HbaCmdTable *cmd_table = driver->cmd_tables;
@@ -173,14 +200,22 @@ static int ahci_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t cou
     fis[14] = 0;
     fis[15] = 0;
 
+    /* Issue command to slot 0 */
     port->ci = 1;
-    while (port->ci & 1) {
+
+    int timeout = 2000000;
+    while ((port->ci & 1) && --timeout > 0) {
         if (port->is & (1 << 30)) { /* Task File Error */
+            return -1;
+        }
+        if (port->tfd & (1 << 0)) { /* ERR bit */
             return -1;
         }
     }
 
-    if (port->is & (1 << 30)) return -1;
+    if (timeout == 0 || (port->is & (1 << 30)) || (port->tfd & (1 << 0))) {
+        return -1;
+    }
     return 0;
 }
 
@@ -189,7 +224,10 @@ static int ahci_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t co
     AhciPortDriver *driver = (AhciPortDriver *)dev->driver_priv;
     HbaPort *port = driver->port;
 
+    /* Clear pending interrupt flags and errors */
     port->is = (uint32_t)-1;
+    port->serr = (uint32_t)-1;
+
     HbaCmdHeader *cmd_header = &driver->cmd_headers[0];
     cmd_header->cfl = sizeof(uint32_t) * 5 / 4;
     cmd_header->w = 1; /* Write */
@@ -224,18 +262,28 @@ static int ahci_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t co
     fis[14] = 0;
     fis[15] = 0;
 
+    /* Issue command to slot 0 */
     port->ci = 1;
-    while (port->ci & 1) {
-        if (port->is & (1 << 30)) {
+
+    int timeout = 2000000;
+    while ((port->ci & 1) && --timeout > 0) {
+        if (port->is & (1 << 30)) { /* Task File Error */
+            return -1;
+        }
+        if (port->tfd & (1 << 0)) { /* ERR bit */
             return -1;
         }
     }
 
-    if (port->is & (1 << 30)) return -1;
+    if (timeout == 0 || (port->is & (1 << 30)) || (port->tfd & (1 << 0))) {
+        return -1;
+    }
     return 0;
 }
 
 static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t slot, uint8_t func) {
+    if (g_ahci_driver_count >= AHCI_MAX_PORTS) return;
+
     HbaPort *port = &hba->ports[port_num];
     uint32_t ssts = port->ssts;
     uint8_t ipm = (ssts >> 8) & 0x0F;
@@ -244,17 +292,22 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     if (det != 3 || ipm != 1) return; /* Device not present and active */
     if (port->sig != SATA_SIG_ATA) return; /* Only SATA hard drives and SSDs */
 
+    /* Clear any pending port interrupts or errors */
+    port->is = (uint32_t)-1;
+    port->serr = (uint32_t)-1;
+
     port_stop_cmd(port);
 
-    /* Allocate memory buffers for port command headers, command tables, and FIS */
-    HbaCmdHeader *cmd_headers = (HbaCmdHeader *)kmalloc(sizeof(HbaCmdHeader) * 32);
-    memset(cmd_headers, 0, sizeof(HbaCmdHeader) * 32);
+    /* Use 1024-byte, 256-byte, and 128-byte aligned static pools */
+    uint32_t d_idx = g_ahci_driver_count;
+    HbaCmdHeader *cmd_headers = (HbaCmdHeader *)&g_ahci_clb_pool[d_idx][0];
+    memset(cmd_headers, 0, sizeof(g_ahci_clb_pool[0]));
 
-    HbaCmdTable *cmd_tables = (HbaCmdTable *)kmalloc(sizeof(HbaCmdTable));
-    memset(cmd_tables, 0, sizeof(HbaCmdTable));
+    void *fib_buf = &g_ahci_fb_pool[d_idx][0];
+    memset(fib_buf, 0, sizeof(g_ahci_fb_pool[0]));
 
-    void *fib_buf = kmalloc(256);
-    memset(fib_buf, 0, 256);
+    HbaCmdTable *cmd_tables = (HbaCmdTable *)&g_ahci_ctba_pool[d_idx][0];
+    memset(cmd_tables, 0, sizeof(g_ahci_ctba_pool[0]));
 
     port->clb = (uint32_t)(uintptr_t)cmd_headers;
     port->clbu = (uint32_t)(((uint64_t)(uintptr_t)cmd_headers) >> 32);
@@ -267,8 +320,8 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     port_start_cmd(port);
 
     /* Allocate 512-byte buffer for IDENTIFY DEVICE */
-    uint16_t *ident_buf = (uint16_t *)kmalloc(512);
-    memset(ident_buf, 0, 512);
+    uint16_t ident_buf[256] __attribute__((aligned(16)));
+    memset(ident_buf, 0, sizeof(ident_buf));
 
     port->is = (uint32_t)-1;
     cmd_headers[0].cfl = sizeof(uint32_t) * 5 / 4;
@@ -286,7 +339,7 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     fis[2] = ATA_CMD_IDENTIFY;
 
     port->ci = 1;
-    int timeout = 100000;
+    int timeout = 500000;
     while ((port->ci & 1) && --timeout > 0);
 
     char model[41];
@@ -314,22 +367,20 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
         }
     } else {
         strcpy(model, "SATA Hard Disk");
-        total_sectors = 20971520; /* 10 GB default */
+        total_sectors = 1048576; /* Standard fallback */
     }
 
     if (model[0] == '\0') {
         strcpy(model, "SATA Drive");
     }
 
-    kfree(ident_buf);
-
-    AhciPortDriver *driver = (AhciPortDriver *)kmalloc(sizeof(AhciPortDriver));
+    AhciPortDriver *driver = &g_ahci_drivers[d_idx];
     driver->hba = hba;
     driver->port = port;
     driver->port_num = port_num;
     driver->cmd_headers = cmd_headers;
     driver->cmd_tables = cmd_tables;
-    driver->fib_buf = fib_buf;
+    g_ahci_driver_count++;
 
     StorageDevice dev;
     memset(&dev, 0, sizeof(StorageDevice));
@@ -337,7 +388,7 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     strcpy(dev.type_str, "SATA");
     strcpy(dev.bus_speed, "SATA 6.0 Gbps");
     dev.type = STORAGE_TYPE_INTERNAL_SATA;
-    dev.total_sectors = total_sectors > 0 ? total_sectors : 20971520;
+    dev.total_sectors = total_sectors > 0 ? total_sectors : 1048576;
     dev.sector_size = 512;
     dev.pci_bus = bus;
     dev.pci_slot = slot;
@@ -375,6 +426,14 @@ void ahci_init(void) {
                     if (abar_phys == 0) continue;
 
                     HbaMem *hba = (HbaMem *)(uintptr_t)abar_phys;
+
+                    /* BIOS/OS Handoff (BOHC) if supported */
+                    if (hba->cap2 & (1 << 0)) {
+                        hba->bohc |= (1 << 1); /* OS Ownership */
+                        int timeout = 10000;
+                        while ((hba->bohc & (1 << 0)) && --timeout > 0);
+                    }
+
                     hba->ghc |= HBA_GHC_AE; /* Enable AHCI Mode */
 
                     uint32_t pi = hba->pi;

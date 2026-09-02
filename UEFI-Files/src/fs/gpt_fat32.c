@@ -254,9 +254,9 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     uint32_t kernel_clusters = (uint32_t)((kernel_size + cluster_size_bytes - 1) / cluster_size_bytes);
     if (kernel_clusters == 0) kernel_clusters = 1;
 
-    uint32_t boot_start_cluster = 6;
+    uint32_t boot_start_cluster = 7;
     uint32_t kernel_start_cluster = boot_start_cluster + boot_clusters;
-    uint32_t total_allocated_clusters = 4 + boot_clusters + kernel_clusters; /* Cluster 2=Root, 3=EFI, 4=BOOT, 5=pseuDOS */
+    uint32_t total_allocated_clusters = 5 + boot_clusters + kernel_clusters; /* Cluster 2=Root, 3=EFI, 4=BOOT, 5=pseuDOS, 6=startup.nsh */
 
     uint32_t free_clusters = (total_clusters > total_allocated_clusters) ? (total_clusters - total_allocated_clusters) : 0;
     uint32_t next_free_cluster = kernel_start_cluster + kernel_clusters;
@@ -324,8 +324,8 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
                 entries[i] = 0x0FFFFFF8; /* Media descriptor */
             } else if (c == 1) {
                 entries[i] = 0xFFFFFFFF; /* Clean shutdown status */
-            } else if (c >= 2 && c <= 5) {
-                entries[i] = 0x0FFFFFFF; /* EOF for system directories */
+            } else if (c >= 2 && c <= 6) {
+                entries[i] = 0x0FFFFFFF; /* EOF for system directories and startup.nsh */
             } else if (c >= boot_start_cluster && c < boot_start_cluster + boot_clusters) {
                 uint32_t offset = c - boot_start_cluster;
                 entries[i] = (offset + 1 == boot_clusters) ? 0x0FFFFFFF : (c + 1);
@@ -364,11 +364,17 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     /* 10. Deploying System Directories */
     if (progress_cb) progress_cb("creating \\EFI\\BOOT and \\EFI\\pseuDOS system directories...", 1);
 
-    /* Cluster 2: Root Directory contains "\EFI" */
+    /* Cluster 2: Root Directory contains "\EFI" and "STARTUP.NSH" */
     memset(cluster_buf, 0, cluster_size_bytes);
     FatDirEntry *entries = (FatDirEntry *)cluster_buf;
     make_dir_entry(&entries[0], "EFI        ", 0x10, 3, 0);
+    make_dir_entry(&entries[1], "STARTUP NSH", 0x20, 6, 24);
     WRITE_CLUSTER(2, cluster_buf);
+
+    /* Cluster 6: \startup.nsh file */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    strcpy((char *)cluster_buf, "\\EFI\\BOOT\\BOOTX64.EFI\r\n");
+    WRITE_CLUSTER(6, cluster_buf);
 
     /* Cluster 3: \EFI Directory contains "BOOT" and "PSEUDOS" */
     memset(cluster_buf, 0, cluster_size_bytes);

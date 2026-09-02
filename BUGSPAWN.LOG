@@ -25,3 +25,9 @@ ANTIGRAVITY (2026-09-02 23:07)
 
 [IMPORTANT-BUGS]
 - ACPI S5 shutdown requires dynamic FADT PM1a_CNT_BLK and DSDT _S5 AML sleep type parsing
+
+ANTIGRAVITY (2026-09-02 23:26)
+- VMware OS lockup during fs --drives and SATA flash caused by unaligned AHCI command lists (CLB 1024B, FB 256B, CTBA 128B) and missing BIOS/OS handoff (BOHC) and port timeouts [FIXED + 2026-09-02 23:25]
+
+[IMPORTANT-BUGS]
+- AHCI spec requires CLB 1024-byte alignment, FB 256-byte alignment, CTBA 128-byte alignment, and BOHC handoff; unaligned buffers cause DMA lockup on VMware

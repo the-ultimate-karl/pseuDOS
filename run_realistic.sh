@@ -217,6 +217,7 @@ if [ "$MODE" = "gui" ]; then
     exec qemu-system-x86_64 \
         -bios "$OVMF_BIOS" \
         -cdrom "$ISO_PATH" \
+        -boot order=d,menu=off \
         -display gtk \
         -serial mon:stdio \
         "${HARDWARE_SIM_ARGS[@]}" \
@@ -228,6 +229,7 @@ elif [ "$MODE" = "curses" ]; then
     exec qemu-system-x86_64 \
         -bios "$OVMF_BIOS" \
         -cdrom "$ISO_PATH" \
+        -boot order=d,menu=off \
         -display curses \
         "${HARDWARE_SIM_ARGS[@]}" \
         "${NUMA_ARGS[@]}" \
@@ -238,6 +240,7 @@ else
     exec qemu-system-x86_64 \
         -bios "$OVMF_BIOS" \
         -cdrom "$ISO_PATH" \
+        -boot order=d,menu=off \
         -nographic \
         "${HARDWARE_SIM_ARGS[@]}" \
         "${NUMA_ARGS[@]}" \

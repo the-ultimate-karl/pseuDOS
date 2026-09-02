@@ -179,6 +179,7 @@ if [ "$MODE" = "gui" ]; then
     exec qemu-system-x86_64 \
         -bios "$OVMF_BIOS" \
         -cdrom "$ISO_PATH" \
+        -boot order=d,menu=off \
         -m 512M \
         -smp 2 \
         -cpu max \
@@ -191,6 +192,7 @@ elif [ "$MODE" = "curses" ]; then
     exec qemu-system-x86_64 \
         -bios "$OVMF_BIOS" \
         -cdrom "$ISO_PATH" \
+        -boot order=d,menu=off \
         -m 512M \
         -smp 2 \
         -cpu max \
@@ -202,6 +204,7 @@ else
     exec qemu-system-x86_64 \
         -bios "$OVMF_BIOS" \
         -cdrom "$ISO_PATH" \
+        -boot order=d,menu=off \
         -m 512M \
         -smp 2 \
         -cpu max \
