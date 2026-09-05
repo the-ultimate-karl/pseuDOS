@@ -117,21 +117,8 @@ static uint32_t g_ahci_driver_count = 0;
 
 int storage_register_device(const StorageDevice *dev);
 
-static uint32_t pci_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
-    uint32_t address = (uint32_t)((bus << 16) | (slot << 11) | (func << 8) | (offset & 0xFC) | ((uint32_t)0x80000000));
-    outl(PCI_CONFIG_ADDRESS, address);
-    return inl(PCI_CONFIG_DATA);
-}
-
-static void pci_write16(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint16_t val) {
-    uint32_t address = (uint32_t)((bus << 16) | (slot << 11) | (func << 8) | (offset & 0xFC) | ((uint32_t)0x80000000));
-    outl(PCI_CONFIG_ADDRESS, address);
-    uint32_t cur = inl(PCI_CONFIG_DATA);
-    int shift = (offset & 2) * 8;
-    cur = (cur & ~(0xFFFF << shift)) | ((uint32_t)val << shift);
-    outl(PCI_CONFIG_ADDRESS, address);
-    outl(PCI_CONFIG_DATA, cur);
-}
+#define pci_read32  pci_read_config_32
+#define pci_write16 pci_write_config_16
 
 static int port_stop_cmd(HbaPort *port) {
     /* 1. Clear ST (bit 0) */
@@ -386,7 +373,13 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     memset(&dev, 0, sizeof(StorageDevice));
     strncpy(dev.name, model, sizeof(dev.name) - 1);
     strcpy(dev.type_str, "SATA");
-    strcpy(dev.bus_speed, "SATA 6.0 Gbps");
+
+    uint8_t spd = (ssts >> 4) & 0x0F;
+    if (spd == 1) strcpy(dev.bus_speed, "SATA 1.5 Gbps (Gen 1)");
+    else if (spd == 2) strcpy(dev.bus_speed, "SATA 3.0 Gbps (Gen 2)");
+    else if (spd == 3) strcpy(dev.bus_speed, "SATA 6.0 Gbps (Gen 3)");
+    else strcpy(dev.bus_speed, "SATA 6.0 Gbps");
+
     dev.type = STORAGE_TYPE_INTERNAL_SATA;
     dev.total_sectors = total_sectors > 0 ? total_sectors : 1048576;
     dev.sector_size = 512;

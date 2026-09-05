@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 #!/usr/bin/env python3
 import struct
 import os
@@ -86,9 +85,15 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
     efi_clus = alloc(1)
     boot_clus = alloc(1)
     pseudos_clus = alloc(1) if kernel_data else 0
+    protect_clus = alloc(1) if kernel_data else 0
+    krnl_clus = alloc(1) if kernel_data else 0
+    bootmgr_clus = alloc(1) if kernel_data else 0
+    bootcfg_clus = alloc(1) if kernel_data else 0
     
     root_off = (rsvd_sec + num_fats * sec_per_fat) * sector_size
     image[root_off:root_off+32] = mkentry("EFI        ", 0x10, efi_clus, 0)
+    if protect_clus:
+        image[root_off+32:root_off+64] = mkentry("PROTECT    ", 0x10, protect_clus, 0)
     
     # EFI dir contains BOOT and PSEUDOS subdirectories
     d = bytearray(sec_per_clus * sector_size)
@@ -110,7 +115,7 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
     d2[64:96] = mkentry("BOOTX64 EFI", 0x20, c_start, len(efi_data))
     write_clus(boot_clus, d2)
 
-    # PSEUDOS dir with KERNEL.BIN
+    # PSEUDOS dir with fallback KERNEL.BIN
     if kernel_data:
         k_cnt = (len(kernel_data) + sec_per_clus * sector_size - 1) // (sec_per_clus * sector_size)
         k_start = alloc(k_cnt)
@@ -121,6 +126,31 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
         d3[32:64] = mkentry("..         ", 0x10, efi_clus, 0)
         d3[64:96] = mkentry("KERNEL  BIN", 0x20, k_start, len(kernel_data))
         write_clus(pseudos_clus, d3)
+
+        # PROTECT dir contains KRNL and BOOTMGR
+        dp = bytearray(sec_per_clus * sector_size)
+        dp[0:32] = mkentry(".          ", 0x10, protect_clus, 0)
+        dp[32:64] = mkentry("..         ", 0x10, 0, 0)
+        dp[64:96] = mkentry("KRNL       ", 0x10, krnl_clus, 0)
+        dp[96:128] = mkentry("BOOTMGR    ", 0x10, bootmgr_clus, 0)
+        write_clus(protect_clus, dp)
+
+        # KRNL dir with primary KERNEL.BIN
+        dk = bytearray(sec_per_clus * sector_size)
+        dk[0:32] = mkentry(".          ", 0x10, krnl_clus, 0)
+        dk[32:64] = mkentry("..         ", 0x10, protect_clus, 0)
+        dk[64:96] = mkentry("KERNEL  BIN", 0x20, k_start, len(kernel_data))
+        write_clus(krnl_clus, dk)
+
+        # BOOTMGR dir with BOOT.CFG
+        cfg_bytes = b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\kernel.bin\r\ncmdline=quiet devpath=hardware\r\ndefault_resolution=1280x720\r\n"
+        write_clus(bootcfg_clus, cfg_bytes)
+
+        db = bytearray(sec_per_clus * sector_size)
+        db[0:32] = mkentry(".          ", 0x10, bootmgr_clus, 0)
+        db[32:64] = mkentry("..         ", 0x10, protect_clus, 0)
+        db[64:96] = mkentry("BOOT    CFG", 0x20, bootcfg_clus, len(cfg_bytes))
+        write_clus(bootmgr_clus, db)
     
     fat1_off = rsvd_sec * sector_size
     fat2_off = (rsvd_sec + sec_per_fat) * sector_size

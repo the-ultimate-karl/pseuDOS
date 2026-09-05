@@ -254,9 +254,9 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     uint32_t kernel_clusters = (uint32_t)((kernel_size + cluster_size_bytes - 1) / cluster_size_bytes);
     if (kernel_clusters == 0) kernel_clusters = 1;
 
-    uint32_t boot_start_cluster = 7;
+    uint32_t boot_start_cluster = 11;
     uint32_t kernel_start_cluster = boot_start_cluster + boot_clusters;
-    uint32_t total_allocated_clusters = 5 + boot_clusters + kernel_clusters; /* Cluster 2=Root, 3=EFI, 4=BOOT, 5=pseuDOS, 6=startup.nsh */
+    uint32_t total_allocated_clusters = 9 + boot_clusters + kernel_clusters; /* Clusters 2..10 system structures */
 
     uint32_t free_clusters = (total_clusters > total_allocated_clusters) ? (total_clusters - total_allocated_clusters) : 0;
     uint32_t next_free_cluster = kernel_start_cluster + kernel_clusters;
@@ -324,8 +324,8 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
                 entries[i] = 0x0FFFFFF8; /* Media descriptor */
             } else if (c == 1) {
                 entries[i] = 0xFFFFFFFF; /* Clean shutdown status */
-            } else if (c >= 2 && c <= 6) {
-                entries[i] = 0x0FFFFFFF; /* EOF for system directories and startup.nsh */
+            } else if (c >= 2 && c <= 10) {
+                entries[i] = 0x0FFFFFFF; /* EOF for system directories and startup/config files */
             } else if (c >= boot_start_cluster && c < boot_start_cluster + boot_clusters) {
                 uint32_t offset = c - boot_start_cluster;
                 entries[i] = (offset + 1 == boot_clusters) ? 0x0FFFFFFF : (c + 1);
@@ -362,13 +362,14 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     if (!cluster_buf) return -1;
 
     /* 10. Deploying System Directories */
-    if (progress_cb) progress_cb("creating \\EFI\\BOOT and \\EFI\\pseuDOS system directories...", 1);
+    if (progress_cb) progress_cb("creating \\EFI and \\protected system directories...", 1);
 
-    /* Cluster 2: Root Directory contains "\EFI" and "STARTUP.NSH" */
+    /* Cluster 2: Root Directory contains "\EFI", "STARTUP.NSH", and "\PROTECT" */
     memset(cluster_buf, 0, cluster_size_bytes);
     FatDirEntry *entries = (FatDirEntry *)cluster_buf;
     make_dir_entry(&entries[0], "EFI        ", 0x10, 3, 0);
     make_dir_entry(&entries[1], "STARTUP NSH", 0x20, 6, 24);
+    make_dir_entry(&entries[2], "PROTECT    ", 0x10, 7, 0);
     WRITE_CLUSTER(2, cluster_buf);
 
     /* Cluster 6: \startup.nsh file */
@@ -393,13 +394,46 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     make_dir_entry(&entries[2], "BOOTX64 EFI", 0x20, boot_start_cluster, (uint32_t)bootx64_size);
     WRITE_CLUSTER(4, cluster_buf);
 
-    /* Cluster 5: \EFI\pseuDOS contains "KERNEL.BIN" */
+    /* Cluster 5: \EFI\pseuDOS contains fallback "KERNEL.BIN" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
     make_dir_entry(&entries[0], ".          ", 0x10, 5, 0);
     make_dir_entry(&entries[1], "..         ", 0x10, 3, 0);
     make_dir_entry(&entries[2], "KERNEL  BIN", 0x20, kernel_start_cluster, (uint32_t)kernel_size);
     WRITE_CLUSTER(5, cluster_buf);
+
+    /* Cluster 7: \protected Directory contains "KRNL" and "BOOTMGR" */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    entries = (FatDirEntry *)cluster_buf;
+    make_dir_entry(&entries[0], ".          ", 0x10, 7, 0);
+    make_dir_entry(&entries[1], "..         ", 0x10, 0, 0);
+    make_dir_entry(&entries[2], "KRNL       ", 0x10, 8, 0);
+    make_dir_entry(&entries[3], "BOOTMGR    ", 0x10, 9, 0);
+    WRITE_CLUSTER(7, cluster_buf);
+
+    /* Cluster 8: \protected\krnl contains primary "KERNEL.BIN" */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    entries = (FatDirEntry *)cluster_buf;
+    make_dir_entry(&entries[0], ".          ", 0x10, 8, 0);
+    make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
+    make_dir_entry(&entries[2], "KERNEL  BIN", 0x20, kernel_start_cluster, (uint32_t)kernel_size);
+    WRITE_CLUSTER(8, cluster_buf);
+
+    /* Cluster 9: \protected\bootmgr contains "BOOT.CFG" */
+    const char *cfg_content = "# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\kernel.bin\r\ncmdline=quiet devpath=hardware\r\ndefault_resolution=1280x720\r\n";
+    uint32_t cfg_len = (uint32_t)strlen(cfg_content);
+
+    memset(cluster_buf, 0, cluster_size_bytes);
+    entries = (FatDirEntry *)cluster_buf;
+    make_dir_entry(&entries[0], ".          ", 0x10, 9, 0);
+    make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
+    make_dir_entry(&entries[2], "BOOT    CFG", 0x20, 10, cfg_len);
+    WRITE_CLUSTER(9, cluster_buf);
+
+    /* Cluster 10: \protected\bootmgr\boot.cfg file content */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    memcpy(cluster_buf, cfg_content, cfg_len);
+    WRITE_CLUSTER(10, cluster_buf);
 
     /* 11. Deploying BOOTX64.EFI */
     if (progress_cb) progress_cb("copying \\EFI\\BOOT\\BOOTX64.EFI boot manager...", 1);
@@ -415,7 +449,7 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     }
 
     /* 12. Deploying kernel.bin */
-    if (progress_cb) progress_cb("copying \\EFI\\pseuDOS\\kernel.bin bare-metal payload...", 1);
+    if (progress_cb) progress_cb("copying \\protected\\krnl\\kernel.bin bare-metal payload...", 1);
     for (uint32_t i = 0; i < kernel_clusters; i++) {
         memset(cluster_buf, 0, cluster_size_bytes);
         size_t offset = (size_t)i * cluster_size_bytes;

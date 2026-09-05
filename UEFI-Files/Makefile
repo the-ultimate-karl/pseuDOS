@@ -44,6 +44,7 @@ KERNEL_SRCS = src/kernel/kernel.c \
               src/fs/vfs.c \
               src/fs/devpath.c \
               src/fs/gpt_fat32.c \
+              src/fs/fat32_sync.c \
               src/lib/heap.c \
               src/lib/string.c \
               src/lib/guid.c \

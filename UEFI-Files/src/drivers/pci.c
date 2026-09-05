@@ -5,7 +5,7 @@
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
 
-static uint32_t pci_read_config_32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+uint32_t pci_read_config_32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
     uint32_t address = (uint32_t)((1U << 31)
                                 | ((uint32_t)bus << 16)
                                 | ((uint32_t)slot << 11)
@@ -15,9 +15,31 @@ static uint32_t pci_read_config_32(uint8_t bus, uint8_t slot, uint8_t func, uint
     return inl(PCI_CONFIG_DATA);
 }
 
-static uint16_t pci_read_config_16(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+uint16_t pci_read_config_16(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
     uint32_t val = pci_read_config_32(bus, slot, func, offset);
     return (uint16_t)((val >> ((offset & 2) * 8)) & 0xFFFF);
+}
+
+uint8_t pci_read_config_8(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+    uint32_t val = pci_read_config_32(bus, slot, func, offset);
+    return (uint8_t)((val >> ((offset & 3) * 8)) & 0xFF);
+}
+
+void pci_write_config_32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint32_t val) {
+    uint32_t address = (uint32_t)((1U << 31)
+                                | ((uint32_t)bus << 16)
+                                | ((uint32_t)slot << 11)
+                                | ((uint32_t)func << 8)
+                                | (offset & 0xFC));
+    outl(PCI_CONFIG_ADDRESS, address);
+    outl(PCI_CONFIG_DATA, val);
+}
+
+void pci_write_config_16(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint16_t val) {
+    uint32_t cur = pci_read_config_32(bus, slot, func, offset);
+    int shift = (offset & 2) * 8;
+    cur = (cur & ~(0xFFFFU << shift)) | ((uint32_t)val << shift);
+    pci_write_config_32(bus, slot, func, offset, cur);
 }
 
 static const char *pci_class_to_str(uint8_t base_class, uint8_t sub_class) {

@@ -31,3 +31,41 @@ ANTIGRAVITY (2026-09-02 23:26)
 
 [IMPORTANT-BUGS]
 - AHCI spec requires CLB 1024-byte alignment, FB 256-byte alignment, CTBA 128-byte alignment, and BOHC handoff; unaligned buffers cause DMA lockup on VMware
+
+ANTIGRAVITY (2026-09-02 23:41)
+- Hardcoded root filesystem status in shell.c printing 'initramfs' and 'volatile system RAM' when booted from physical SATA/NVMe/USB drives [FIXED + 2026-09-02 23:41]
+
+[IMPORTANT-BUGS]
+- Root filesystem inspector (fs) must dynamically correlate UEFI boot hardware devpath with registered storage devices to display actual boot medium and partition health
+
+ANTIGRAVITY (2026-09-03 00:00)
+- VFS operations (write, mkdir, del) did not synchronize to physical FAT32 disk sectors, causing data loss across reboots on persistent storage [FIXED + 2026-09-03 00:00]
+
+[IMPORTANT-BUGS]
+- Persistent block-device FAT32 synchronization requires immediate write-through to physical directory entries, FAT1/FAT2 tables, FSInfo, and data cluster chains
+
+ANTIGRAVITY (2026-09-05 11:23)
+- Bootloader flat binary load of PE32+ kernel caused truncated allocation (39 pages vs 83 pages required by SizeOfImage), unzeroed BSS section, and unmapped .idata collision with VFS root pointers [FIXED + 2026-09-05 11:23]
+
+[IMPORTANT-BUGS]
+- Bootloader must allocate kernel memory based on PE SizeOfImage rather than raw FileSize, zero out BSS pages, and copy sections to their respective VirtualAddresses
+
+ANTIGRAVITY (2026-09-05 12:47)
+- Bootloader ignored kernel read errors and bypassed ERR_KERNEL_INTEGRITY validation in bootloader.c, causing unhandled CPU #UD exceptions when executing truncated or corrupt kernels [FIXED + 2026-09-05 12:47]
+
+[IMPORTANT-BUGS]
+- Bootloader must strictly validate read size, DOS MZ magic, PE signature, architecture, and section table bounds against actual read bytes before ExitBootServices, invoking error_boot(ERR_KERNEL_INTEGRITY) on corruption
+
+ANTIGRAVITY (2026-09-05 15:05)
+- Stack buffer overflow in utoa caused by unconstrained min_width in src/lib/string.c [FIXED + 2026-09-05 15:05]
+- Dangling g_vfs_cwd pointer caused by deleting current working directory or its ancestor in src/fs/vfs.c [FIXED + 2026-09-05 15:05]
+- Arithmetic multiplication overflow in kcalloc caused by missing bounds validation in src/lib/heap.c [FIXED + 2026-09-05 15:05]
+- Memory corruption in kfree caused by missing heap pointer range validation in src/lib/heap.c [FIXED + 2026-09-05 15:05]
+- Direct script execution failure caused by double shebang in scripts/make_iso.py [FIXED + 2026-09-05 15:05]
+- Bootloader ExitBootServices failure reporting generic error instead of ERR_EXIT_BOOT_SERVICES_FAILED in src/boot/bootloader.c [FIXED + 2026-09-05 15:05]
+
+[IMPORTANT-BUGS]
+- utoa number formatting must not pad directly into fixed-size stack buffers; vsnprintf must handle padding directly into destination string
+- VFS directory deletion must verify whether cwd is within the deleted subtree and reset cwd to an existing ancestor before freeing nodes
+- Kernel heap allocator must guard against arithmetic overflow in kcalloc and validate pointer ranges in kfree to prevent heap metadata corruption
+

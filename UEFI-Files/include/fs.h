@@ -41,6 +41,13 @@ extern BootLocationInfo g_boot_location;
 
 /* VFS Core Operations */
 int vfs_init_initramfs(void);
+int vfs_mount_boot_media(const BootInfo *boot_info);
+int fat32_is_mounted(void);
+int fat32_sync_write_file(const char *path, const char *text, int append);
+int fat32_sync_create_file(const char *path);
+int fat32_sync_mkdir(const char *path);
+int fat32_sync_delete_node(const char *path, int is_dir);
+
 vfs_node_t *vfs_find_node(const char *path);
 vfs_node_t *vfs_mkdir(const char *path);
 vfs_node_t *vfs_create_file(const char *path);

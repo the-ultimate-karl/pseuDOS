@@ -187,7 +187,11 @@ vfs_node_t *vfs_mkdir(const char *path) {
         return NULL;
     }
 
-    return create_node(dir_name, VFS_NODE_DIRECTORY, parent);
+    vfs_node_t *node = create_node(dir_name, VFS_NODE_DIRECTORY, parent);
+    if (node && fat32_is_mounted()) {
+        fat32_sync_mkdir(norm_path);
+    }
+    return node;
 }
 
 vfs_node_t *vfs_create_file(const char *path) {
@@ -220,7 +224,11 @@ vfs_node_t *vfs_create_file(const char *path) {
         return NULL;
     }
 
-    return create_node(file_name, VFS_NODE_FILE, parent);
+    vfs_node_t *node = create_node(file_name, VFS_NODE_FILE, parent);
+    if (node && fat32_is_mounted()) {
+        fat32_sync_create_file(norm_path);
+    }
+    return node;
 }
 
 int vfs_write_file(const char *path, const char *text, int append) {
@@ -255,6 +263,12 @@ int vfs_write_file(const char *path, const char *text, int append) {
         node->content[node->size] = '\0';
     }
 
+    if (fat32_is_mounted()) {
+        char norm_path[256];
+        normalize_path(path, norm_path, sizeof(norm_path));
+        fat32_sync_write_file(norm_path, text, append);
+    }
+
     return (int)node->size;
 }
 
@@ -282,6 +296,15 @@ static int check_node_protected_recursive(vfs_node_t *node) {
             return 1;
         }
         child = child->next_sibling;
+    }
+    return 0;
+}
+
+static int is_node_in_subtree(vfs_node_t *root, vfs_node_t *target) {
+    vfs_node_t *curr = target;
+    while (curr) {
+        if (curr == root) return 1;
+        curr = curr->parent;
     }
     return 0;
 }
@@ -321,8 +344,38 @@ int vfs_remove_node_ex(const char *path, int recursive, int force) {
         return -4; /* Protected directory! */
     }
 
+    int is_dir = (node->type == VFS_NODE_DIRECTORY);
+
     vfs_node_t *parent = node->parent;
     if (!parent) return -3;
+
+    /* If current working directory is inside the subtree being deleted, reset cwd to safe parent */
+    if (is_node_in_subtree(node, g_vfs_cwd)) {
+        vfs_node_t *safe_dir = parent;
+        while (safe_dir && is_node_in_subtree(node, safe_dir)) {
+            safe_dir = safe_dir->parent;
+        }
+        if (!safe_dir) safe_dir = g_vfs_root;
+        g_vfs_cwd = safe_dir;
+
+        /* Rebuild g_cwd_path for the safe directory */
+        char path_stack[16][64];
+        int depth = 0;
+        vfs_node_t *c = g_vfs_cwd;
+        while (c && c != g_vfs_root && depth < 16) {
+            strncpy(path_stack[depth++], c->name, 63);
+            c = c->parent;
+        }
+        if (depth == 0) {
+            strcpy(g_cwd_path, "/");
+        } else {
+            g_cwd_path[0] = '\0';
+            for (int d = depth - 1; d >= 0; d--) {
+                strcat(g_cwd_path, "/");
+                strcat(g_cwd_path, path_stack[d]);
+            }
+        }
+    }
 
     if (parent->first_child == node) {
         parent->first_child = node->next_sibling;
@@ -337,6 +390,11 @@ int vfs_remove_node_ex(const char *path, int recursive, int force) {
     }
 
     free_vfs_subtree(node);
+
+    if (fat32_is_mounted()) {
+        fat32_sync_delete_node(norm_path, is_dir);
+    }
+
     return 0;
 }
 
@@ -368,7 +426,7 @@ const char *vfs_getcwd(void) {
 void vfs_listdir(const char *path) {
     vfs_node_t *target = NULL;
     if (!path || path[0] == '\0') {
-        target = g_vfs_cwd;
+        target = g_vfs_cwd ? g_vfs_cwd : g_vfs_root;
     } else {
         char norm_path[256];
         normalize_path(path, norm_path, sizeof(norm_path));
@@ -404,9 +462,11 @@ void vfs_listdir(const char *path) {
 }
 
 int vfs_init_initramfs(void) {
-    /* 1. Create root directory node */
-    g_vfs_root = create_node("/", VFS_NODE_DIRECTORY, NULL);
-    if (!g_vfs_root) return -1;
+    /* 1. Create root directory node if not present */
+    if (!g_vfs_root) {
+        g_vfs_root = create_node("/", VFS_NODE_DIRECTORY, NULL);
+        if (!g_vfs_root) return -1;
+    }
 
     g_vfs_cwd = g_vfs_root;
     strcpy(g_cwd_path, "/");
@@ -422,16 +482,12 @@ int vfs_init_initramfs(void) {
     vfs_node_t *boot_efi = vfs_create_file("/EFI/BOOT/BOOTX64.EFI");
     if (boot_efi) boot_efi->size = boot_size;
 
-    size_t krnl_size = 0;
-    payload_get_kernel(&krnl_size);
-    vfs_node_t *krnl_bin = vfs_create_file("/EFI/pseuDOS/kernel.bin");
-    if (krnl_bin) krnl_bin->size = krnl_size;
-
-    /* 3. Create Home & Configuration directories */
+    /* 3. Create standard user and volatile directories */
     vfs_mkdir("/home");
-    vfs_mkdir("/etc");
+    vfs_mkdir("/tmp");
+    vfs_mkdir("/services");
 
-    /* 4. Create Protected system trees */
+    /* 4. Create Protected system zones matching vfs.py & memfs.py */
     vfs_node_t *prot = vfs_mkdir("/protected");
     if (prot) prot->is_protected = 1;
     vfs_mkdir("/protected/bootmgr");
@@ -439,13 +495,58 @@ int vfs_init_initramfs(void) {
     vfs_mkdir("/protected/krnl");
     vfs_mkdir("/protected/krnl/essential");
 
-    /* 5. Create default system configuration and documents */
-    vfs_write_file("/home/readme.txt", "welcome to pseuDOS bare-metal kernel filesystem!\ntype 'help' to view available commands.\n", 0);
-    vfs_write_file("/etc/hostname", "pseuDOS\n", 0);
-    vfs_write_file("/etc/os-release", "NAME=pseuDOS\nVERSION=0.5.2-baremetal\nARCH=x86_64\nEDITION=bare-metal\n", 0);
-    vfs_write_file("/protected/bootmgr/config.sys", "boot_default=pseuDOS\ntimeout=5\ndebug=0\n", 0);
+    vfs_node_t *cmds = vfs_mkdir("/commands");
+    if (cmds) cmds->is_protected = 1;
+
+    vfs_node_t *coreutils = vfs_mkdir("/coreutils");
+    if (coreutils) coreutils->is_protected = 1;
+
+    /* 5. Deploy kernel payload and Windows-style boot manager configuration */
+    size_t krnl_size = 0;
+    payload_get_kernel(&krnl_size);
+    vfs_node_t *krnl_bin = vfs_create_file("/protected/krnl/kernel.bin");
+    if (krnl_bin) krnl_bin->size = krnl_size;
+
+    /* Maintain fallback copy in /EFI/pseuDOS */
+    vfs_node_t *krnl_legacy = vfs_create_file("/EFI/pseuDOS/kernel.bin");
+    if (krnl_legacy) krnl_legacy->size = krnl_size;
+
+    vfs_write_file("/protected/bootmgr/boot.cfg",
+        "# pseuDOS Boot Configuration\n"
+        "# Architecture: x86_64 UEFI\n"
+        "kernel=\\protected\\krnl\\kernel.bin\n"
+        "cmdline=quiet devpath=hardware\n"
+        "default_resolution=1280x720\n"
+        "bootmgr_version=1.0.0\n", 0);
 
     return 0;
+}
+
+int vfs_mount_boot_media(const BootInfo *boot_info) {
+    /* 1. Create root directory node */
+    g_vfs_root = create_node("/", VFS_NODE_DIRECTORY, NULL);
+    if (!g_vfs_root) return -1;
+
+    g_vfs_cwd = g_vfs_root;
+    strcpy(g_cwd_path, "/");
+
+    /* 2. Check if boot device is a physical persistent block device */
+    int boot_drive_idx = 0;
+    StorageDevice *boot_dev = storage_get_boot_device(boot_info ? boot_info->hardware_devpath : NULL, &boot_drive_idx);
+
+    if (boot_dev && (boot_dev->type == STORAGE_TYPE_INTERNAL_SATA ||
+                     boot_dev->type == STORAGE_TYPE_INTERNAL_NVME ||
+                     boot_dev->type == STORAGE_TYPE_EXTERNAL_USB)) {
+        /* Mount physical FAT32 partition */
+        extern int fat32_mount_disk(StorageDevice *dev);
+        if (fat32_mount_disk(boot_dev) == 0) {
+            /* Successfully mounted persistent disk */
+            return 0;
+        }
+    }
+
+    /* Fallback to volatile in-memory ramfs (e.g. CD-ROM or unformatted drive) */
+    return vfs_init_initramfs();
 }
 
 static void vfs_crawl_stats(vfs_node_t *node, uint32_t *nodes, uint32_t *dirs, uint32_t *files, uint64_t *bytes) {

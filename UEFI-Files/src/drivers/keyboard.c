@@ -89,6 +89,9 @@ static char translate_scancode(uint8_t scancode) {
 
     if (g_shift_pressed) {
         c = g_scancode_table_shifted[scancode];
+        if (g_caps_lock && c >= 'A' && c <= 'Z') {
+            c += 32;
+        }
     } else {
         c = g_scancode_table_normal[scancode];
         if (use_upper && c >= 'a' && c <= 'z') {

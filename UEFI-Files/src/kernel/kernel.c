@@ -33,11 +33,11 @@ void kernel_main(BootInfo *boot_info) {
     /* 5. Initialize Boot Location & Devpath */
     fs_init_devpath(boot_info);
 
-    /* 6. Mount Stage-1 Initramfs In-Memory VFS */
-    vfs_init_initramfs();
-
-    /* 7. Initialize Storage Subsystem (AHCI SATA, NVMe PCIe, USB Mass Storage) */
+    /* 6. Initialize Storage Subsystem (AHCI SATA, NVMe PCIe, USB Mass Storage) */
     storage_init();
+
+    /* 7. Mount Persistent Boot Disk FAT32 Filesystem (or Ramfs on CD-ROM) */
+    vfs_mount_boot_media(boot_info);
 
     /* 8. Launch Interactive Bare-Metal Kernel Shell */
     shell_init(boot_info);

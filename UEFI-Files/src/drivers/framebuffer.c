@@ -23,6 +23,40 @@ static int g_fb_initialized = 0;
 static uint32_t g_last_good_width = 1280;
 static uint32_t g_last_good_height = 720;
 
+static int g_is_vmware_svga = 0;
+static uint16_t g_svga_io_base = 0;
+static uint64_t g_svga_fb_base = 0;
+
+static void svga_detect(void) {
+    g_is_vmware_svga = 0;
+    for (uint16_t bus = 0; bus < 8; bus++) {
+        for (uint8_t slot = 0; slot < 32; slot++) {
+            for (uint8_t func = 0; func < 8; func++) {
+                uint16_t vendor = pci_read_config_16((uint8_t)bus, slot, func, 0);
+                if (vendor == 0x15AD) {
+                    uint16_t device = pci_read_config_16((uint8_t)bus, slot, func, 2);
+                    if (device == 0x0405) {
+                        uint32_t bar0 = pci_read_config_32((uint8_t)bus, slot, func, 0x10);
+                        uint32_t bar1 = pci_read_config_32((uint8_t)bus, slot, func, 0x14);
+                        if (bar0 & 1) {
+                            uint16_t io_base = (uint16_t)(bar0 & ~3);
+                            outl(io_base + 0, 0); /* SVGA_REG_ID */
+                            outl(io_base + 1, 0x90000002);
+                            outl(io_base + 0, 0);
+                            if (inl(io_base + 1) == 0x90000002) {
+                                g_is_vmware_svga = 1;
+                                g_svga_io_base = io_base;
+                                g_svga_fb_base = (uint64_t)(bar1 & ~0xF);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void vbe_write(uint16_t index, uint16_t data) {
     outw(VBE_DISPI_IOPORT_INDEX, index);
     outw(VBE_DISPI_IOPORT_DATA, data);
@@ -40,6 +74,15 @@ void fb_init(const FramebufferInfo *fb_info) {
 
     g_last_good_width = g_fb.width;
     g_last_good_height = g_fb.height;
+
+    svga_detect();
+}
+
+int fb_is_runtime_switch_supported(void) {
+    if (g_is_vmware_svga) return 1;
+    uint16_t vbe_id = vbe_read(VBE_DISPI_INDEX_ID);
+    if (vbe_id >= 0xB0C0 && vbe_id <= 0xB0CF) return 1;
+    return 0;
 }
 
 uint32_t fb_get_width(void) {
@@ -66,26 +109,63 @@ int fb_set_resolution(uint32_t width, uint32_t height) {
         return -1;
     }
 
-    /* Probe Bochs / VBE Dispi virtual GPU hardware */
-    uint16_t vbe_id = vbe_read(VBE_DISPI_INDEX_ID);
-    if (vbe_id >= 0xB0C0 && vbe_id <= 0xB0CF) {
-        vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
-        vbe_write(VBE_DISPI_INDEX_XRES, (uint16_t)width);
-        vbe_write(VBE_DISPI_INDEX_YRES, (uint16_t)height);
-        vbe_write(VBE_DISPI_INDEX_BPP, 32);
-        vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+    int mode_switched = 0;
+    uint32_t new_stride = width;
 
-        uint16_t cur_x = vbe_read(VBE_DISPI_INDEX_XRES);
-        uint16_t cur_y = vbe_read(VBE_DISPI_INDEX_YRES);
-        if (cur_x != (uint16_t)width || cur_y != (uint16_t)height) {
-            return -1;
+    /* Tier 1: VMware SVGA II Hardware Switch */
+    if (g_is_vmware_svga && g_svga_io_base != 0) {
+        outl(g_svga_io_base + 0, 2); /* SVGA_REG_WIDTH */
+        outl(g_svga_io_base + 1, width);
+        outl(g_svga_io_base + 0, 3); /* SVGA_REG_HEIGHT */
+        outl(g_svga_io_base + 1, height);
+        outl(g_svga_io_base + 0, 7); /* SVGA_REG_BITS_PER_PIXEL */
+        outl(g_svga_io_base + 1, 32);
+        outl(g_svga_io_base + 0, 1); /* SVGA_REG_ENABLE */
+        outl(g_svga_io_base + 1, 1);
+
+        outl(g_svga_io_base + 0, 14); /* SVGA_REG_BYTES_PER_LINE */
+        uint32_t bpl = inl(g_svga_io_base + 1);
+        if (bpl >= width * 4) {
+            new_stride = bpl / 4;
+        } else {
+            new_stride = width;
         }
+
+        if (g_svga_fb_base) {
+            g_fb.physical_base = g_svga_fb_base;
+        }
+        mode_switched = 1;
+    }
+
+    /* Tier 2: Bochs / QEMU VBE Dispi Hardware Switch */
+    if (!mode_switched) {
+        uint16_t vbe_id = vbe_read(VBE_DISPI_INDEX_ID);
+        if (vbe_id >= 0xB0C0 && vbe_id <= 0xB0CF) {
+            vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+            vbe_write(VBE_DISPI_INDEX_XRES, (uint16_t)width);
+            vbe_write(VBE_DISPI_INDEX_YRES, (uint16_t)height);
+            vbe_write(VBE_DISPI_INDEX_BPP, 32);
+            vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+
+            uint16_t cur_x = vbe_read(VBE_DISPI_INDEX_XRES);
+            uint16_t cur_y = vbe_read(VBE_DISPI_INDEX_YRES);
+            if (cur_x == (uint16_t)width && cur_y == (uint16_t)height) {
+                new_stride = width;
+                mode_switched = 1;
+            }
+        }
+    }
+
+    /* Tier 3: Real Hardware (Intel/AMD/Nvidia) without SVGA hardware mode-switching */
+    if (!mode_switched) {
+        /* Fail immediately without altering software geometry or scanline stride */
+        return -1;
     }
 
     /* Update active framebuffer coordinates and scanline pitch */
     g_fb.width = width;
     g_fb.height = height;
-    g_fb.pixels_per_scanline = width;
+    g_fb.pixels_per_scanline = new_stride;
 
     /* Recalibrate text console matrix, redraw preserved history */
     console_rebuild_layout();
@@ -116,8 +196,8 @@ void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
 void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
     if (!g_fb_initialized) return;
     if (x >= g_fb.width || y >= g_fb.height) return;
-    if (x + w > g_fb.width) w = g_fb.width - x;
-    if (y + h > g_fb.height) h = g_fb.height - y;
+    if (w > g_fb.width - x) w = g_fb.width - x;
+    if (h > g_fb.height - y) h = g_fb.height - y;
 
     uint32_t raw_color = color_to_raw(color);
     volatile uint32_t *fb = (volatile uint32_t *)g_fb.physical_base;

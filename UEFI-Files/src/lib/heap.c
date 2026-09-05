@@ -60,9 +60,15 @@ void *kmalloc(size_t size) {
 }
 
 void kfree(void *ptr) {
-    if (!ptr) return;
+    if (!ptr || !g_heap_start) return;
 
-    heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - BLOCK_HEADER_SIZE);
+    /* Bounds check: pointer must be within valid heap range */
+    uint8_t *p = (uint8_t *)ptr;
+    if (p < g_heap_start + BLOCK_HEADER_SIZE || p >= g_heap_start + g_heap_total_size) {
+        return;
+    }
+
+    heap_block_t *block = (heap_block_t *)(p - BLOCK_HEADER_SIZE);
     block->is_free = 1;
 
     /* Coalesce with next block if free */
@@ -85,6 +91,9 @@ void kfree(void *ptr) {
 }
 
 void *kcalloc(size_t num, size_t size) {
+    if (num > 0 && size > (size_t)-1 / num) {
+        return NULL;
+    }
     size_t total = num * size;
     void *ptr = kmalloc(total);
     if (ptr) {
@@ -100,7 +109,12 @@ void *krealloc(void *ptr, size_t new_size) {
         return NULL;
     }
 
-    heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - BLOCK_HEADER_SIZE);
+    uint8_t *p = (uint8_t *)ptr;
+    if (!g_heap_start || p < g_heap_start + BLOCK_HEADER_SIZE || p >= g_heap_start + g_heap_total_size) {
+        return NULL;
+    }
+
+    heap_block_t *block = (heap_block_t *)(p - BLOCK_HEADER_SIZE);
     if (block->size >= new_size) {
         return ptr;
     }

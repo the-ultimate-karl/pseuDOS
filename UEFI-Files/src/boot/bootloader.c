@@ -169,6 +169,24 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         boot_msg(SystemTable, "[fallback]\n");
     }
 
+    /* Switch ConOut to matching high-resolution text mode for 1280x720 */
+    if (SystemTable->ConOut && SystemTable->ConOut->QueryMode && SystemTable->ConOut->SetMode && SystemTable->ConOut->Mode) {
+        INT32 best_text_mode = SystemTable->ConOut->Mode->Mode;
+        UINTN max_text_cols = 0;
+        for (INT32 tm = 0; tm < SystemTable->ConOut->Mode->MaxMode; tm++) {
+            UINTN cols = 0, rows = 0;
+            if (!EFI_ERROR(SystemTable->ConOut->QueryMode(SystemTable->ConOut, (UINTN)tm, &cols, &rows))) {
+                if (cols > max_text_cols) {
+                    max_text_cols = cols;
+                    best_text_mode = tm;
+                }
+            }
+        }
+        if (max_text_cols > 0 && best_text_mode != SystemTable->ConOut->Mode->Mode) {
+            SystemTable->ConOut->SetMode(SystemTable->ConOut, (UINTN)best_text_mode);
+        }
+    }
+
     /* 5. Populate BootInfo Structure */
     static BootInfo boot_info;
     memset(&boot_info, 0, sizeof(BootInfo));
@@ -240,9 +258,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
     if (boot_info.hardware_devpath[0] == '\0') {
-        strcpy(boot_info.hardware_devpath, "PciRoot(0x0)/Pci(0x1,0x1)/Ata(0x0)/CDROM(0x0)");
+        strcpy(boot_info.hardware_devpath, "Unknown / Direct Boot");
     }
-    strcpy(boot_info.boot_file_path, "\\EFI\\pseuDOS\\kernel.bin");
+    boot_info.boot_file_path[0] = '\0';
 
     /* 8. Mount Boot Partition Filesystem Volume */
     boot_msg(SystemTable, "[bootmgfw] mounting boot partition filesystem volume... ");
@@ -266,46 +284,203 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
     boot_msg(SystemTable, "[ok]\n");
 
-    /* 9. Look for Kernel Image */
-    boot_msg(SystemTable, "[bootmgfw] looking for kernel...\n");
-    const CHAR16 kernel_path[] = { '\\', 'E', 'F', 'I', '\\', 'p', 's', 'e', 'u', 'D', 'O', 'S', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'b', 'i', 'n', 0 };
+    /* 9. Check for Boot Manager Configuration */
+    const CHAR16 bootcfg_path1[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', 'e', 'd', '\\', 'b', 'o', 'o', 't', 'm', 'g', 'r', '\\', 'b', 'o', 'o', 't', '.', 'c', 'f', 'g', 0 };
+    const CHAR16 bootcfg_path2[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', '\\', 'b', 'o', 'o', 't', 'm', 'g', 'r', '\\', 'b', 'o', 'o', 't', '.', 'c', 'f', 'g', 0 };
+    EFI_FILE_PROTOCOL *cfg_file = NULL;
+    status = root_dir->Open(root_dir, &cfg_file, bootcfg_path1, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(status) || !cfg_file) {
+        status = root_dir->Open(root_dir, &cfg_file, bootcfg_path2, EFI_FILE_MODE_READ, 0);
+    }
+    if (!EFI_ERROR(status) && cfg_file) {
+        boot_msg(SystemTable, "[bootmgfw] reading boot configuration \\protected\\bootmgr\\boot.cfg... [ok]\n");
+        cfg_file->Close(cfg_file);
+    }
+
+    /* 10. Look for Kernel Image */
+    boot_msg(SystemTable, "[bootmgfw] looking for kernel image...\n");
+    const CHAR16 kernel_path_win1[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', 'e', 'd', '\\', 'k', 'r', 'n', 'l', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'b', 'i', 'n', 0 };
+    const CHAR16 kernel_path_win2[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', '\\', 'k', 'r', 'n', 'l', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'b', 'i', 'n', 0 };
+    const CHAR16 kernel_path_legacy[] = { '\\', 'E', 'F', 'I', '\\', 'p', 's', 'e', 'u', 'D', 'O', 'S', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'b', 'i', 'n', 0 };
     EFI_FILE_PROTOCOL *kernel_file = NULL;
 
-    status = root_dir->Open(
-        root_dir,
-        &kernel_file,
-        kernel_path,
-        EFI_FILE_MODE_READ,
-        0
+    status = root_dir->Open(root_dir, &kernel_file, kernel_path_win1, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(status) || !kernel_file) {
+        status = root_dir->Open(root_dir, &kernel_file, kernel_path_win2, EFI_FILE_MODE_READ, 0);
+    }
+
+    if (!EFI_ERROR(status) && kernel_file) {
+        strcpy(boot_info.boot_file_path, "\\protected\\krnl\\kernel.bin");
+        boot_msg(SystemTable, "[bootmgfw] found kernel at \\protected\\krnl\\kernel.bin [ok]\n");
+    } else {
+        status = root_dir->Open(root_dir, &kernel_file, kernel_path_legacy, EFI_FILE_MODE_READ, 0);
+        if (!EFI_ERROR(status) && kernel_file) {
+            strcpy(boot_info.boot_file_path, "\\EFI\\pseuDOS\\kernel.bin");
+            boot_msg(SystemTable, "[bootmgfw] found kernel at \\EFI\\pseuDOS\\kernel.bin (fallback) [ok]\n");
+        } else {
+            error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "kernel image not found (checked \\protected\\krnl and \\EFI\\pseuDOS)");
+        }
+    }
+
+    /* 11. Dynamically Query Kernel File Size */
+    boot_msg(SystemTable, "[bootmgfw] querying kernel image file size... ");
+    UINT8 info_buf[sizeof(EFI_FILE_INFO) + 256];
+    UINTN info_size = sizeof(info_buf);
+    UINT64 actual_file_size = 0;
+
+    status = kernel_file->GetInfo(
+        kernel_file,
+        &gEfiFileInfoGuid,
+        &info_size,
+        info_buf
     );
 
-    if (EFI_ERROR(status) || !kernel_file) {
-        error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "\\EFI\\pseuDOS\\kernel.bin: no such file or directory");
+    if (!EFI_ERROR(status)) {
+        EFI_FILE_INFO *file_info = (EFI_FILE_INFO *)info_buf;
+        actual_file_size = file_info->FileSize;
     }
-    boot_msg(SystemTable, "[bootmgfw] found kernel! loading kernel... [ok]\n");
 
-    /* 10. Read Kernel Binary */
-    boot_msg(SystemTable, "[bootmgfw] allocating physical memory pages for kernel... ");
+    if (actual_file_size == 0) {
+        boot_msg(SystemTable, "[failed]\n");
+        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "kernel image file size is 0 bytes or unreadable");
+    }
+
+    if (actual_file_size < 512) {
+        boot_msg(SystemTable, "[failed]\n");
+        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "kernel file size is too small to contain valid executable code");
+    }
+
+    UINTN kernel_file_pages = (actual_file_size + 4095) / 4096;
+    if (kernel_file_pages < 16) kernel_file_pages = 16;
+    boot_msg(SystemTable, "[ok]\n");
+
+    /* 12. Read Kernel Binary into Temporary Buffer */
+    boot_msg(SystemTable, "[bootmgfw] allocating memory for kernel loading... ");
+    EFI_PHYSICAL_ADDRESS temp_file_buffer = 0;
+    status = SystemTable->BootServices->AllocatePages(
+        AllocateAnyPages,
+        EfiLoaderData,
+        kernel_file_pages,
+        &temp_file_buffer
+    );
+
+    if (EFI_ERROR(status) || temp_file_buffer == 0) {
+        boot_msg(SystemTable, "[failed]\n");
+        error_boot(SystemTable, ERR_MEMORY_MAP_EXHAUSTED, "failed to allocate memory pages for kernel loading");
+    }
+
+    UINTN read_size = actual_file_size;
+    status = kernel_file->Read(kernel_file, &read_size, (VOID *)(uintptr_t)temp_file_buffer);
+    kernel_file->Close(kernel_file);
+    root_dir->Close(root_dir);
+
+    if (EFI_ERROR(status)) {
+        boot_msg(SystemTable, "[failed]\n");
+        error_boot(SystemTable, ERR_STORAGE_DEVICE_IO, "failed to read kernel binary from storage media");
+    }
+
+    if (read_size < actual_file_size) {
+        boot_msg(SystemTable, "[truncated]\n");
+        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "kernel binary truncated on storage media (read fewer bytes than file size)");
+    }
+    boot_msg(SystemTable, "[ok]\n");
+
+    /* 13. Map PE Sections and Allocate Execution Memory */
+    boot_msg(SystemTable, "[bootmgfw] mapping kernel PE sections and allocating memory... ");
     EFI_PHYSICAL_ADDRESS kernel_buffer = 0;
-    UINTN kernel_pages = 128; /* 512 KB */
+    UINT8 *raw_file = (UINT8 *)(uintptr_t)temp_file_buffer;
+
+    /* Validate DOS MZ Header */
+    if (read_size < 0x40 || raw_file[0] != 'M' || raw_file[1] != 'Z') {
+        boot_msg(SystemTable, "[invalid]\n");
+        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "invalid executable format: missing 'MZ' DOS header");
+    }
+
+    UINT32 pe_offset = *(UINT32 *)(raw_file + 0x3C);
+    if (pe_offset + 0x100 > read_size ||
+        raw_file[pe_offset] != 'P' || raw_file[pe_offset + 1] != 'E' ||
+        raw_file[pe_offset + 2] != '\0' || raw_file[pe_offset + 3] != '\0') {
+        boot_msg(SystemTable, "[corrupted]\n");
+        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "invalid PE signature: kernel executable header is corrupted");
+    }
+
+    UINT16 machine = *(UINT16 *)(raw_file + pe_offset + 4);
+    if (machine != 0x8664) {
+        boot_msg(SystemTable, "[unsupported]\n");
+        error_boot(SystemTable, ERR_UNSUPPORTED_CPU, "kernel target machine architecture is not x86_64");
+    }
+
+    UINT16 num_sections = *(UINT16 *)(raw_file + pe_offset + 6);
+    UINT16 opt_hdr_size = *(UINT16 *)(raw_file + pe_offset + 20);
+    UINT32 opt_offset = pe_offset + 24;
+
+    if (opt_offset + opt_hdr_size > read_size || num_sections == 0) {
+        boot_msg(SystemTable, "[corrupted]\n");
+        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "corrupted PE optional header or zero sections");
+    }
+
+    UINT32 kernel_entry_rva = *(UINT32 *)(raw_file + opt_offset + 16);
+    UINT32 size_of_image = *(UINT32 *)(raw_file + opt_offset + 56);
+    UINT32 size_of_headers = *(UINT32 *)(raw_file + opt_offset + 60);
+
+    if (size_of_image < 4096 || kernel_entry_rva == 0 || kernel_entry_rva >= size_of_image) {
+        boot_msg(SystemTable, "[invalid]\n");
+        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "invalid kernel entry point RVA or SizeOfImage");
+    }
+
+    UINT32 sec_table_offset = opt_offset + opt_hdr_size;
+    if (sec_table_offset + (UINT32)num_sections * 40 > read_size) {
+        boot_msg(SystemTable, "[corrupted]\n");
+        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "PE section table extends past end of file");
+    }
+
+    UINTN kernel_image_pages = (size_of_image + 4095) / 4096;
+    if (kernel_image_pages < 16) kernel_image_pages = 16;
+
     status = SystemTable->BootServices->AllocatePages(
         AllocateAnyPages,
         EfiLoaderCode,
-        kernel_pages,
+        kernel_image_pages,
         &kernel_buffer
     );
 
     if (EFI_ERROR(status) || kernel_buffer == 0) {
         boot_msg(SystemTable, "[failed]\n");
-        error_boot(SystemTable, ERR_MEMORY_MAP_EXHAUSTED, "failed to allocate memory pages for kernel execution");
+        error_boot(SystemTable, ERR_MEMORY_MAP_EXHAUSTED, "failed to allocate execution pages for kernel image");
     }
 
-    UINTN read_size = kernel_pages * 4096;
-    kernel_file->Read(kernel_file, &read_size, (VOID *)(uintptr_t)kernel_buffer);
+    /* Cleanly zero out all allocated pages (clears BSS and padding) */
+    memset((void *)(uintptr_t)kernel_buffer, 0, kernel_image_pages * 4096);
+
+    /* Copy PE headers */
+    if (size_of_headers > read_size) size_of_headers = (UINT32)read_size;
+    memcpy((void *)(uintptr_t)kernel_buffer, raw_file, size_of_headers);
+
+    /* Copy each section to its virtual address */
+    UINT8 *sec_hdr = raw_file + sec_table_offset;
+    for (UINT16 i = 0; i < num_sections; i++) {
+        UINT32 vaddr = *(UINT32 *)(sec_hdr + 12);
+        UINT32 raw_size = *(UINT32 *)(sec_hdr + 16);
+        UINT32 raw_ptr = *(UINT32 *)(sec_hdr + 20);
+        if (raw_size > 0 && raw_ptr > 0) {
+            if (raw_ptr + raw_size > read_size) {
+                boot_msg(SystemTable, "[truncated]\n");
+                error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "kernel section data extends past physical read bytes (truncated file)");
+            }
+            if (vaddr + raw_size > size_of_image) {
+                boot_msg(SystemTable, "[corrupted]\n");
+                error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "kernel section virtual address exceeds SizeOfImage");
+            }
+            memcpy((UINT8 *)(uintptr_t)kernel_buffer + vaddr, raw_file + raw_ptr, raw_size);
+        }
+        sec_hdr += 40;
+    }
+
     boot_info.kernel_physical_base = kernel_buffer;
-    boot_info.kernel_image_size = read_size;
-    kernel_file->Close(kernel_file);
-    root_dir->Close(root_dir);
+    boot_info.kernel_image_size = size_of_image;
+
+    /* Free temporary load buffer */
+    SystemTable->BootServices->FreePages(temp_file_buffer, kernel_file_pages);
     boot_msg(SystemTable, "[ok]\n");
 
     /* 11. Locate ACPI RSDP in Configuration Table */
@@ -370,7 +545,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
         status = SystemTable->BootServices->ExitBootServices(ImageHandle, map_key);
         if (EFI_ERROR(status)) {
-            error_boot(SystemTable, ERR_GENERIC_BOOT_FAILURE, "ExitBootServices() failed");
+            error_boot(SystemTable, ERR_EXIT_BOOT_SERVICES_FAILED, "memory map key mismatch on retry");
         }
     }
 
@@ -379,11 +554,19 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     /* 14. Jump to Bare-Metal Kernel Entry */
     uint8_t *raw = (uint8_t *)(uintptr_t)kernel_buffer;
-    uint32_t pe_offset = *(uint32_t *)(raw + 0x3C);
-    if (raw[pe_offset] == 'P' && raw[pe_offset + 1] == 'E') {
-        uint32_t entry_rva = *(uint32_t *)(raw + pe_offset + 0x28);
-        BAREMETAL_KERNEL_ENTRY entry = (BAREMETAL_KERNEL_ENTRY)(raw + entry_rva);
+    if (kernel_entry_rva != 0) {
+        BAREMETAL_KERNEL_ENTRY entry = (BAREMETAL_KERNEL_ENTRY)(raw + kernel_entry_rva);
         entry(&boot_info);
+    } else {
+        uint32_t pe_hdr_off = *(uint32_t *)(raw + 0x3C);
+        if (raw[pe_hdr_off] == 'P' && raw[pe_hdr_off + 1] == 'E') {
+            uint32_t rva = *(uint32_t *)(raw + pe_hdr_off + 0x28);
+            BAREMETAL_KERNEL_ENTRY entry = (BAREMETAL_KERNEL_ENTRY)(raw + rva);
+            entry(&boot_info);
+        } else {
+            BAREMETAL_KERNEL_ENTRY entry = (BAREMETAL_KERNEL_ENTRY)raw;
+            entry(&boot_info);
+        }
     }
 
     /* If kernel returns, halt */

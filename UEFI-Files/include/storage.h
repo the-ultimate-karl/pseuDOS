@@ -87,7 +87,45 @@ typedef struct {
     char health_status[32];        /* "Clean / Healthy", "Dirty / Unclean", "Unformatted" */
 } StorageFsInfo;
 
+typedef struct {
+    uint32_t part_index;
+    char part_type_name[48];
+    uint64_t start_lba;
+    uint64_t end_lba;
+    uint64_t total_sectors;
+    int has_fs;
+    char fs_type[32];
+    char vol_label[32];
+    char oem_name[16];
+    uint32_t bytes_per_sector;
+    uint32_t sectors_per_cluster;
+    uint32_t cluster_size;
+    uint32_t reserved_sectors;
+    uint32_t num_fats;
+    uint32_t fat_size_sectors;
+    uint32_t root_cluster;
+    uint32_t total_clusters;
+    uint32_t free_clusters;
+    uint32_t used_clusters;
+    uint64_t total_bytes;
+    uint64_t free_bytes;
+    uint64_t used_bytes;
+    char total_str[32];
+    char free_str[32];
+    char used_str[32];
+    char health_status[32];
+} StoragePartitionInfo;
+
+typedef struct {
+    int has_partition_table;
+    char part_table_type[16];      /* "GPT", "MBR", "None" */
+    uint32_t partition_count;
+    StoragePartitionInfo partitions[16];
+} StorageDriveInfo;
+
 int storage_inspect_fs(StorageDevice *dev, StorageFsInfo *out_info);
+int storage_inspect_drive(StorageDevice *dev, StorageDriveInfo *out_drive_info);
+StorageDevice *storage_get_boot_device(const char *boot_devpath, int *out_drive_index);
 
 /* Embedded Installer Payloads */
 const uint8_t *payload_get_bootloader(size_t *out_size);

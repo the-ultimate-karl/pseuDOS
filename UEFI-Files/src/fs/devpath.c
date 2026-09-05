@@ -2,8 +2,8 @@
 #include "lib.h"
 
 BootLocationInfo g_boot_location = {
-    .base_hardware_path = "PciRoot(0x0)/Pci(0x1,0x1)/Ata(0x0)/CDROM(0x0)",
-    .partition_boot_file = "\\EFI\\pseuDOS\\kernel.bin",
+    .base_hardware_path = "",
+    .partition_boot_file = "\\protected\\krnl\\kernel.bin",
     .mode = DEVPATH_MODE_FIRMWARE
 };
 

@@ -74,19 +74,34 @@ static uint8_t g_nvme_io_buf[4096] __attribute__((aligned(4096)));
 
 int storage_register_device(const StorageDevice *dev);
 
-static uint32_t nvme_pci_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
-    uint32_t address = (uint32_t)((bus << 16) | (slot << 11) | (func << 8) | (offset & 0xFC) | ((uint32_t)0x80000000));
-    outl(PCI_CONFIG_ADDRESS, address);
-    return inl(PCI_CONFIG_DATA);
-}
+#define nvme_pci_read32  pci_read_config_32
+#define nvme_pci_write16 pci_write_config_16
 
-static void nvme_pci_write16(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint16_t val) {
-    uint32_t address = (uint32_t)((bus << 16) | (slot << 11) | (func << 8) | (offset & 0xFC) | ((uint32_t)0x80000000));
-    outl(PCI_CONFIG_ADDRESS, address);
-    uint32_t cur = inl(PCI_CONFIG_DATA);
-    int shift = (offset & 2) * 8;
-    cur = (cur & ~(0xFFFF << shift)) | ((uint32_t)val << shift);
-    outl(PCI_CONFIG_DATA, cur);
+static void nvme_get_pcie_speed(uint8_t bus, uint8_t slot, uint8_t func, char *out_buf, size_t max_len) {
+    uint8_t cap_ptr = pci_read_config_8(bus, slot, func, 0x34);
+    int iterations = 48;
+    while (cap_ptr >= 0x40 && (cap_ptr & 3) == 0 && --iterations > 0) {
+        uint8_t cap_id = pci_read_config_8(bus, slot, func, cap_ptr);
+        if (cap_id == 0x10) { /* PCI Express Capability */
+            uint16_t link_status = pci_read_config_16(bus, slot, func, cap_ptr + 0x12);
+            uint8_t speed_code = link_status & 0x0F;
+            uint8_t width = (link_status >> 4) & 0x3F;
+
+            const char *gen = "PCIe";
+            const char *gts = "";
+            if (speed_code == 1) { gen = "PCIe 1.0"; gts = "2.5 GT/s"; }
+            else if (speed_code == 2) { gen = "PCIe 2.0"; gts = "5.0 GT/s"; }
+            else if (speed_code == 3) { gen = "PCIe 3.0"; gts = "8.0 GT/s"; }
+            else if (speed_code == 4) { gen = "PCIe 4.0"; gts = "16.0 GT/s"; }
+            else if (speed_code == 5) { gen = "PCIe 5.0"; gts = "32.0 GT/s"; }
+
+            snprintf(out_buf, max_len, "%s x%u (%s)", gen, width > 0 ? width : 4, gts);
+            return;
+        }
+        cap_ptr = pci_read_config_8(bus, slot, func, cap_ptr + 1);
+    }
+    strncpy(out_buf, "PCIe x4 (8.0 GT/s)", max_len - 1);
+    out_buf[max_len - 1] = '\0';
 }
 
 static inline volatile uint32_t *nvme_reg(NvmeDriver *d, uint32_t offset) {
@@ -342,7 +357,7 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     memset(&dev, 0, sizeof(StorageDevice));
     strncpy(dev.name, model, sizeof(dev.name) - 1);
     strcpy(dev.type_str, "NVMe");
-    strcpy(dev.bus_speed, "PCIe 3.0 x4");
+    nvme_get_pcie_speed(bus, slot, func, dev.bus_speed, sizeof(dev.bus_speed));
     dev.type = STORAGE_TYPE_INTERNAL_NVME;
     dev.total_sectors = total_sectors;
     dev.sector_size = sector_size;
@@ -354,7 +369,19 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     dev.write_sectors = nvme_write_sectors_impl;
 
     storage_format_size(dev.total_sectors * dev.sector_size, dev.size_str, sizeof(dev.size_str));
-    snprintf(dev.devpath, sizeof(dev.devpath), "PciRoot(0x0)/Pci(0x%X,0x%X)/NVMe(0x1,00-00-00-00-00-00-00-01)", slot, func);
+
+    uint8_t *eui = &g_ident_buf[120];
+    int has_eui = 0;
+    for (int i = 0; i < 8; i++) {
+        if (eui[i] != 0) has_eui = 1;
+    }
+    if (has_eui) {
+        snprintf(dev.devpath, sizeof(dev.devpath),
+            "PciRoot(0x0)/Pci(0x%X,0x%X)/NVMe(0x1,%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X)",
+            slot, func, eui[0], eui[1], eui[2], eui[3], eui[4], eui[5], eui[6], eui[7]);
+    } else {
+        snprintf(dev.devpath, sizeof(dev.devpath), "PciRoot(0x0)/Pci(0x%X,0x%X)/NVMe(0x1,00-00-00-00-00-00-00-01)", slot, func);
+    }
 
     storage_register_device(&dev);
 }

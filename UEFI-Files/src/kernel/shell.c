@@ -253,16 +253,22 @@ static void cmd_screenres(const char *arg) {
 
     size_t i = 0;
     size_t w_idx = 0;
-    while (arg[i] != '\0' && arg[i] != ' ' && w_idx < sizeof(w_str) - 1) {
-        w_str[w_idx++] = arg[i++];
+    while (arg[i] != '\0' && arg[i] != ' ') {
+        if (w_idx < sizeof(w_str) - 1) {
+            w_str[w_idx++] = arg[i];
+        }
+        i++;
     }
     w_str[w_idx] = '\0';
 
     while (arg[i] == ' ') i++;
 
     size_t h_idx = 0;
-    while (arg[i] != '\0' && arg[i] != ' ' && h_idx < sizeof(h_str) - 1) {
-        h_str[h_idx++] = arg[i++];
+    while (arg[i] != '\0' && arg[i] != ' ') {
+        if (h_idx < sizeof(h_str) - 1) {
+            h_str[h_idx++] = arg[i];
+        }
+        i++;
     }
     h_str[h_idx] = '\0';
 
@@ -276,88 +282,70 @@ static void cmd_screenres(const char *arg) {
         return;
     }
 
-    /* Tier 1: Attempt requested resolution */
+    if (!fb_is_runtime_switch_supported()) {
+        console_puts("screenres: runtime video mode switching is not supported by current display hardware.\n");
+        console_printf("active display: %ux%u (native UEFI linear framebuffer TrueColor)\n", fb_get_width(), fb_get_height());
+        console_puts("note: on bare-metal hardware (Intel/AMD/Nvidia), display resolution is set natively by UEFI GOP during boot.\n");
+        return;
+    }
+
     int res = fb_set_resolution((uint32_t)target_w, (uint32_t)target_h);
     if (res == 0) {
         console_printf("screenres: successfully switched resolution to %ux%u\n", (uint32_t)target_w, (uint32_t)target_h);
         return;
     }
 
-    /* Tier 2: Attempt restoring last known good resolution */
-    console_printf("screenres: failed to switch to %ldx%ld\n", target_w, target_h);
-    console_puts("screenres: switching back to last known good resolution...\n");
-    uint32_t last_w = fb_get_last_good_width();
-    uint32_t last_h = fb_get_last_good_height();
-    res = fb_set_resolution(last_w, last_h);
-    if (res == 0) {
-        console_printf("screenres: successfully switched back to %ux%u\n", last_w, last_h);
-        return;
-    }
-
-    /* Tier 3: Attempt universal Safe-Mode resolution (800x600) */
-    console_puts("screenres: failed to restore last known resolution!\n");
-    console_puts("screenres: recovering in safe-mode (800x600)...\n");
-    res = fb_set_resolution(800, 600);
-    if (res == 0) {
-        console_puts("screenres: successfully recovered in safe-mode 800x600\n");
-        return;
-    }
-
-    /* Tier 4: Fatal Error - System Halt */
-    console_puts("screenres: fatal graphics error: unable to restore video mode!\n");
-    console_puts("screenres: system halted to prevent display corruption.\n");
-    __asm__ volatile ("cli");
-    while (1) {
-        __asm__ volatile ("hlt");
-    }
+    console_printf("screenres: display controller rejected mode %ldx%ld; keeping active mode %ux%u\n",
+        target_w, target_h, fb_get_width(), fb_get_height());
 }
 
 static void cmd_fs(const char *arg) {
     if (!arg || arg[0] == '\0') {
-        /* 1. Live in-memory VFS Statistics */
+        /* 1. Live Root Filesystem & Boot Medium Status */
         uint32_t total_nodes = 0, total_dirs = 0, total_files = 0;
         uint64_t total_bytes = 0;
         vfs_get_stats(&total_nodes, &total_dirs, &total_files, &total_bytes);
 
+        int boot_drive_num = 0;
+        StorageDevice *boot_dev = storage_get_boot_device(g_boot_location.base_hardware_path, &boot_drive_num);
+
         console_puts("active root filesystem information:\n");
-        console_puts("  current root (/)  : initramfs (in-memory ramdisk vfs)\n");
-        console_puts("  filesystem type   : tmpfs / initramfs\n");
-        console_puts("  storage medium    : volatile system RAM\n");
-        console_puts("  mount point       : /\n");
+
+        if (boot_dev) {
+            StorageFsInfo boot_fs;
+            storage_inspect_fs(boot_dev, &boot_fs);
+
+            console_printf("  current root (/)  : Drive %d (%s - %s)\n", boot_drive_num, boot_dev->name, boot_dev->type_str);
+            console_printf("  storage medium    : Non-Volatile %s Block Storage (%s)\n", boot_dev->type_str, boot_dev->bus_speed);
+            console_printf("  boot partition    : %s (%s)\n", boot_fs.has_partition_table ? boot_fs.part_type_name : "RAW", boot_fs.part_table_type);
+            console_printf("  filesystem type   : %s (ESP) + In-Memory VFS Tree\n", boot_fs.fs_type);
+            console_puts("  mount point       : /\n");
+            console_printf("  hardware devpath  : %s\n", g_boot_location.base_hardware_path);
+            if (boot_fs.has_filesystem) {
+                console_printf("  partition capacity: %s free / %s total (%s)\n", boot_fs.free_str, boot_fs.total_str, boot_fs.health_status);
+            }
+        } else if (strstr(g_boot_location.base_hardware_path, "CDROM") || strstr(g_boot_location.base_hardware_path, "Ata(")) {
+            console_puts("  current root (/)  : Optical UEFI Boot ISO (CD-ROM)\n");
+            console_puts("  storage medium    : Optical ISO9660 Media + In-Memory VFS\n");
+            console_puts("  boot partition    : UEFI El Torito Boot Image\n");
+            console_puts("  filesystem type   : ISO9660 / FAT32 EFI\n");
+            console_puts("  mount point       : /\n");
+            console_printf("  hardware devpath  : %s\n", g_boot_location.base_hardware_path);
+        } else {
+            console_puts("  current root (/)  : In-Memory VFS Root\n");
+            console_puts("  storage medium    : Volatile System RAM\n");
+            console_puts("  filesystem type   : tmpfs / VFS\n");
+            console_puts("  mount point       : /\n");
+            console_printf("  hardware devpath  : %s\n", g_boot_location.base_hardware_path);
+        }
+
         console_printf("  live directory cnt: %u directories\n", total_dirs);
         console_printf("  live file count   : %u files\n", total_files);
         console_printf("  stored file data  : %lu B (%lu KB)\n", total_bytes, total_bytes / 1024);
         console_printf("  storage pool size : %lu MB (dynamic kernel heap)\n", heap_get_total() / (1024 * 1024));
         console_printf("  allocated storage : %lu KB / %lu MB\n", heap_get_used() / 1024, heap_get_total() / (1024 * 1024));
-        console_puts("  status            : active (read/write)\n");
-        console_puts("  boot stage        : stage-1 early boot filesystem (awaiting switch_root)\n\n");
-
-        /* 2. Attached Block Device Partition Summary */
-        console_puts("attached storage partition summary:\n");
-        uint32_t dev_count = storage_get_device_count();
-        if (dev_count == 0) {
-            console_puts("  (no attached block devices detected)\n");
-        } else {
-            for (uint32_t i = 0; i < dev_count; i++) {
-                StorageDevice *dev = storage_get_device(i);
-                if (!dev) continue;
-
-                StorageFsInfo info;
-                if (storage_inspect_fs(dev, &info) == 0 && info.has_filesystem) {
-                    console_printf("  drive %u (%s - %s): %s [%s / %s] - %s free / %s total (%s)\n",
-                        i + 1, dev->type_str, dev->name, dev->size_str,
-                        info.fs_type, info.vol_label, info.free_str, info.total_str, info.health_status);
-                } else if (info.has_partition_table) {
-                    console_printf("  drive %u (%s - %s): %s [%s / %s] - (unformatted filesystem)\n",
-                        i + 1, dev->type_str, dev->name, dev->size_str,
-                        info.part_table_type, info.part_type_name);
-                } else {
-                    console_printf("  drive %u (%s - %s): %s (unpartitioned / RAW)\n",
-                        i + 1, dev->type_str, dev->name, dev->size_str);
-                }
-            }
-        }
-        console_puts("type 'fs --drives' or 'fs <drive_no>' for detailed partition analysis.\n");
+        console_puts("  filesystem status : active (read/write)\n\n");
+        console_puts("use 'fs <drive_no>' to inspect partitions on an attached disk, or 'attached-drives' to list drives.\n");
         return;
     }
 
@@ -407,36 +395,44 @@ static void cmd_fs(const char *arg) {
         StorageDevice *dev = storage_get_device(drive_num - 1);
         if (!dev) return;
 
-        StorageFsInfo info;
-        storage_inspect_fs(dev, &info);
+        StorageDriveInfo drive_info;
+        storage_inspect_drive(dev, &drive_info);
 
         console_printf("\nfilesystem inspection: Drive %d (%s - %s)\n", drive_num, dev->name, dev->type_str);
         console_printf("  hardware devpath    : %s\n", dev->devpath);
         console_printf("  raw capacity        : %s (%lu sectors @ %uB)\n", dev->size_str, dev->total_sectors, dev->sector_size);
         console_printf("  bus speed           : %s\n", dev->bus_speed);
-        console_printf("  partition scheme    : %s\n", info.part_table_type);
-        console_printf("  partition type      : %s\n", info.part_type_name);
-        if (info.has_partition_table) {
-            console_printf("  partition range     : LBA %lu - %lu (%lu sectors / %s)\n",
-                info.part_start_lba, info.part_end_lba, info.part_total_sectors, info.total_str);
-        }
-        console_printf("  filesystem format   : %s\n", info.fs_type);
-        if (info.has_filesystem) {
-            console_printf("  volume label        : %s\n", info.vol_label);
-            console_printf("  oem identifier      : %s\n", info.oem_name);
-            console_printf("  bytes per sector    : %u bytes\n", info.bytes_per_sector);
-            console_printf("  sectors per cluster : %u (%u bytes per cluster)\n", info.sectors_per_cluster, info.cluster_size);
-            console_printf("  reserved sectors    : %u (FSInfo @ LBA %lu)\n", info.reserved_sectors, info.part_start_lba + 1);
-            console_printf("  number of FATs      : %u (%u sectors per FAT)\n", info.num_fats, info.fat_size_sectors);
-            console_printf("  root cluster        : %u\n", info.root_cluster);
-            console_printf("  total data clusters : %u clusters (%s)\n", info.total_clusters, info.total_str);
-            console_printf("  free clusters       : %u clusters (%s free)\n", info.free_clusters, info.free_str);
-            console_printf("  used clusters       : %u clusters (%s used)\n", info.used_clusters, info.used_str);
-            console_printf("  filesystem health   : %s\n", info.health_status);
+        console_printf("  partition scheme    : %s (%u partition(s) found)\n",
+            drive_info.part_table_type, drive_info.partition_count);
+
+        if (drive_info.partition_count == 0) {
+            console_puts("  (no partition table or unformatted disk)\n");
+        } else {
+            for (uint32_t p = 0; p < drive_info.partition_count; p++) {
+                StoragePartitionInfo *part = &drive_info.partitions[p];
+                console_printf("\n  [Partition %u]: %s\n", part->part_index, part->part_type_name);
+                console_printf("    LBA range         : %lu - %lu (%lu sectors / %s)\n",
+                    part->start_lba, part->end_lba, part->total_sectors, part->total_str);
+                console_printf("    filesystem format : %s\n", part->fs_type);
+                if (part->has_fs) {
+                    console_printf("    volume label      : %s\n", part->vol_label);
+                    console_printf("    oem identifier    : %s\n", part->oem_name);
+                    console_printf("    bytes per sector  : %u bytes\n", part->bytes_per_sector);
+                    console_printf("    cluster geometry  : %u sectors/cluster (%u bytes per cluster)\n",
+                        part->sectors_per_cluster, part->cluster_size);
+                    console_printf("    reserved sectors  : %u (FAT size: %u sectors, %u FATs)\n",
+                        part->reserved_sectors, part->fat_size_sectors, part->num_fats);
+                    console_printf("    root cluster      : %u\n", part->root_cluster);
+                    console_printf("    cluster counts    : %u total, %u free, %u used\n",
+                        part->total_clusters, part->free_clusters, part->used_clusters);
+                    console_printf("    volume allocation : %s free / %s total (%s)\n",
+                        part->free_str, part->total_str, part->health_status);
+                }
+            }
         }
         console_puts("\n");
     } else {
-        console_printf("fs: invalid drive number '%s'. type 'fs --drives' to view available drives.\n", arg);
+        console_printf("fs: invalid drive number '%s'. type 'attached-drives' to view available drives.\n", arg);
     }
 }
 
@@ -636,23 +632,23 @@ void shell_run(const BootInfo *boot_info) {
     char prompt_buf[512];
     char prompt_path[256];
 
-    console_puts("pseuDOS kernel v0.5.2-baremetal (x86_64 uefi / bare-metal)\n");
-    console_puts("what's new (kernel version 0.5.2):\n");
+    console_puts("pseuDOS kernel v0.5.3-baremetal (x86_64 uefi / bare-metal)\n");
+    console_puts("what's new (kernel version 0.5.3):\n");
+    console_puts("- persistent FAT32 block-device synchronization with immediate write-through\n");
+    console_puts("- dynamic on-disk FAT32 directory tree loading on permanent storage boot (SATA/NVMe/USB)\n");
+    console_puts("- live sector synchronization for write, touch, mkdir, and del commands\n");
+    console_puts("- volatile ramfs mode preserved when booted from live optical CD-ROM ISO\n");
+    console_puts("- dynamic boot device resolution & filesystem health reporting (fs)\n");
     console_puts("- VMware AHCI memory alignment fix (1024B CLB, 256B FB, 128B CTBA static pools)\n");
     console_puts("- AHCI BIOS/OS handoff (BOHC) & bounded timeout loops to prevent hypervisor lockups\n");
     console_puts("- EFI auto-boot hook (startup.nsh) for instant standalone disk booting\n");
     console_puts("- dynamic ACPI hardware table parser (RSDP -> XSDT/RSDT -> FADT -> DSDT AML)\n");
     console_puts("- native ACPI S5 shutdown & VMware backdoor (0x5658) poweroff support\n");
-    console_puts("- silent hardware poweroff without legacy 'safe to power off' messages\n");
     console_puts("- dynamic FAT32 partition & cluster geometry calculation (MS FAT32 spec)\n");
     console_puts("- dynamic USB port connect verification (PORTSC) & ghost drive elimination\n");
-    console_puts("- dynamic initramfs VFS boot payload file sizing\n");
     console_puts("- bare-metal AHCI SATA & NVMe PCIe SSD DMA storage drivers\n");
     console_puts("- GPT partitioning & FAT32 EFI System Partition self-installer (flash)\n");
-    console_puts("- storage target filtering (switch-target) & attached drive listing (attached-drives)\n");
-    console_puts("- live VFS metrics traversal & block-device partition deep inspector (fs)\n");
-    console_puts("- strict bare-metal hardware simulator with IOMMU & NUMA memory holes (run_realistic.sh)\n");
-    console_puts("- 500 MB persistent virtual drive options (--sata, --nvme, --usb, --usb2, --all)\n\n");
+    console_puts("- live VFS metrics traversal & block-device partition deep inspector (fs)\n\n");
     console_puts("type 'help' to view available commands.\n\n");
 
     while (1) {

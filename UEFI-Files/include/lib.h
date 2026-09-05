@@ -31,6 +31,7 @@ int strcasecmp(const char *s1, const char *s2);
 int strncasecmp(const char *s1, const char *s2, size_t n);
 char *strchr(const char *s, int c);
 char *strrchr(const char *s, int c);
+char *strstr(const char *haystack, const char *needle);
 char *strdup(const char *s);
 char *trim(char *str);
 void to_lowercase(char *str);
