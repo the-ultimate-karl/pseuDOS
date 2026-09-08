@@ -1,4 +1,5 @@
 #include "drivers.h"
+#include "storage.h"
 #include "io.h"
 #include "bootinfo.h"
 #include "lib.h"
@@ -157,6 +158,7 @@ static AcpiFadt *find_fadt(void) {
 
 void acpi_reboot(void) {
     console_puts("rebooting system...\n");
+    storage_flush_all();
 
     /* 1. Try FADT ACPI Reset Register if supported */
     AcpiFadt *fadt = find_fadt();
@@ -200,6 +202,7 @@ void acpi_reboot(void) {
 
 void acpi_shutdown(void) {
     console_puts("shutting down system via ACPI...\n");
+    storage_shutdown_all();
 
     /* 1. Parse hardware ACPI Tables (RSDP -> FADT -> DSDT -> _S5) */
     AcpiFadt *fadt = find_fadt();

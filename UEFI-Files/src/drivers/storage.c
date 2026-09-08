@@ -53,6 +53,24 @@ void storage_set_target_mode(TargetFilterMode mode) {
     g_target_mode = mode;
 }
 
+void storage_flush_all(void) {
+    for (uint32_t i = 0; i < g_device_count; i++) {
+        if (g_devices[i].flush) {
+            g_devices[i].flush(&g_devices[i]);
+        }
+    }
+}
+
+void storage_shutdown_all(void) {
+    for (uint32_t i = 0; i < g_device_count; i++) {
+        if (g_devices[i].shutdown) {
+            g_devices[i].shutdown(&g_devices[i]);
+        } else if (g_devices[i].flush) {
+            g_devices[i].flush(&g_devices[i]);
+        }
+    }
+}
+
 static void parse_partition_filesystem(StorageDevice *dev, uint64_t part_start_lba, uint64_t part_end_lba, StoragePartitionInfo *p) {
     (void)part_end_lba;
     p->has_fs = 0;

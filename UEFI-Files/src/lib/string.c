@@ -2,8 +2,37 @@
 
 void *memset(void *s, int c, size_t n) {
     unsigned char *p = (unsigned char *)s;
-    while (n--) {
-        *p++ = (unsigned char)c;
+    unsigned char uc = (unsigned char)c;
+
+    /* Align destination pointer to 8-byte boundary */
+    while (n > 0 && ((uintptr_t)p & 7) != 0) {
+        *p++ = uc;
+        n--;
+    }
+
+    if (n >= 8) {
+        uint64_t v = uc;
+        v |= v << 8;
+        v |= v << 16;
+        v |= v << 32;
+
+        uint64_t *p64 = (uint64_t *)p;
+        while (n >= 64) {
+            p64[0] = v; p64[1] = v; p64[2] = v; p64[3] = v;
+            p64[4] = v; p64[5] = v; p64[6] = v; p64[7] = v;
+            p64 += 8;
+            n -= 64;
+        }
+        while (n >= 8) {
+            *p64++ = v;
+            n -= 8;
+        }
+        p = (unsigned char *)p64;
+    }
+
+    while (n > 0) {
+        *p++ = uc;
+        n--;
     }
     return s;
 }
@@ -11,8 +40,61 @@ void *memset(void *s, int c, size_t n) {
 void *memcpy(void *dest, const void *src, size_t n) {
     unsigned char *d = (unsigned char *)dest;
     const unsigned char *s = (const unsigned char *)src;
-    while (n--) {
+
+    if (d == s || n == 0) {
+        return dest;
+    }
+
+    /* Check if source and destination have the same 8-byte relative alignment */
+    if ((((uintptr_t)d ^ (uintptr_t)s) & 7) == 0) {
+        while (n > 0 && ((uintptr_t)d & 7) != 0) {
+            *d++ = *s++;
+            n--;
+        }
+        uint64_t *d64 = (uint64_t *)d;
+        const uint64_t *s64 = (const uint64_t *)s;
+        while (n >= 64) {
+            d64[0] = s64[0]; d64[1] = s64[1]; d64[2] = s64[2]; d64[3] = s64[3];
+            d64[4] = s64[4]; d64[5] = s64[5]; d64[6] = s64[6]; d64[7] = s64[7];
+            d64 += 8;
+            s64 += 8;
+            n -= 64;
+        }
+        while (n >= 8) {
+            *d64++ = *s64++;
+            n -= 8;
+        }
+        d = (unsigned char *)d64;
+        s = (const unsigned char *)s64;
+    } else {
+        /* x86_64 supports unaligned 64-bit memory reads and writes */
+        while (n >= 32) {
+            uint64_t v0, v1, v2, v3;
+            __builtin_memcpy(&v0, s, 8);
+            __builtin_memcpy(&v1, s + 8, 8);
+            __builtin_memcpy(&v2, s + 16, 8);
+            __builtin_memcpy(&v3, s + 24, 8);
+            __builtin_memcpy(d, &v0, 8);
+            __builtin_memcpy(d + 8, &v1, 8);
+            __builtin_memcpy(d + 16, &v2, 8);
+            __builtin_memcpy(d + 24, &v3, 8);
+            d += 32;
+            s += 32;
+            n -= 32;
+        }
+        while (n >= 8) {
+            uint64_t v;
+            __builtin_memcpy(&v, s, 8);
+            __builtin_memcpy(d, &v, 8);
+            d += 8;
+            s += 8;
+            n -= 8;
+        }
+    }
+
+    while (n > 0) {
         *d++ = *s++;
+        n--;
     }
     return dest;
 }
@@ -26,14 +108,104 @@ void *memmove(void *dest, const void *src, size_t n) {
     }
 
     if (d < s) {
-        while (n--) {
+        if ((((uintptr_t)d ^ (uintptr_t)s) & 7) == 0) {
+            while (n > 0 && ((uintptr_t)d & 7) != 0) {
+                *d++ = *s++;
+                n--;
+            }
+            uint64_t *d64 = (uint64_t *)d;
+            const uint64_t *s64 = (const uint64_t *)s;
+            while (n >= 64) {
+                d64[0] = s64[0]; d64[1] = s64[1]; d64[2] = s64[2]; d64[3] = s64[3];
+                d64[4] = s64[4]; d64[5] = s64[5]; d64[6] = s64[6]; d64[7] = s64[7];
+                d64 += 8;
+                s64 += 8;
+                n -= 64;
+            }
+            while (n >= 8) {
+                *d64++ = *s64++;
+                n -= 8;
+            }
+            d = (unsigned char *)d64;
+            s = (const unsigned char *)s64;
+        } else {
+            while (n >= 32) {
+                uint64_t v0, v1, v2, v3;
+                __builtin_memcpy(&v0, s, 8);
+                __builtin_memcpy(&v1, s + 8, 8);
+                __builtin_memcpy(&v2, s + 16, 8);
+                __builtin_memcpy(&v3, s + 24, 8);
+                __builtin_memcpy(d, &v0, 8);
+                __builtin_memcpy(d + 8, &v1, 8);
+                __builtin_memcpy(d + 16, &v2, 8);
+                __builtin_memcpy(d + 24, &v3, 8);
+                d += 32;
+                s += 32;
+                n -= 32;
+            }
+            while (n >= 8) {
+                uint64_t v;
+                __builtin_memcpy(&v, s, 8);
+                __builtin_memcpy(d, &v, 8);
+                d += 8;
+                s += 8;
+                n -= 8;
+            }
+        }
+        while (n > 0) {
             *d++ = *s++;
+            n--;
         }
     } else {
         d += n;
         s += n;
-        while (n--) {
+        if ((((uintptr_t)d ^ (uintptr_t)s) & 7) == 0) {
+            while (n > 0 && ((uintptr_t)d & 7) != 0) {
+                *--d = *--s;
+                n--;
+            }
+            uint64_t *d64 = (uint64_t *)d;
+            const uint64_t *s64 = (const uint64_t *)s;
+            while (n >= 64) {
+                d64 -= 8;
+                s64 -= 8;
+                d64[7] = s64[7]; d64[6] = s64[6]; d64[5] = s64[5]; d64[4] = s64[4];
+                d64[3] = s64[3]; d64[2] = s64[2]; d64[1] = s64[1]; d64[0] = s64[0];
+                n -= 64;
+            }
+            while (n >= 8) {
+                *--d64 = *--s64;
+                n -= 8;
+            }
+            d = (unsigned char *)d64;
+            s = (const unsigned char *)s64;
+        } else {
+            while (n >= 32) {
+                d -= 32;
+                s -= 32;
+                uint64_t v0, v1, v2, v3;
+                __builtin_memcpy(&v0, s, 8);
+                __builtin_memcpy(&v1, s + 8, 8);
+                __builtin_memcpy(&v2, s + 16, 8);
+                __builtin_memcpy(&v3, s + 24, 8);
+                __builtin_memcpy(d, &v0, 8);
+                __builtin_memcpy(d + 8, &v1, 8);
+                __builtin_memcpy(d + 16, &v2, 8);
+                __builtin_memcpy(d + 24, &v3, 8);
+                n -= 32;
+            }
+            while (n >= 8) {
+                d -= 8;
+                s -= 8;
+                uint64_t v;
+                __builtin_memcpy(&v, s, 8);
+                __builtin_memcpy(d, &v, 8);
+                n -= 8;
+            }
+        }
+        while (n > 0) {
             *--d = *--s;
+            n--;
         }
     }
     return dest;
@@ -487,3 +659,8 @@ int snprintf(char *str, size_t size, const char *format, ...) {
     va_end(ap);
     return ret;
 }
+
+/* Freestanding stack probe stubs for x86_64 MinGW */
+void ___chkstk_ms(void) {}
+void __chkstk_ms(void) {}
+

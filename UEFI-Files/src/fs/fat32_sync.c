@@ -65,26 +65,32 @@ static uint32_t get_fat_entry(uint32_t cluster) {
     return (*(uint32_t *)&sec[entry_offset]) & 0x0FFFFFFF;
 }
 
-static void set_fat_entry(uint32_t cluster, uint32_t val) {
-    if (!g_sync_dev || !g_sync_dev->read_sectors || !g_sync_dev->write_sectors) return;
+static int set_fat_entry(uint32_t cluster, uint32_t val) {
+    if (!g_sync_dev || !g_sync_dev->read_sectors || !g_sync_dev->write_sectors) return -1;
     uint32_t fat_offset = cluster * 4;
     uint32_t sec_offset = fat_offset / 512;
     uint32_t entry_offset = fat_offset % 512;
 
+    int ret = 0;
     uint8_t sec[512];
     /* Update FAT1 */
     uint32_t fat1_sec = g_sync_part_lba + g_sync_reserved_sectors + sec_offset;
     if (g_sync_dev->read_sectors(g_sync_dev, fat1_sec, 1, sec) == 0) {
         *(uint32_t *)&sec[entry_offset] = val & 0x0FFFFFFF;
-        g_sync_dev->write_sectors(g_sync_dev, fat1_sec, 1, sec);
+        if (g_sync_dev->write_sectors(g_sync_dev, fat1_sec, 1, sec) != 0) ret = -1;
+    } else {
+        ret = -1;
     }
 
     /* Update FAT2 */
     uint32_t fat2_sec = g_sync_part_lba + g_sync_reserved_sectors + g_sync_fat_size_sectors + sec_offset;
     if (g_sync_dev->read_sectors(g_sync_dev, fat2_sec, 1, sec) == 0) {
         *(uint32_t *)&sec[entry_offset] = val & 0x0FFFFFFF;
-        g_sync_dev->write_sectors(g_sync_dev, fat2_sec, 1, sec);
+        if (g_sync_dev->write_sectors(g_sync_dev, fat2_sec, 1, sec) != 0) ret = -1;
+    } else {
+        ret = -1;
     }
+    return ret;
 }
 
 static void update_fsinfo_free_clusters(int delta) {
@@ -534,13 +540,20 @@ int fat32_sync_delete_node(const char *path, int is_dir) {
 
                 /* 1. Mark entry as deleted (0xE5) */
                 entries[i].name[0] = (char)0xE5;
-                write_cluster(c, cluster_buf);
+                if (write_cluster(c, cluster_buf) != 0) {
+                    return -1;
+                }
 
                 /* 2. Free physical clusters on disk */
                 if (is_dir || (entries[i].attr & 0x10)) {
                     recursive_free_dir_clusters(target_cluster);
                 } else {
                     free_cluster_chain(target_cluster);
+                }
+
+                /* 3. Flush hardware write cache immediately */
+                if (g_sync_dev && g_sync_dev->flush) {
+                    g_sync_dev->flush(g_sync_dev);
                 }
                 return 0;
             }
@@ -584,7 +597,7 @@ static void load_fat32_dir_recursive(uint32_t dir_cluster, const char *vfs_paren
             if (entries[i].attr & 0x10) {
                 /* Directory */
                 vfs_node_t *dir_node = vfs_mkdir(sub_path);
-                if (strcasecmp(entry_name, "EFI") == 0 || strcasecmp(entry_name, "protected") == 0) {
+                if (strcasecmp(entry_name, "EFI") == 0 || strcasecmp(entry_name, "protected") == 0 || strcasecmp(entry_name, "protect") == 0) {
                     if (dir_node) dir_node->is_protected = 1;
                 }
                 load_fat32_dir_recursive(start_cluster, sub_path);

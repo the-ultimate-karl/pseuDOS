@@ -10,6 +10,7 @@
 #define CONSOLE_BUF_MAX_COLS 300
 
 static char g_text_buffer[CONSOLE_BUF_MAX_ROWS][CONSOLE_BUF_MAX_COLS];
+static char g_rendered_buffer[CONSOLE_BUF_MAX_ROWS][CONSOLE_BUF_MAX_COLS];
 
 static uint32_t g_cursor_x = 0;
 static uint32_t g_cursor_y = 0;
@@ -20,7 +21,26 @@ static uint32_t g_bg_color = COLOR_BLACK;
 static uint32_t g_max_cols = 80;
 static uint32_t g_max_rows = 25;
 
+static int g_uart_present = 0;
+
+int uart_is_present(void) {
+    return g_uart_present;
+}
+
 static void uart_init(void) {
+    /* Test scratch register to detect UART presence */
+    outb(0x3F8 + 7, 0x55);
+    if (inb(0x3F8 + 7) != 0x55) {
+        g_uart_present = 0;
+        return;
+    }
+    outb(0x3F8 + 7, 0xAA);
+    if (inb(0x3F8 + 7) != 0xAA) {
+        g_uart_present = 0;
+        return;
+    }
+
+    g_uart_present = 1;
     outb(0x3F8 + 1, 0x00);
     outb(0x3F8 + 3, 0x80);
     outb(0x3F8 + 0, 0x01);
@@ -31,17 +51,38 @@ static void uart_init(void) {
 }
 
 static void uart_putc(char c) {
-    while ((inb(0x3F8 + 5) & 0x20) == 0);
-    outb(0x3F8, (uint8_t)c);
+    if (!g_uart_present) return;
+    int timeout = 50000;
+    while ((inb(0x3F8 + 5) & 0x20) == 0 && --timeout > 0);
+    if (timeout > 0) {
+        outb(0x3F8, (uint8_t)c);
+    }
 }
 
 static void uart_puts(const char *str) {
-    if (!str) return;
+    if (!g_uart_present || !str) return;
     while (*str) {
         if (*str == '\n') {
             uart_putc('\r');
         }
         uart_putc(*str++);
+    }
+}
+
+static void console_scroll(void) {
+    memmove(&g_text_buffer[0], &g_text_buffer[1], sizeof(g_text_buffer[0]) * (CONSOLE_BUF_MAX_ROWS - 1));
+    memset(g_text_buffer[CONSOLE_BUF_MAX_ROWS - 1], 0, sizeof(g_text_buffer[0]));
+    g_cursor_y = g_max_rows - 1;
+
+    for (uint32_t r = 0; r < g_max_rows; r++) {
+        for (uint32_t c = 0; c < g_max_cols; c++) {
+            char ch = g_text_buffer[r][c];
+            if (ch == 0) ch = ' ';
+            if (ch != g_rendered_buffer[r][c]) {
+                fb_draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ch, g_fg_color, g_bg_color);
+                g_rendered_buffer[r][c] = ch;
+            }
+        }
     }
 }
 
@@ -65,6 +106,7 @@ void console_init(void) {
     g_cursor_x = 0;
     g_cursor_y = 0;
     memset(g_text_buffer, 0, sizeof(g_text_buffer));
+    memset(g_rendered_buffer, ' ', sizeof(g_rendered_buffer));
 
     fb_clear(g_bg_color);
     uart_puts("\033[2J\033[H");
@@ -75,6 +117,7 @@ void console_clear(void) {
     g_cursor_x = 0;
     g_cursor_y = 0;
     memset(g_text_buffer, 0, sizeof(g_text_buffer));
+    memset(g_rendered_buffer, ' ', sizeof(g_rendered_buffer));
     uart_puts("\033[2J\033[H");
 }
 
@@ -95,6 +138,7 @@ void console_rebuild_layout(void) {
 
     /* Wipe the physical video RAM to prevent shearing */
     fb_clear(g_bg_color);
+    memset(g_rendered_buffer, ' ', sizeof(g_rendered_buffer));
 
     /* Redraw all preserved text history onto the newly sized display */
     uint32_t rows_to_draw = g_cursor_y + 1;
@@ -105,6 +149,7 @@ void console_rebuild_layout(void) {
             char ch = g_text_buffer[r][c];
             if (ch >= 32 && ch <= 126) {
                 fb_draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ch, g_fg_color, g_bg_color);
+                g_rendered_buffer[r][c] = ch;
             }
         }
     }
@@ -121,10 +166,7 @@ void console_putc(char c) {
         g_cursor_x = 0;
         g_cursor_y++;
         if (g_cursor_y >= g_max_rows) {
-            fb_scroll_up(FONT_HEIGHT, g_bg_color);
-            memmove(&g_text_buffer[0], &g_text_buffer[1], sizeof(g_text_buffer[0]) * (CONSOLE_BUF_MAX_ROWS - 1));
-            memset(g_text_buffer[CONSOLE_BUF_MAX_ROWS - 1], 0, sizeof(g_text_buffer[0]));
-            g_cursor_y = g_max_rows - 1;
+            console_scroll();
         }
         uart_putc('\r');
         uart_putc('\n');
@@ -135,6 +177,7 @@ void console_putc(char c) {
         if (g_cursor_x > 0) {
             g_cursor_x--;
             g_text_buffer[g_cursor_y][g_cursor_x] = 0;
+            g_rendered_buffer[g_cursor_y][g_cursor_x] = ' ';
             fb_draw_char(g_cursor_x * FONT_WIDTH, g_cursor_y * FONT_HEIGHT, ' ', g_fg_color, g_bg_color);
             uart_putc('\b');
             uart_putc(' ');
@@ -153,6 +196,7 @@ void console_putc(char c) {
 
     if (g_cursor_x < CONSOLE_BUF_MAX_COLS && g_cursor_y < CONSOLE_BUF_MAX_ROWS) {
         g_text_buffer[g_cursor_y][g_cursor_x] = c;
+        g_rendered_buffer[g_cursor_y][g_cursor_x] = c;
     }
 
     fb_draw_char(g_cursor_x * FONT_WIDTH, g_cursor_y * FONT_HEIGHT, c, g_fg_color, g_bg_color);
@@ -163,10 +207,7 @@ void console_putc(char c) {
         g_cursor_x = 0;
         g_cursor_y++;
         if (g_cursor_y >= g_max_rows) {
-            fb_scroll_up(FONT_HEIGHT, g_bg_color);
-            memmove(&g_text_buffer[0], &g_text_buffer[1], sizeof(g_text_buffer[0]) * (CONSOLE_BUF_MAX_ROWS - 1));
-            memset(g_text_buffer[CONSOLE_BUF_MAX_ROWS - 1], 0, sizeof(g_text_buffer[0]));
-            g_cursor_y = g_max_rows - 1;
+            console_scroll();
         }
     }
 }

@@ -14,6 +14,10 @@ const uint8_t *payload_get_bootloader(size_t *out_size) {
 }
 
 const uint8_t *payload_get_kernel(size_t *out_size) {
+    if (g_boot_info_global && g_boot_info_global->kernel_raw_file_base && g_boot_info_global->kernel_raw_file_size) {
+        if (out_size) *out_size = (size_t)g_boot_info_global->kernel_raw_file_size;
+        return (const uint8_t *)(uintptr_t)g_boot_info_global->kernel_raw_file_base;
+    }
     if (g_boot_info_global && g_boot_info_global->kernel_physical_base && g_boot_info_global->kernel_image_size) {
         if (out_size) *out_size = (size_t)g_boot_info_global->kernel_image_size;
         return (const uint8_t *)(uintptr_t)g_boot_info_global->kernel_physical_base;

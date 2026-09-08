@@ -1,10 +1,17 @@
-CC = gcc
-LD = ld
-PYTHON = python3
+CC ?= gcc
+LD ?= ld
+ifeq ($(OS),Windows_NT)
+    PYTHON ?= python
+    MKDIR_P ?= $(PYTHON) -c "import os, sys; os.makedirs(sys.argv[1], exist_ok=True)"
+else
+    PYTHON ?= python3
+    MKDIR_P ?= mkdir -p
+endif
 
 CFLAGS = -ffreestanding \
          -fno-stack-protector \
          -fno-stack-check \
+         -mno-stack-arg-probe \
          -fno-ident \
          -fno-asynchronous-unwind-tables \
          -fshort-wchar \
@@ -64,7 +71,7 @@ KERNEL_SRCS = src/kernel/kernel.c \
 
 BOOT_OBJS = $(patsubst src/%.c, bin/%.o, $(BOOT_SRCS))
 KERNEL_OBJS = $(patsubst src/%.c, bin/%.o, $(KERNEL_SRCS))
-KERNEL_EXTRA_OBJS = bin/kernel/bootx64_payload.o
+KERNEL_EXTRA_OBJS = bin/kernel/bootx64_payload.o bin/drivers/isr_stubs.o
 
 ALL_OBJS = $(sort $(BOOT_OBJS) $(KERNEL_OBJS))
 ALL_DEPS = $(ALL_OBJS:.o=.d)
@@ -82,24 +89,30 @@ all: $(TARGET_ISO)
 iso: $(TARGET_ISO)
 
 $(TARGET_ISO): $(TARGET_EFI) $(TARGET_KERNEL)
-	@mkdir -p build
+	@$(MKDIR_P) build
 	$(PYTHON) scripts/make_iso.py --efi $(TARGET_EFI) --kernel $(TARGET_KERNEL) --iso $(TARGET_ISO)
 
 $(TARGET_EFI): $(BOOT_OBJS)
-	@mkdir -p bin
+	@$(MKDIR_P) bin
 	$(LD) $(LDFLAGS_BOOT) -o $@ $^
 
 bin/kernel/bootx64_payload.o: $(TARGET_EFI)
-	@mkdir -p bin/kernel
-	printf '.section .rodata\n.global g_payload_bootx64_data\n.global g_payload_bootx64_size\ng_payload_bootx64_data:\n    .incbin "$<"\ng_payload_bootx64_end:\ng_payload_bootx64_size:\n    .quad g_payload_bootx64_end - g_payload_bootx64_data\n' | $(CC) -c -x assembler - -o $@
+	@$(MKDIR_P) bin/kernel
+	$(PYTHON) -c "with open('bin/kernel/bootx64_payload.s', 'w') as f: f.write('.section .rodata\n.global g_payload_bootx64_data\n.global g_payload_bootx64_size\ng_payload_bootx64_data:\n    .incbin \"$(subst \,/,$<)\"\ng_payload_bootx64_end:\ng_payload_bootx64_size:\n    .quad g_payload_bootx64_end - g_payload_bootx64_data\n')"
+	$(CC) -c bin/kernel/bootx64_payload.s -o $@
+	@$(PYTHON) -c "import os; os.remove('bin/kernel/bootx64_payload.s') if os.path.exists('bin/kernel/bootx64_payload.s') else None"
 
 $(TARGET_KERNEL): $(KERNEL_OBJS) $(KERNEL_EXTRA_OBJS)
-	@mkdir -p bin
+	@$(MKDIR_P) bin
 	$(LD) $(LDFLAGS_KERNEL) -o $@ $^
 
 bin/%.o: src/%.c
-	@mkdir -p $(dir $@)
+	@$(MKDIR_P) $(patsubst %/,%,$(dir $@))
 	$(CC) $(CFLAGS) -c $< -o $@
+
+bin/%.o: src/%.s
+	@$(MKDIR_P) $(patsubst %/,%,$(dir $@))
+	$(CC) -c $< -o $@
 
 -include $(ALL_DEPS)
 
@@ -110,4 +123,8 @@ run-serial: $(TARGET_ISO)
 	qemu-system-x86_64 -display none -serial stdio -bios $(OVMF_BIOS) -cdrom $(TARGET_ISO) -net none
 
 clean:
-	rm -rf bin/boot bin/lib bin/fs bin/drivers bin/kernel bin/*.o bin/*.d bin/*.so bin/*.EFI bin/*.efi bin/*.bin build/*.iso build/*.img
+ifeq ($(OS),Windows_NT)
+	$(PYTHON) -c "import shutil, glob, os; [shutil.rmtree(d, ignore_errors=True) for d in ['bin/boot', 'bin/lib', 'bin/fs', 'bin/drivers', 'bin/kernel']]; [os.remove(f) for pattern in ['bin/*.o', 'bin/*.d', 'bin/*.so', 'bin/*.EFI', 'bin/*.efi', 'bin/*.bin', 'bin/kernel/*.s', 'build/*.iso', 'build/*.img'] for f in glob.glob(pattern)]"
+else
+	rm -rf bin/boot bin/lib bin/fs bin/drivers bin/kernel bin/*.o bin/*.d bin/*.so bin/*.EFI bin/*.efi bin/*.bin bin/kernel/*.s build/*.iso build/*.img
+endif

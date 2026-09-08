@@ -26,6 +26,7 @@ void console_rebuild_layout(void);
 void console_putc(char c);
 void console_puts(const char *str);
 void console_printf(const char *fmt, ...);
+int uart_is_present(void);
 
 /* Keyboard Input Driver */
 void keyboard_init(void);

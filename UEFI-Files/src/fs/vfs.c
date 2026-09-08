@@ -346,6 +346,14 @@ int vfs_remove_node_ex(const char *path, int recursive, int force) {
 
     int is_dir = (node->type == VFS_NODE_DIRECTORY);
 
+    /* 1. Synchronize deletion with physical persistent disk FIRST */
+    if (fat32_is_mounted()) {
+        int sync_res = fat32_sync_delete_node(norm_path, is_dir);
+        if (sync_res != 0) {
+            return -5; /* Disk I/O synchronization error */
+        }
+    }
+
     vfs_node_t *parent = node->parent;
     if (!parent) return -3;
 
@@ -390,10 +398,6 @@ int vfs_remove_node_ex(const char *path, int recursive, int force) {
     }
 
     free_vfs_subtree(node);
-
-    if (fat32_is_mounted()) {
-        fat32_sync_delete_node(norm_path, is_dir);
-    }
 
     return 0;
 }

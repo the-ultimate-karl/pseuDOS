@@ -5,6 +5,7 @@ import sys
 import subprocess
 import tempfile
 import argparse
+import shutil
 
 def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_kb=2880):
     sector_size = 512
@@ -160,6 +161,174 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
     with open(output_path, "wb") as f:
         f.write(image)
 
+def make_eltorito_iso(efiboot_img_path, output_iso_path):
+    SECTOR_SIZE = 2048
+    with open(efiboot_img_path, "rb") as f:
+        efi_img_bytes = f.read()
+
+    efi_size = len(efi_img_bytes)
+    efi_sectors = (efi_size + SECTOR_SIZE - 1) // SECTOR_SIZE
+
+    # ISO layout:
+    # LBA 0..15: 32KB zeroes
+    # LBA 16: PVD
+    # LBA 17: BRVD (El Torito)
+    # LBA 18: VDST
+    # LBA 19: Root Directory
+    # LBA 20: Boot Catalog
+    # LBA 21..21+efi_sectors-1: efiboot.img
+    # LBA end..end+15: 16 post-gap sectors (standard for CD-ROM read-ahead)
+
+    pvd_lba = 16
+    brvd_lba = 17
+    vdst_lba = 18
+    root_dir_lba = 19
+    boot_cat_lba = 20
+    efiboot_lba = 21
+
+    total_sectors = efiboot_lba + efi_sectors + 16
+    iso = bytearray(total_sectors * SECTOR_SIZE)
+
+    # --- LBA 16: Primary Volume Descriptor ---
+    pvd_off = pvd_lba * SECTOR_SIZE
+    iso[pvd_off] = 1
+    iso[pvd_off+1:pvd_off+6] = b"CD001"
+    iso[pvd_off+6] = 1
+    iso[pvd_off+8:pvd_off+40] = b"EL TORITO SPECIFICATION".ljust(32, b" ")
+    iso[pvd_off+40:pvd_off+72] = b"PSEUDOS_BOOT".ljust(32, b" ")
+
+    struct.pack_into("<I", iso, pvd_off + 80, total_sectors)
+    struct.pack_into(">I", iso, pvd_off + 84, total_sectors)
+
+    struct.pack_into("<H", iso, pvd_off + 120, 1)
+    struct.pack_into(">H", iso, pvd_off + 122, 1)
+
+    struct.pack_into("<H", iso, pvd_off + 124, 1)
+    struct.pack_into(">H", iso, pvd_off + 126, 1)
+
+    struct.pack_into("<H", iso, pvd_off + 128, 2048)
+    struct.pack_into(">H", iso, pvd_off + 130, 2048)
+
+    # Root directory record in PVD (offset 156)
+    rrec = bytearray(34)
+    rrec[0] = 34
+    struct.pack_into("<I", rrec, 2, root_dir_lba)
+    struct.pack_into(">I", rrec, 6, root_dir_lba)
+    struct.pack_into("<I", rrec, 10, SECTOR_SIZE)
+    struct.pack_into(">I", rrec, 14, SECTOR_SIZE)
+    rrec[18:25] = b"\x7e\x09\x08\x00\x00\x00\x00"
+    rrec[25] = 0x02 # Directory
+    struct.pack_into("<H", rrec, 28, 1)
+    struct.pack_into(">H", rrec, 30, 1)
+    rrec[32] = 1
+    rrec[33] = 0 # root
+    iso[pvd_off+156:pvd_off+190] = rrec
+
+    iso[pvd_off+190:pvd_off+318] = b"".ljust(128, b" ")
+    iso[pvd_off+318:pvd_off+446] = b"".ljust(128, b" ")
+    iso[pvd_off+446:pvd_off+574] = b"".ljust(128, b" ")
+    iso[pvd_off+574:pvd_off+702] = b"".ljust(128, b" ")
+    iso[pvd_off+702:pvd_off+739] = b"".ljust(37, b" ")
+    iso[pvd_off+739:pvd_off+776] = b"".ljust(37, b" ")
+    iso[pvd_off+776:pvd_off+813] = b"".ljust(37, b" ")
+    now_str = b"2026090800000000\x00"
+    iso[pvd_off+813:pvd_off+830] = now_str
+    iso[pvd_off+830:pvd_off+847] = now_str
+    iso[pvd_off+847:pvd_off+864] = b"0000000000000000\x00"
+    iso[pvd_off+864:pvd_off+881] = now_str
+    iso[pvd_off+881] = 1
+
+    # --- LBA 17: Boot Record Volume Descriptor (El Torito) ---
+    brvd_off = brvd_lba * SECTOR_SIZE
+    iso[brvd_off] = 0 # Boot Record
+    iso[brvd_off+1:brvd_off+6] = b"CD001"
+    iso[brvd_off+6] = 1
+    iso[brvd_off+7:39] = b"EL TORITO SPECIFICATION".ljust(32, b"\x00")
+    struct.pack_into("<I", iso, brvd_off + 71, boot_cat_lba)
+
+    # --- LBA 18: Volume Descriptor Set Terminator ---
+    vdst_off = vdst_lba * SECTOR_SIZE
+    iso[vdst_off] = 255
+    iso[vdst_off+1:vdst_off+6] = b"CD001"
+    iso[vdst_off+6] = 1
+
+    # --- LBA 19: Root Directory Sector ---
+    rd_off = root_dir_lba * SECTOR_SIZE
+    dot = bytearray(34)
+    dot[0] = 34
+    struct.pack_into("<I", dot, 2, root_dir_lba)
+    struct.pack_into(">I", dot, 6, root_dir_lba)
+    struct.pack_into("<I", dot, 10, SECTOR_SIZE)
+    struct.pack_into(">I", dot, 14, SECTOR_SIZE)
+    dot[18:25] = b"\x7e\x09\x08\x00\x00\x00\x00"
+    dot[25] = 0x02
+    struct.pack_into("<H", dot, 28, 1)
+    struct.pack_into(">H", dot, 30, 1)
+    dot[32] = 1
+    dot[33] = 0
+    iso[rd_off:rd_off+34] = dot
+
+    dotdot = bytearray(34)
+    dotdot[0] = 34
+    struct.pack_into("<I", dotdot, 2, root_dir_lba)
+    struct.pack_into(">I", dotdot, 6, root_dir_lba)
+    struct.pack_into("<I", dotdot, 10, SECTOR_SIZE)
+    struct.pack_into(">I", dotdot, 14, SECTOR_SIZE)
+    dotdot[18:25] = b"\x7e\x09\x08\x00\x00\x00\x00"
+    dotdot[25] = 0x02
+    struct.pack_into("<H", dotdot, 28, 1)
+    struct.pack_into(">H", dotdot, 30, 1)
+    dotdot[32] = 1
+    dotdot[33] = 1
+    iso[rd_off+34:rd_off+68] = dotdot
+
+    name = b"EFIBOOT.IMG;1"
+    rec_len = 33 + len(name)
+    if rec_len % 2 != 0:
+        rec_len += 1
+    efirec = bytearray(rec_len)
+    efirec[0] = rec_len
+    struct.pack_into("<I", efirec, 2, efiboot_lba)
+    struct.pack_into(">I", efirec, 6, efiboot_lba)
+    struct.pack_into("<I", efirec, 10, efi_size)
+    struct.pack_into(">I", efirec, 14, efi_size)
+    efirec[18:25] = b"\x7e\x09\x08\x00\x00\x00\x00"
+    efirec[25] = 0x00
+    struct.pack_into("<H", efirec, 28, 1)
+    struct.pack_into(">H", efirec, 30, 1)
+    efirec[32] = len(name)
+    efirec[33:33+len(name)] = name
+    iso[rd_off+68:rd_off+68+rec_len] = efirec
+
+    # --- LBA 20: Boot Catalog ---
+    cat_off = boot_cat_lba * SECTOR_SIZE
+    val = bytearray(32)
+    val[0] = 0x01
+    val[1] = 0xEF # EFI platform ID
+    val[4:4+7] = b"pseuDOS"
+    val[30] = 0x55
+    val[31] = 0xAA
+    w_sum = sum(struct.unpack("<16H", val))
+    chk = (-w_sum) & 0xFFFF
+    struct.pack_into("<H", val, 28, chk)
+    iso[cat_off:cat_off+32] = val
+
+    initial = bytearray(32)
+    initial[0] = 0x88 # Bootable
+    initial[1] = 0x00 # No emulation
+    initial[4] = 0xEF # System type: EFI
+    sec_count_512 = min((efi_size + 511) // 512, 0xFFFF)
+    struct.pack_into("<H", initial, 6, sec_count_512)
+    struct.pack_into("<I", initial, 8, efiboot_lba)
+    iso[cat_off+32:cat_off+64] = initial
+
+    # --- LBA 21: efiboot.img data ---
+    data_off = efiboot_lba * SECTOR_SIZE
+    iso[data_off:data_off+efi_size] = efi_img_bytes
+
+    with open(output_iso_path, "wb") as f:
+        f.write(iso)
+
 def main():
     parser = argparse.ArgumentParser(description="Create UEFI El Torito Bootable ISO")
     parser.add_argument("--efi", required=True, help="Path to BOOTX64.EFI")
@@ -177,20 +346,24 @@ def main():
 
         make_fat12_esp(efiboot_img, args.efi, args.kernel)
 
-        cmd = [
-            "genisoimage",
-            "-input-charset", "utf-8",
-            "-rational-rock",
-            "-volid", "PSEUDOS_BOOT",
-            "-e", "efiboot.img",
-            "-no-emul-boot",
-            "-o", args.iso,
-            iso_root
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if res.returncode != 0:
-            print(f"Error creating ISO: {res.stderr}", file=sys.stderr)
-            sys.exit(res.returncode)
+        genisoimage_bin = shutil.which("genisoimage")
+        if genisoimage_bin:
+            cmd = [
+                genisoimage_bin,
+                "-input-charset", "utf-8",
+                "-rational-rock",
+                "-volid", "PSEUDOS_BOOT",
+                "-e", "efiboot.img",
+                "-no-emul-boot",
+                "-o", args.iso,
+                iso_root
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode != 0:
+                print(f"Error creating ISO with genisoimage: {res.stderr}, falling back to built-in generator...", file=sys.stderr)
+                make_eltorito_iso(efiboot_img, args.iso)
+        else:
+            make_eltorito_iso(efiboot_img, args.iso)
 
     print(f"Created bootable UEFI El Torito ISO: {args.iso}")
 

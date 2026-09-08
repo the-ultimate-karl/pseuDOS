@@ -6,6 +6,8 @@
 #include "fs.h"
 #include "lib.h"
 
+#include "io.h"
+
 const BootInfo *g_boot_info_global = NULL;
 
 void kernel_main(BootInfo *boot_info) {

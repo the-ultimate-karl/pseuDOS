@@ -546,7 +546,7 @@ static void probe_usb_controller(uint8_t bus, uint8_t slot, uint8_t func, uint8_
     *erdp_high = (uint32_t)(erdp_phys >> 32);
 
     volatile uint32_t *iman = (volatile uint32_t *)(d->rt_base + 0x20 + 0x00);
-    *iman |= (1U << 1); /* Interrupt Enable */
+    *iman &= ~(1U << 1); /* Polling mode: keep hardware interrupt line disabled */
 
     /* Run Controller */
     *usbcmd |= USBCMD_RS;
@@ -573,6 +573,7 @@ static void probe_usb_controller(uint8_t bus, uint8_t slot, uint8_t func, uint8_
             /* Wait for Port Enabled */
             timeout = 50000;
             while (!(*portsc & PORTSC_PED) && --timeout > 0);
+            if (!(*portsc & PORTSC_PED)) continue;
 
             uint8_t speed = (*portsc >> 10) & 0x0F;
             uint32_t ep0_max_packet = (speed == 4) ? 512 : 64;
@@ -633,12 +634,20 @@ static void probe_usb_controller(uint8_t bus, uint8_t slot, uint8_t func, uint8_
             uint8_t bulk_in_ep = 0;
             uint8_t bulk_out_ep = 0;
             uint16_t bulk_max_packet = (speed == 4) ? 1024 : 512;
+            int is_mass_storage = 0;
 
             uint16_t off = desc[0];
             while (off + 2 <= total_desc_len) {
                 uint8_t len = desc[off];
                 uint8_t type = desc[off + 1];
                 if (len == 0) break;
+
+                if (type == 0x04 && len >= 9) { /* Interface Descriptor */
+                    uint8_t if_class = desc[off + 5];
+                    if (if_class == 0x08) { /* Mass Storage Class */
+                        is_mass_storage = 1;
+                    }
+                }
 
                 if (type == 0x05 && len >= 7) { /* Endpoint Descriptor */
                     uint8_t ep_addr = desc[off + 2];
@@ -654,9 +663,9 @@ static void probe_usb_controller(uint8_t bus, uint8_t slot, uint8_t func, uint8_
                 off += len;
             }
 
-            if (bulk_in_ep == 0 || bulk_out_ep == 0) {
-                bulk_in_ep = 1;
-                bulk_out_ep = 1;
+            /* Only configure and register if this device is genuinely a Mass Storage drive */
+            if (!is_mass_storage || bulk_in_ep == 0 || bulk_out_ep == 0) {
+                continue;
             }
 
             d->bulk_in_dci = bulk_in_ep * 2 + 1;

@@ -5,6 +5,7 @@
 *.elf
 *.pyc
 *.md
+!README.md
 *.log
 *.txt
 *.img

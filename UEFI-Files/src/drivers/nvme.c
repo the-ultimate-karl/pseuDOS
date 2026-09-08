@@ -19,6 +19,7 @@
 #define NVME_ADMIN_CREATE_SQ 0x01
 #define NVME_ADMIN_CREATE_CQ 0x05
 
+#define NVME_CMD_FLUSH 0x00
 #define NVME_CMD_WRITE 0x01
 #define NVME_CMD_READ  0x02
 
@@ -59,16 +60,16 @@ typedef struct {
     uint16_t io_cq_head;
     uint8_t  iocq_phase;
     uint16_t cmd_id;
-    NvmeCmd *asq;
-    NvmeCqe *acq;
-    NvmeCmd *iosq;
-    NvmeCqe *iocq;
+    volatile NvmeCmd *asq;
+    volatile NvmeCqe *acq;
+    volatile NvmeCmd *iosq;
+    volatile NvmeCqe *iocq;
 } NvmeDriver;
 
-static NvmeCmd g_asq[64] __attribute__((aligned(4096)));
-static NvmeCqe g_acq[64] __attribute__((aligned(4096)));
-static NvmeCmd g_iosq[64] __attribute__((aligned(4096)));
-static NvmeCqe g_iocq[64] __attribute__((aligned(4096)));
+static volatile NvmeCmd g_asq[64] __attribute__((aligned(4096)));
+static volatile NvmeCqe g_acq[64] __attribute__((aligned(4096)));
+static volatile NvmeCmd g_iosq[64] __attribute__((aligned(4096)));
+static volatile NvmeCqe g_iocq[64] __attribute__((aligned(4096)));
 static uint8_t g_ident_buf[4096] __attribute__((aligned(4096)));
 static uint8_t g_nvme_io_buf[4096] __attribute__((aligned(4096)));
 
@@ -115,13 +116,15 @@ static inline volatile uint32_t *nvme_doorbell(NvmeDriver *d, uint32_t qid, int 
 
 static int nvme_submit_admin_cmd(NvmeDriver *d, NvmeCmd *cmd) {
     cmd->cid = d->cmd_id++;
-    memcpy(&d->asq[d->sq_tail], cmd, sizeof(NvmeCmd));
+    memcpy((void *)&d->asq[d->sq_tail], cmd, sizeof(NvmeCmd));
 
     d->sq_tail = (d->sq_tail + 1) % 64;
     *nvme_doorbell(d, 0, 0) = d->sq_tail;
 
-    int timeout = 500000;
-    while (((d->acq[d->cq_head].status & 1) != d->acq_phase) && --timeout > 0);
+    int timeout = 5000000;
+    while (((d->acq[d->cq_head].status & 1) != d->acq_phase) && --timeout > 0) {
+        __asm__ volatile ("pause" ::: "memory");
+    }
 
     if (timeout <= 0) return -1;
 
@@ -141,13 +144,15 @@ static int nvme_submit_admin_cmd(NvmeDriver *d, NvmeCmd *cmd) {
 
 static int nvme_submit_io_cmd(NvmeDriver *d, NvmeCmd *cmd) {
     cmd->cid = d->cmd_id++;
-    memcpy(&d->iosq[d->io_sq_tail], cmd, sizeof(NvmeCmd));
+    memcpy((void *)&d->iosq[d->io_sq_tail], cmd, sizeof(NvmeCmd));
 
     d->io_sq_tail = (d->io_sq_tail + 1) % 64;
     *nvme_doorbell(d, 1, 0) = d->io_sq_tail;
 
-    int timeout = 500000;
-    while (((d->iocq[d->io_cq_head].status & 1) != d->iocq_phase) && --timeout > 0);
+    int timeout = 5000000;
+    while (((d->iocq[d->io_cq_head].status & 1) != d->iocq_phase) && --timeout > 0) {
+        __asm__ volatile ("pause" ::: "memory");
+    }
 
     if (timeout <= 0) return -1;
 
@@ -163,6 +168,38 @@ static int nvme_submit_io_cmd(NvmeDriver *d, NvmeCmd *cmd) {
         return -1;
     }
     return 0;
+}
+
+static int nvme_flush(StorageDevice *dev) {
+    if (!dev || !dev->driver_priv) return -1;
+    NvmeDriver *d = (NvmeDriver *)dev->driver_priv;
+
+    NvmeCmd cmd;
+    memset(&cmd, 0, sizeof(NvmeCmd));
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = d->nsid > 0 ? d->nsid : 1;
+
+    return nvme_submit_io_cmd(d, &cmd);
+}
+
+static void nvme_shutdown_device(StorageDevice *dev) {
+    if (!dev || !dev->driver_priv) return;
+    NvmeDriver *d = (NvmeDriver *)dev->driver_priv;
+
+    /* 1. Flush volatile caches */
+    nvme_flush(dev);
+
+    /* 2. Issue NVMe Normal Shutdown Notification: CC.SHN = 01b (bits 15:14) */
+    uint32_t cc = *nvme_reg(d, NVME_REG_CC);
+    cc &= ~(3 << 14);
+    cc |= (1 << 14); /* 01b = Normal shutdown notification */
+    *nvme_reg(d, NVME_REG_CC) = cc;
+
+    /* 3. Wait for CSTS.SHST == 10b (bits 3:2 == 2: Shutdown complete) */
+    int timeout = 1000000;
+    while ((((*nvme_reg(d, NVME_REG_CSTS)) >> 2) & 3) != 2 && --timeout > 0) {
+        __asm__ volatile ("pause" ::: "memory");
+    }
 }
 
 static int nvme_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t count, void *buf) {
@@ -260,10 +297,10 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
 
     /* Use 4096-byte aligned static queues */
     driver->asq = g_asq;
-    memset(driver->asq, 0, sizeof(g_asq));
+    memset((void *)driver->asq, 0, sizeof(g_asq));
 
     driver->acq = g_acq;
-    memset(driver->acq, 0, sizeof(g_acq));
+    memset((void *)driver->acq, 0, sizeof(g_acq));
 
     /* Set AQA (64 entries each: size - 1 = 63) */
     *nvme_reg(driver, NVME_REG_AQA) = (63 << 16) | 63;
@@ -331,9 +368,9 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
 
     /* Use 4096-byte aligned static I/O queues */
     driver->iosq = g_iosq;
-    memset(driver->iosq, 0, sizeof(g_iosq));
+    memset((void *)driver->iosq, 0, sizeof(g_iosq));
     driver->iocq = g_iocq;
-    memset(driver->iocq, 0, sizeof(g_iocq));
+    memset((void *)driver->iocq, 0, sizeof(g_iocq));
 
     /* Admin command: Create I/O CQ (QID = 1) */
     memset(&id_cmd, 0, sizeof(NvmeCmd));
@@ -367,6 +404,8 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     dev.driver_priv = driver;
     dev.read_sectors = nvme_read_sectors_impl;
     dev.write_sectors = nvme_write_sectors_impl;
+    dev.flush = nvme_flush;
+    dev.shutdown = nvme_shutdown_device;
 
     storage_format_size(dev.total_sectors * dev.sector_size, dev.size_str, sizeof(dev.size_str));
 

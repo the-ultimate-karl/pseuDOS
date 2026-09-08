@@ -41,27 +41,18 @@ static void print_both(EFI_SYSTEM_TABLE *SystemTable, const char *str) {
     }
 }
 
-static UINTN get_screen_columns(EFI_SYSTEM_TABLE *SystemTable) {
-    UINTN cols = 160;
+static void get_screen_geometry(EFI_SYSTEM_TABLE *SystemTable, UINTN *out_cols, UINTN *out_rows) {
+    UINTN cols = 80;
+    UINTN rows = 25;
     if (SystemTable && SystemTable->ConOut && SystemTable->ConOut->QueryMode && SystemTable->ConOut->Mode) {
         UINTN c = 0, r = 0;
-        if (!EFI_ERROR(SystemTable->ConOut->QueryMode(SystemTable->ConOut, SystemTable->ConOut->Mode->Mode, &c, &r)) && c > 0) {
-            cols = c;
+        if (!EFI_ERROR(SystemTable->ConOut->QueryMode(SystemTable->ConOut, SystemTable->ConOut->Mode->Mode, &c, &r))) {
+            if (c > 0) cols = c;
+            if (r > 0) rows = r;
         }
     }
-    return cols;
-}
-
-static void print_divider(EFI_SYSTEM_TABLE *SystemTable, UINTN cols) {
-    char buf[128];
-    while (cols > 0) {
-        size_t n = cols > (sizeof(buf) - 1) ? (sizeof(buf) - 1) : cols;
-        memset(buf, '=', n);
-        buf[n] = '\0';
-        print_both(SystemTable, buf);
-        cols -= n;
-    }
-    print_both(SystemTable, "\n");
+    if (out_cols) *out_cols = cols;
+    if (out_rows) *out_rows = rows;
 }
 
 static void print_spaces(EFI_SYSTEM_TABLE *SystemTable, UINTN count) {
@@ -73,6 +64,25 @@ static void print_spaces(EFI_SYSTEM_TABLE *SystemTable, UINTN count) {
         print_both(SystemTable, buf);
         count -= n;
     }
+}
+
+static void print_divider(EFI_SYSTEM_TABLE *SystemTable, UINTN left_pad, UINTN width) {
+    if (left_pad > 0) print_spaces(SystemTable, left_pad);
+    char buf[128];
+    while (width > 0) {
+        size_t n = width > (sizeof(buf) - 1) ? (sizeof(buf) - 1) : width;
+        memset(buf, '=', n);
+        buf[n] = '\0';
+        print_both(SystemTable, buf);
+        width -= n;
+    }
+    print_both(SystemTable, "\n");
+}
+
+static void print_padded_line(EFI_SYSTEM_TABLE *SystemTable, UINTN left_pad, const char *str) {
+    if (left_pad > 0) print_spaces(SystemTable, left_pad);
+    if (str) print_both(SystemTable, str);
+    print_both(SystemTable, "\n");
 }
 
 static void clear_screen(EFI_SYSTEM_TABLE *SystemTable) {
@@ -123,14 +133,17 @@ static void clear_screen(EFI_SYSTEM_TABLE *SystemTable) {
     uart_puts("\033[2J\033[H");
 }
 
-static void print_wrapped(EFI_SYSTEM_TABLE *SystemTable, const char *str, int max_cols) {
+static void print_wrapped_padded(EFI_SYSTEM_TABLE *SystemTable, UINTN left_pad, const char *str, int max_cols) {
     if (!str) return;
     int col = 0;
     const char *p = str;
 
+    if (left_pad > 0) print_spaces(SystemTable, left_pad);
+
     while (*p) {
         if (*p == '\n') {
             print_both(SystemTable, "\n");
+            if (left_pad > 0) print_spaces(SystemTable, left_pad);
             col = 0;
             p++;
             continue;
@@ -153,6 +166,7 @@ static void print_wrapped(EFI_SYSTEM_TABLE *SystemTable, const char *str, int ma
             /* If adding this word exceeds max_cols, wrap to next line */
             if (col > 0 && (col + 1 + wlen > max_cols)) {
                 print_both(SystemTable, "\n");
+                if (left_pad > 0) print_spaces(SystemTable, left_pad);
                 col = 0;
             } else if (col > 0) {
                 print_both(SystemTable, " ");
@@ -222,35 +236,53 @@ void error_boot(EFI_SYSTEM_TABLE *SystemTable, BootErrorCode code, const char *d
     /* Clear full screen so only the error screen appears */
     clear_screen(SystemTable);
 
-    UINTN cols = get_screen_columns(SystemTable);
-    if (cols < 80) cols = 80;
+    UINTN cols = 80, rows = 25;
+    get_screen_geometry(SystemTable, &cols, &rows);
+
+    UINTN box_width = 86;
+    if (cols < box_width) {
+        box_width = cols > 4 ? cols - 2 : cols;
+    }
+    UINTN left_padding = (cols > box_width) ? (cols - box_width) / 2 : 0;
+
+    /* Total vertical lines in error block: ~17 lines */
+    UINTN total_lines = 17;
+    UINTN top_padding = (rows > total_lines) ? (rows - total_lines) / 2 : 0;
+
+    for (UINTN i = 0; i < top_padding; i++) {
+        print_both(SystemTable, "\n");
+    }
 
     /* Centered [bootmgfw] header */
-    UINTN leading_spaces = (cols > 10) ? (cols - 10) / 2 : 0;
-    print_spaces(SystemTable, leading_spaces);
+    UINTN header_pad = left_padding + ((box_width > 10) ? (box_width - 10) / 2 : 0);
+    print_spaces(SystemTable, header_pad);
     print_both(SystemTable, "[bootmgfw]\n");
-    print_divider(SystemTable, cols);
+    print_divider(SystemTable, left_padding, box_width);
 
     /* Explanatory text */
-    print_both(SystemTable, "pseuDOS Boot Loader failed to start. A recent hardware or software change might be the\n");
-    print_both(SystemTable, "cause. To fix the problem:\n\n");
+    print_padded_line(SystemTable, left_padding, "pseuDOS Boot Loader failed to start. A recent hardware or software change might be the");
+    print_padded_line(SystemTable, left_padding, "cause. To fix the problem:");
+    print_both(SystemTable, "\n");
 
     /* Step-by-step recovery instructions */
-    print_both(SystemTable, "1. Insert your pseuDOS Installation media and restart your computer.\n");
-    print_both(SystemTable, "2. Type 'flash' into the command line and hit enter.\n");
-    print_both(SystemTable, "3. Reinstall the entire operating system.\n\n");
+    print_padded_line(SystemTable, left_padding, "1. Insert your pseuDOS installation media and restart your computer.");
+    print_padded_line(SystemTable, left_padding, "2. Type 'flash' into the command line and hit enter.");
+    print_padded_line(SystemTable, left_padding, "3. Reinstall the entire operating system.");
+    print_both(SystemTable, "\n");
 
     /* Info diagnostic section */
-    print_both(SystemTable, "Info: ");
     if (code == ERR_KERNEL_NOT_FOUND) {
-        print_both(SystemTable, "bootmgfw failed to find kernel binary (\\KERNEL.BIN or EFI\\BOOT\\KERNEL.ELF):\n");
-        print_both(SystemTable, "No such file or directory\n\n");
+        print_padded_line(SystemTable, left_padding, "Info: bootmgfw failed to find kernel binary (\\KERNEL.BIN or EFI\\BOOT\\KERNEL.ELF):");
+        print_padded_line(SystemTable, left_padding, "No such file or directory");
+        print_both(SystemTable, "\n");
     } else {
+        if (left_padding > 0) print_spaces(SystemTable, left_padding);
+        print_both(SystemTable, "Info: ");
         const char *diag = get_error_diagnostic(code);
         print_both(SystemTable, diag);
         if (details && details[0] != '\0') {
             print_both(SystemTable, ":\n");
-            print_wrapped(SystemTable, details, (int)cols);
+            print_wrapped_padded(SystemTable, left_padding, details, (int)box_width);
             print_both(SystemTable, "\n\n");
         } else {
             const char *def_det = get_default_detail(code);
@@ -271,9 +303,10 @@ void error_boot(EFI_SYSTEM_TABLE *SystemTable, BootErrorCode code, const char *d
     }
 
     /* Footer message */
-    print_both(SystemTable, "Please re-check your hardware configuration, boot media, and firmware settings.\n");
-    print_both(SystemTable, "System halted!\n\n");
-    print_divider(SystemTable, cols);
+    print_padded_line(SystemTable, left_padding, "Please re-check your hardware configuration, boot media, and firmware settings.");
+    print_padded_line(SystemTable, left_padding, "System halted!");
+    print_both(SystemTable, "\n");
+    print_divider(SystemTable, left_padding, box_width);
     print_both(SystemTable, "\n");
 
     /* Halt CPU execution */

@@ -31,6 +31,8 @@ typedef struct StorageDevice {
     void *driver_priv;
     int (*read_sectors)(struct StorageDevice *dev, uint64_t lba, uint32_t count, void *buf);
     int (*write_sectors)(struct StorageDevice *dev, uint64_t lba, uint32_t count, const void *buf);
+    int (*flush)(struct StorageDevice *dev);
+    void (*shutdown)(struct StorageDevice *dev);
 } StorageDevice;
 
 /* Storage Subsystem Initialization & Device Enumeration */
@@ -38,6 +40,8 @@ void storage_init(void);
 uint32_t storage_get_device_count(void);
 StorageDevice *storage_get_device(uint32_t index);
 void storage_format_size(uint64_t bytes, char *buf, size_t buf_size);
+void storage_flush_all(void);
+void storage_shutdown_all(void);
 
 /* Target Filter Mode (Internal vs External) */
 TargetFilterMode storage_get_target_mode(void);

@@ -42,6 +42,10 @@ void keyboard_isr_handler(void) {
     uint8_t status = inb(PS2_STATUS_PORT);
     if (status & 0x01) {
         uint8_t scancode = inb(PS2_DATA_PORT);
+        /* If bit 5 (AUX) is set, this byte is from the PS/2 mouse; discard it */
+        if (status & 0x20) {
+            return;
+        }
         uint8_t next_head = (g_queue_head + 1) & 0xFF;
         if (next_head != g_queue_tail) {
             g_key_queue[g_queue_head] = scancode;
@@ -50,15 +54,64 @@ void keyboard_isr_handler(void) {
     }
 }
 
+static inline uint64_t get_rflags(void) {
+    uint64_t flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags));
+    return flags;
+}
+
+static int ps2_wait_write(void) {
+    int timeout = 100000;
+    while ((inb(PS2_STATUS_PORT) & 0x02) && --timeout > 0) {
+        __asm__ volatile ("pause");
+    }
+    return (timeout > 0) ? 0 : -1;
+}
+
+static int ps2_wait_read(void) {
+    int timeout = 100000;
+    while (!(inb(PS2_STATUS_PORT) & 0x01) && --timeout > 0) {
+        __asm__ volatile ("pause");
+    }
+    return (timeout > 0) ? 0 : -1;
+}
+
 void keyboard_init(void) {
     g_queue_head = 0;
     g_queue_tail = 0;
     g_shift_pressed = 0;
     g_caps_lock = 0;
 
-    /* Flush PS/2 controller buffer */
-    while (inb(PS2_STATUS_PORT) & 0x01) {
+    /* Flush PS/2 controller buffer with bounded timeout */
+    int timeout = 1000;
+    while ((inb(PS2_STATUS_PORT) & 0x01) && --timeout > 0) {
         inb(PS2_DATA_PORT);
+    }
+
+    /* 1. Enable first PS/2 port (keyboard) */
+    if (ps2_wait_write() == 0) {
+        outb(PS2_STATUS_PORT, 0xAE);
+    }
+
+    /* 2. Read Controller Configuration Byte (command 0x20) */
+    uint8_t config = 0x47; /* Standard default: Port 1 enable, IRQ 1 enable, translation enable */
+    if (ps2_wait_write() == 0) {
+        outb(PS2_STATUS_PORT, 0x20);
+        if (ps2_wait_read() == 0) {
+            config = inb(PS2_DATA_PORT);
+        }
+    }
+
+    /* Enable IRQ 1 (bit 0), disable clock inhibit (bit 4 = 0), enable translation if needed */
+    config |= 0x01;  /* Bit 0: First PS/2 port interrupt enable */
+    config &= ~0x10; /* Bit 4: First PS/2 port clock enabled */
+
+    /* 3. Write Controller Configuration Byte (command 0x60) */
+    if (ps2_wait_write() == 0) {
+        outb(PS2_STATUS_PORT, 0x60);
+        if (ps2_wait_write() == 0) {
+            outb(PS2_DATA_PORT, config);
+        }
     }
 }
 
@@ -104,8 +157,8 @@ static char translate_scancode(uint8_t scancode) {
 
 char keyboard_getchar(void) {
     while (1) {
-        /* 1. Check Serial Port */
-        if (inb(SERIAL_LSR) & 0x01) {
+        /* 1. Check Serial Port (only if physical UART is detected) */
+        if (uart_is_present() && (inb(SERIAL_LSR) & 0x01)) {
             char c = (char)inb(SERIAL_DATA);
             if (c == '\r') return '\n';
             if (c == 0x7F) return '\b';
@@ -118,6 +171,19 @@ char keyboard_getchar(void) {
             g_queue_tail = (g_queue_tail + 1) & 0xFF;
             char c = translate_scancode(scancode);
             if (c != 0) return c;
+            continue;
+        }
+
+        /* 3. Fallback: Direct hardware polling if interrupts are disabled */
+        if (!(get_rflags() & 0x200)) {
+            uint8_t status = inb(PS2_STATUS_PORT);
+            if (status & 0x01) {
+                uint8_t scancode = inb(PS2_DATA_PORT);
+                if (!(status & 0x20)) { /* Not mouse packet */
+                    char c = translate_scancode(scancode);
+                    if (c != 0) return c;
+                }
+            }
         }
 
         /* Wait for interrupt or serial activity */

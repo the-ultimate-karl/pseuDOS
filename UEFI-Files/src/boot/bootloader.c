@@ -29,6 +29,23 @@ static int check_cpu_features(void) {
     return 1;
 }
 
+/*
+ * Detect if running inside a virtual machine (QEMU, KVM, VMware, VirtualBox, Hyper-V, etc.)
+ */
+static int is_running_in_vm(void) {
+    uint32_t eax, ebx, ecx, edx;
+
+    /* CPUID leaf 1: ECX bit 31 indicates hypervisor present */
+    __asm__ volatile ("cpuid"
+                      : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                      : "a"(1));
+    if (ecx & (1U << 31)) {
+        return 1;
+    }
+
+    return 0;
+}
+
 static void uart_init(void) {
     outb(0x3F8 + 1, 0x00);
     outb(0x3F8 + 3, 0x80);
@@ -137,8 +154,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
     boot_msg(SystemTable, "[ok]\n");
 
-    /* Search for 1280x720 mode, 1024x768, or standard available */
+    /* Search for optimal GOP video mode: 720p for VM, 1080p for bare-metal */
+    int in_vm = is_running_in_vm();
     UINT32 best_mode = gop->Mode->Mode;
+    UINT32 target_mode = 0xFFFFFFFF;
+    UINT32 target_w = in_vm ? 1280 : 1920;
+    UINT32 target_h = in_vm ? 720 : 1080;
+
+    UINT32 target_1080p_mode = 0xFFFFFFFF;
     UINT32 target_720p_mode = 0xFFFFFFFF;
     UINT32 target_1024_mode = 0xFFFFFFFF;
 
@@ -147,7 +170,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
         status = gop->QueryMode(gop, m, &size_of_info, &info);
         if (!EFI_ERROR(status) && info) {
-            if (info->HorizontalResolution == 1280 && info->VerticalResolution == 720) {
+            if (info->HorizontalResolution == target_w && info->VerticalResolution == target_h) {
+                target_mode = m;
+            }
+            if (info->HorizontalResolution == 1920 && info->VerticalResolution == 1080) {
+                target_1080p_mode = m;
+            } else if (info->HorizontalResolution == 1280 && info->VerticalResolution == 720) {
                 target_720p_mode = m;
             } else if (info->HorizontalResolution == 1024 && info->VerticalResolution == 768) {
                 target_1024_mode = m;
@@ -155,13 +183,23 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
 
-    if (target_720p_mode != 0xFFFFFFFF) {
+    if (target_mode != 0xFFFFFFFF) {
+        best_mode = target_mode;
+    } else if (in_vm && target_720p_mode != 0xFFFFFFFF) {
+        best_mode = target_720p_mode;
+    } else if (!in_vm && target_1080p_mode != 0xFFFFFFFF) {
+        best_mode = target_1080p_mode;
+    } else if (target_720p_mode != 0xFFFFFFFF) {
         best_mode = target_720p_mode;
     } else if (target_1024_mode != 0xFFFFFFFF) {
         best_mode = target_1024_mode;
     }
 
-    boot_msg(SystemTable, "[bootmgfw] setting 1280x720 GOP video mode... ");
+    if (in_vm) {
+        boot_msg(SystemTable, "[bootmgfw] hypervisor detected: setting 1280x720 GOP video mode... ");
+    } else {
+        boot_msg(SystemTable, "[bootmgfw] bare metal detected: setting 1920x1080 GOP video mode... ");
+    }
     status = gop->SetMode(gop, best_mode);
     if (!EFI_ERROR(status)) {
         boot_msg(SystemTable, "[ok]\n");
@@ -437,12 +475,28 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     UINTN kernel_image_pages = (size_of_image + 4095) / 4096;
     if (kernel_image_pages < 16) kernel_image_pages = 16;
 
-    status = SystemTable->BootServices->AllocatePages(
-        AllocateAnyPages,
-        EfiLoaderCode,
-        kernel_image_pages,
-        &kernel_buffer
-    );
+    UINT64 image_base = *(UINT64 *)(raw_file + opt_offset + 24);
+
+    status = EFI_UNSUPPORTED;
+    if (image_base != 0) {
+        kernel_buffer = (EFI_PHYSICAL_ADDRESS)image_base;
+        status = SystemTable->BootServices->AllocatePages(
+            AllocateAddress,
+            EfiLoaderCode,
+            kernel_image_pages,
+            &kernel_buffer
+        );
+    }
+
+    if (EFI_ERROR(status) || kernel_buffer == 0) {
+        kernel_buffer = 0;
+        status = SystemTable->BootServices->AllocatePages(
+            AllocateAnyPages,
+            EfiLoaderCode,
+            kernel_image_pages,
+            &kernel_buffer
+        );
+    }
 
     if (EFI_ERROR(status) || kernel_buffer == 0) {
         boot_msg(SystemTable, "[failed]\n");
@@ -476,11 +530,49 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         sec_hdr += 40;
     }
 
+    /* Apply PE Base Relocations if loaded at non-preferred address */
+    INT64 delta = (INT64)kernel_buffer - (INT64)image_base;
+    if (delta != 0 && opt_hdr_size >= 112 + 6 * 8) {
+        UINT32 reloc_rva = *(UINT32 *)(raw_file + opt_offset + 112 + 5 * 8);
+        UINT32 reloc_size = *(UINT32 *)(raw_file + opt_offset + 112 + 5 * 8 + 4);
+
+        if (reloc_rva != 0 && reloc_size != 0 && (reloc_rva + reloc_size <= size_of_image)) {
+            UINT8 *reloc_ptr = (UINT8 *)(uintptr_t)kernel_buffer + reloc_rva;
+            UINT8 *reloc_end = reloc_ptr + reloc_size;
+
+            while (reloc_ptr + 8 <= reloc_end) {
+                UINT32 page_rva = *(UINT32 *)reloc_ptr;
+                UINT32 block_sz = *(UINT32 *)(reloc_ptr + 4);
+                if (block_sz < 8 || reloc_ptr + block_sz > reloc_end) break;
+
+                UINT16 *entries = (UINT16 *)(reloc_ptr + 8);
+                UINTN count = (block_sz - 8) / 2;
+                for (UINTN j = 0; j < count; j++) {
+                    UINT16 type = entries[j] >> 12;
+                    UINT16 off = entries[j] & 0xFFF;
+                    if (type == 10) { /* IMAGE_REL_BASED_DIR64 */
+                        if (page_rva + off + 8 <= size_of_image) {
+                            UINT64 *target = (UINT64 *)((UINT8 *)(uintptr_t)kernel_buffer + page_rva + off);
+                            *target += (UINT64)delta;
+                        }
+                    } else if (type == 3) { /* IMAGE_REL_BASED_HIGHLOW */
+                        if (page_rva + off + 4 <= size_of_image) {
+                            UINT32 *target = (UINT32 *)((UINT8 *)(uintptr_t)kernel_buffer + page_rva + off);
+                            *target += (UINT32)delta;
+                        }
+                    }
+                }
+                reloc_ptr += block_sz;
+            }
+        }
+    }
+
     boot_info.kernel_physical_base = kernel_buffer;
     boot_info.kernel_image_size = size_of_image;
+    boot_info.kernel_raw_file_base = temp_file_buffer;
+    boot_info.kernel_raw_file_size = read_size;
 
-    /* Free temporary load buffer */
-    SystemTable->BootServices->FreePages(temp_file_buffer, kernel_file_pages);
+    /* Keep temp_file_buffer preserved in memory as the pristine raw kernel PE payload for self-installation */
     boot_msg(SystemTable, "[ok]\n");
 
     /* 11. Locate ACPI RSDP in Configuration Table */

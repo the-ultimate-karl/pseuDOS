@@ -69,3 +69,56 @@ ANTIGRAVITY (2026-09-05 15:05)
 - VFS directory deletion must verify whether cwd is within the deleted subtree and reset cwd to an existing ancestor before freeing nodes
 - Kernel heap allocator must guard against arithmetic overflow in kcalloc and validate pointer ranges in kfree to prevent heap metadata corruption
 
+ANTIGRAVITY (2026-09-08 13:04)
+- Undefined reference to ___chkstk_ms caused by MinGW GCC automatic stack probe emission on frames exceeding 4KB in freestanding -nostdlib kernel mode in UEFI-Files/Makefile and src/lib/string.c [FIXED + 2026-09-08 13:02]
+- Makefile directory creation failure on Windows cmd.exe caused by unsupported mkdir -p syntax in UEFI-Files/Makefile [FIXED + 2026-09-08 13:02]
+- Bootable ISO generation failure on Windows caused by external Linux genisoimage dependency in UEFI-Files/scripts/make_iso.py [FIXED + 2026-09-08 12:54]
+- Parameter alias conflict in run_realistic.ps1 caused by Detail alias 'verbose' colliding with PowerShell common parameter [FIXED + 2026-09-08 13:03]
+
+[IMPORTANT-BUGS]
+- Freestanding x86_64 PE kernels built with MinGW GCC must disable stack probes via -mno-stack-arg-probe and provide fallback ___chkstk_ms stubs
+- Makefile shell commands must remain compatible with Windows cmd.exe and PowerShell by abstracting directory creation via Python os.makedirs
+- ISO generation scripts must include an embedded El Torito ISO9660 generator to avoid host dependencies on external Linux utilities
+
+ANTIGRAVITY (2026-09-08 16:39)
+- Parameter binding crash and unrecognized option error when passing arguments in run_normal.ps1, run_debug.ps1, and run_realistic.ps1 caused by positional binding collision on ValidateSet BootFrom, unhandled double-dash flags, and missing parameter aliases forwarding script options to QEMU via ExtraArgs [FIXED + 2026-09-08 16:39]
+
+[IMPORTANT-BUGS]
+- PowerShell launcher scripts must disable positional binding on string parameters and parse double-dash Linux CLI arguments to prevent fatal ParameterBindingValidationException and unrecognized argument leakage to QEMU
+
+ANTIGRAVITY (2026-09-08 16:55)
+- Kernel panic with 'unhandled cpu fault or interrupt!' upon launching QEMU in GUI mode caused by unhandled 8259 PIC spurious IRQ 7 (vector 39), mouse IRQ 12 (vector 44), and timer IRQ (vector 32) hitting generic catch-all IDT exception stub in src/drivers/idt.c [FIXED + 2026-09-08 16:55]
+
+[IMPORTANT-BUGS]
+- Modern hypervisors and PC chipsets assert hardware interrupts (mouse movement, timer, and 8259 spurious IRQ 7/15) immediately when a graphical window gains focus; the IDT must provide dedicated stubs for all 256 vectors and acknowledge/filter spurious IRQs without halting the CPU
+
+ANTIGRAVITY (2026-09-08 17:25)
+- Kernel unhandled CPU exception and crash on boot caused by missing PE base relocation in src/boot/bootloader.c, leaving absolute 64-bit pointers in .rdata (including g_isr_stub_table[256]) pointing to image base 0x10000000 when mapped at arbitrary physical addresses by UEFI AllocateAnyPages [FIXED + 2026-09-08 17:25]
+- Unresponsive PS/2 keyboard in QEMU GUI and bare-metal hardware caused by UEFI firmware leaving i8042 controller in polling mode with IRQ 1 disabled, combined with unbounded wait loops in keyboard_init and keyboard_getchar in src/drivers/keyboard.c [FIXED + 2026-09-08 17:25]
+- Infinite busy loop and unmapped I/O hang on Dell bare metal hardware caused by uart_putc and keyboard_getchar unconditionally polling port 0x3F8 (reading floating 0xFF on systems without COM1) in src/drivers/console.c and src/drivers/keyboard.c [FIXED + 2026-09-08 17:25]
+- USB keyboard lockups and boot freezes on bare-metal Dell hardware in v0.5.3 caused by usb_storage.c issuing unconditional xHCI host controller resets (USBCMD_HCRST), enabling unhandled hardware interrupts (IMAN), and forcibly configuring USB keyboards/mice as SCSI mass storage devices [FIXED + 2026-09-08 17:25]
+
+[IMPORTANT-BUGS]
+- UEFI bootloaders mapping PE32+ kernels to arbitrary physical pages must parse the .reloc directory and apply DIR64/HIGHLOW base fixups; un-relocated function pointers in the IDT cause instant triple faults on the first hardware interrupt
+- UEFI firmware leaves the i8042 PS/2 controller in polling mode with IRQ 1 masked; bare-metal kernels must re-enable IRQ 1 via controller command byte 0x60 and maintain a safe polling fallback if interrupts are masked
+- Bare-metal kernels must verify UART presence via scratch register loopback before polling or transmitting to prevent infinite busy loops on systems lacking COM1 serial chips
+- USB mass storage drivers must inspect interface descriptors for bInterfaceClass 0x08 and valid bulk endpoints before configuring devices to avoid breaking BIOS/SMM USB keyboard emulation on physical hardware
+
+ANTIGRAVITY (2026-09-08 17:58)
+- Extremely sluggish console text scrolling and boot banner stalls caused by fb_scroll_up performing 3.6 million single-byte uncacheable PCIe MMIO reads from physical VRAM on every newline in src/drivers/console.c, src/drivers/framebuffer.c, and src/lib/string.c [FIXED + 2026-09-08 17:58]
+
+[IMPORTANT-BUGS]
+- Physical VRAM mapped via UEFI GOP is uncacheable MMIO; reading from VRAM over the PCIe bus incurs massive read completion latency (~100-300ns per transaction). Framebuffer consoles must never read back from VRAM to scroll, but instead maintain a system RAM text matrix and only perform fast Write-Combining writes of updated glyphs. Memory copying routines (memcpy/memmove/memset) must transfer 64-bit words to utilize the CPU data bus efficiently.
+
+ANTIGRAVITY (2026-09-08 18:57)
+- Instant triple fault and system power-off upon booting installed kernel from persistent disk caused by payload_get_kernel dumping the in-RAM execution buffer (kernel_physical_base) instead of the original raw PE file, resulting in misaligned section offsets (BSS zeroes overwriting .idata and .reloc) in src/boot/bootloader.c, include/bootinfo.h, and src/kernel/payloads.c [FIXED + 2026-09-08 18:57]
+
+[IMPORTANT-BUGS]
+- Self-installing OS bootloaders must preserve the raw, unrelocated kernel file buffer read from media and pass it to the installer; dumping in-RAM execution memory (SizeOfImage) corrupts section file offsets (PointerToRawData vs VirtualAddress) and writes already-relocated memory pointers to disk, destroying the .reloc directory and triggering instant triple faults on subsequent boots
+
+ANTIGRAVITY (2026-09-08 20:37)
+- Reappearing files and directories post-reboot on bare-metal NVMe SSDs caused by lack of NVMe hardware cache flush (NVME_CMD_FLUSH 0x00) and graceful shutdown notification (CC.SHN 01b) before ACPI power-off, volatile SRAM cache wipe, 4ms completion queue timeout bursts, un-volatile completion queues, and VFS silently discarding disk sync errors while unlinking RAM nodes in src/drivers/nvme.c, src/drivers/storage.c, src/drivers/acpi.c, src/fs/fat32_sync.c, and src/fs/vfs.c [FIXED + 2026-09-08 20:37]
+
+[IMPORTANT-BUGS]
+- NVMe solid-state drives utilize volatile internal SRAM/DRAM write caches; uncommitted sector writes are discarded when power is cut via ACPI S5 unless an explicit NVME_CMD_FLUSH (Opcode 0x00) and Normal Shutdown Notification (CC.SHN = 01b, CSTS.SHST == 10b) are performed before powering off. Multi-cluster FAT file unlinking produces large bursts of sector operations that exceed busy-wait loop timeouts if CPU pause instructions and adequate timeout bounds are omitted. VFS nodes must only be unlinked in RAM after physical disk synchronization succeeds to prevent in-memory state diverging from physical disk media.
+

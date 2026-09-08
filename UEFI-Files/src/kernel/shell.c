@@ -607,6 +607,8 @@ static void cmd_del(const char *arg) {
         console_printf("del: cannot remove '%s': invalid argument\n", target_path);
     } else if (res == -4) {
         console_puts("del: recursive deletion error: targeted directory is protected! please use the force (-f) flag to override.\n");
+    } else if (res == -5) {
+        console_printf("del: cannot remove '%s': disk I/O synchronization error\n", target_path);
     }
 }
 
@@ -632,23 +634,27 @@ void shell_run(const BootInfo *boot_info) {
     char prompt_buf[512];
     char prompt_path[256];
 
-    console_puts("pseuDOS kernel v0.5.3-baremetal (x86_64 uefi / bare-metal)\n");
-    console_puts("what's new (kernel version 0.5.3):\n");
+    console_puts("pseuDOS kernel v0.5.4-baremetal (x86_64 uefi / bare-metal)\n");
+    console_puts("what's new (kernel version 0.5.4):\n");
+    console_puts("- fast text-buffer console scrolling & 64-bit memory copy routines (memcpy/memmove/memset)\n");
+    console_puts("- dynamic PE32+ base relocation engine in bootloader (.reloc DIR64 / HIGHLOW)\n");
+    console_puts("- full 256-vector assembly ISR dispatch table with CPU exception stack normalization\n");
+    console_puts("- 8259 PIC spurious IRQ 7 / IRQ 15 handling and EOI suppression per Intel spec\n");
+    console_puts("- i8042 PS/2 controller IRQ 1 enablement (command byte 0x60) & non-racing poll fallback\n");
+    console_puts("- hardware UART scratch register (0x3F8+7) detection preventing COM1 floating hangs\n");
+    console_puts("- xHCI mass-storage class (0x08) verification protecting USB HID keyboards from reset\n");
+    console_puts("- pure Windows 11 host toolchain migration & native PowerShell runner scripts\n");
     console_puts("- persistent FAT32 block-device synchronization with immediate write-through\n");
     console_puts("- dynamic on-disk FAT32 directory tree loading on permanent storage boot (SATA/NVMe/USB)\n");
     console_puts("- live sector synchronization for write, touch, mkdir, and del commands\n");
-    console_puts("- volatile ramfs mode preserved when booted from live optical CD-ROM ISO\n");
     console_puts("- dynamic boot device resolution & filesystem health reporting (fs)\n");
     console_puts("- VMware AHCI memory alignment fix (1024B CLB, 256B FB, 128B CTBA static pools)\n");
     console_puts("- AHCI BIOS/OS handoff (BOHC) & bounded timeout loops to prevent hypervisor lockups\n");
     console_puts("- EFI auto-boot hook (startup.nsh) for instant standalone disk booting\n");
     console_puts("- dynamic ACPI hardware table parser (RSDP -> XSDT/RSDT -> FADT -> DSDT AML)\n");
     console_puts("- native ACPI S5 shutdown & VMware backdoor (0x5658) poweroff support\n");
-    console_puts("- dynamic FAT32 partition & cluster geometry calculation (MS FAT32 spec)\n");
-    console_puts("- dynamic USB port connect verification (PORTSC) & ghost drive elimination\n");
     console_puts("- bare-metal AHCI SATA & NVMe PCIe SSD DMA storage drivers\n");
-    console_puts("- GPT partitioning & FAT32 EFI System Partition self-installer (flash)\n");
-    console_puts("- live VFS metrics traversal & block-device partition deep inspector (fs)\n\n");
+    console_puts("- GPT partitioning & FAT32 EFI System Partition self-installer (flash)\n\n");
     console_puts("type 'help' to view available commands.\n\n");
 
     while (1) {
