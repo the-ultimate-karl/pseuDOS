@@ -401,6 +401,155 @@ A successful build does not guarantee:
 
 Perform the strongest practical verification available for the change.
 
+
+---
+
+# PERSISTENT WORKING MEMORY
+
+## 1. Use `WORKING.md` as persistent task memory
+
+`WORKING.md` is the agent's persistent memory tracker for the repository.
+
+Agents MUST use `WORKING.md` to preserve important working context across sessions, agent handoffs, context-window resets, and interruptions.
+
+At the start of a task, the agent MUST:
+
+1. Check whether `WORKING.md` exists.
+2. Read it before beginning substantive work.
+3. Treat it as accumulated working context, not as unquestionable truth.
+4. Reconcile its contents with the actual code, tests, documentation, and current repository state.
+
+If `WORKING.md` does not exist and persistent working memory would be useful, create it.
+
+---
+
+## 2. Keep `WORKING.md` continuously updated
+
+During development, update `WORKING.md` whenever the agent discovers information that would be useful to a future agent.
+
+This includes, when relevant:
+
+* the current task and objective;
+* what has already been investigated;
+* important findings about the codebase;
+* architectural or implementation discoveries;
+* decisions that were made and why;
+* files or components currently being worked on;
+* commands that were run and their meaningful results;
+* tests, builds, or verification that were performed;
+* bugs discovered;
+* bugs fixed;
+* unresolved problems;
+* blockers;
+* assumptions that still need verification;
+* useful next steps;
+* partial work that must be continued later.
+
+Do not wait until the very end of a task if an important discovery could otherwise be lost.
+
+---
+
+## 3. Make `WORKING.md` useful for the next agent
+
+Write `WORKING.md` so that another agent can continue the work without having to rediscover the same context.
+
+Prefer concrete information over vague statements.
+
+Good:
+
+```text
+## Current State
+- Renderer initialization is handled in `src/renderer/init.ts`.
+- The crash occurs when `createRenderer()` receives a null surface.
+- Reproduced with `pytest tests/test_renderer.py -k null_surface`.
+- Root cause appears to be missing validation in `createRenderer()`.
+- Fix has not yet been implemented.
+
+## Next Steps
+1. Add validation for the null surface.
+2. Add a regression test.
+3. Run the renderer test suite.
+```
+
+Avoid entries such as:
+
+```text
+- Worked on renderer.
+- There was a bug.
+- Need to investigate more.
+```
+
+The goal is to preserve actionable context, not create a diary of meaningless activity.
+
+---
+
+## 4. Preserve useful history
+
+Do not erase useful information from `WORKING.md` merely because the current agent has moved on.
+
+When information becomes obsolete, update it clearly rather than silently leaving contradictory statements.
+
+For significant state changes, prefer recording the new state and, when useful, briefly explaining what changed.
+
+Do not overwrite another agent's useful work without a reason.
+
+---
+
+## 5. Do not blindly trust `WORKING.md`
+
+`WORKING.md` is persistent memory, not authoritative project documentation.
+
+Its contents may be stale, incomplete, or incorrect.
+
+When `WORKING.md` conflicts with:
+
+* the actual implementation;
+* tests;
+* project documentation;
+* configuration;
+* observed behavior;
+* explicit user requirements;
+
+investigate the discrepancy.
+
+Do not propagate an old assumption simply because it appears in `WORKING.md`.
+
+---
+
+## 6. Do not put secrets or sensitive data in `WORKING.md`
+
+Never record:
+
+* API keys;
+* passwords;
+* authentication tokens;
+* private keys;
+* session cookies;
+* credentials;
+* secrets from environment variables;
+* unnecessary personal data.
+
+If sensitive information is discovered during development, describe the situation without copying the secret itself.
+
+---
+
+## 7. Update memory before handoff or completion
+
+Before finishing a task, the agent MUST review `WORKING.md` and make sure it accurately reflects the current state of the work.
+
+The final update should include, when applicable:
+
+* what was completed;
+* what was verified;
+* important discoveries;
+* bugs discovered or fixed;
+* unresolved issues;
+* remaining next steps;
+* anything the next agent needs to know to continue safely.
+
+A future agent should be able to read `WORKING.md` and understand where the previous agent left off.
+
+
 ---
 
 # AFTER IMPLEMENTING CHANGES

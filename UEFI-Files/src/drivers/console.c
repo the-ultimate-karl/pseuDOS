@@ -121,6 +121,11 @@ void console_clear(void) {
     uart_puts("\033[2J\033[H");
 }
 
+void console_set_colors(uint32_t fg, uint32_t bg) {
+    g_fg_color = fg;
+    g_bg_color = bg;
+}
+
 void console_rebuild_layout(void) {
     uint32_t w = fb_get_width();
     uint32_t h = fb_get_height();

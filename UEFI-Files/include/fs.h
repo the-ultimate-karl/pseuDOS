@@ -19,6 +19,10 @@ typedef struct vfs_node {
     size_t capacity;
     int is_protected; /* 1 if protected system node requiring -f to delete */
 
+    char date_created[24];
+    char date_accessed[24];
+    char date_modified[24];
+
     struct vfs_node *parent;
     struct vfs_node *first_child;
     struct vfs_node *next_sibling;
@@ -52,12 +56,15 @@ vfs_node_t *vfs_find_node(const char *path);
 vfs_node_t *vfs_mkdir(const char *path);
 vfs_node_t *vfs_create_file(const char *path);
 int vfs_write_file(const char *path, const char *text, int append);
+int vfs_write_file_bytes(const char *path, const void *data, size_t size, int append);
 int vfs_read_file(const char *path, char *buffer, size_t max_len);
+int vfs_read_file_offset(const char *path, char *buffer, size_t max_len, size_t offset);
 int vfs_remove_node_ex(const char *path, int recursive, int force);
 int vfs_remove_node(const char *path);
 int vfs_chdir(const char *path);
 const char *vfs_getcwd(void);
 void vfs_listdir(const char *path);
+int vfs_listdir_names(const char *path, char *buf, size_t buf_size);
 void vfs_get_stats(uint32_t *out_nodes, uint32_t *out_dirs, uint32_t *out_files, uint64_t *out_bytes);
 
 /* Boot Device & Prompt Path Resolution */

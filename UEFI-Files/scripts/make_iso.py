@@ -90,6 +90,8 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
     krnl_clus = alloc(1) if kernel_data else 0
     bootmgr_clus = alloc(1) if kernel_data else 0
     bootcfg_clus = alloc(1) if kernel_data else 0
+    grubcfg_clus = alloc(1) if kernel_data else 0
+    osrelease_clus = alloc(1) if kernel_data else 0
     
     root_off = (rsvd_sec + num_fats * sec_per_fat) * sector_size
     image[root_off:root_off+32] = mkentry("EFI        ", 0x10, efi_clus, 0)
@@ -126,6 +128,18 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
         d3[0:32] = mkentry(".          ", 0x10, pseudos_clus, 0)
         d3[32:64] = mkentry("..         ", 0x10, efi_clus, 0)
         d3[64:96] = mkentry("KERNEL  BIN", 0x20, k_start, len(kernel_data))
+        d3[96:128] = mkentry("BOOTX64 EFI", 0x20, c_start, len(efi_data))
+        d3[128:160] = mkentry("PSEUDOS EFI", 0x20, c_start, len(efi_data))
+
+        # GRUB config snippet and OS release info
+        grub_bytes = b"# GRUB 2 configuration snippet for pseuDOS\r\nmenuentry \"pseuDOS x86_64\" {\r\n    insmod fat\r\n    insmod chain\r\n    search --no-floppy --set=root --file /EFI/pseuDOS/BOOTX64.EFI\r\n    chainloader /EFI/pseuDOS/BOOTX64.EFI\r\n}\r\n"
+        write_clus(grubcfg_clus, grub_bytes)
+        d3[160:192] = mkentry("GRUB    CFG", 0x20, grubcfg_clus, len(grub_bytes))
+
+        osrelease_bytes = b"NAME=\"pseuDOS\"\r\nID=pseudos\r\nVERSION=\"0.6.0\"\r\nPRETTY_NAME=\"pseuDOS v0.6.0\"\r\nHOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\r\n"
+        write_clus(osrelease_clus, osrelease_bytes)
+        d3[192:224] = mkentry("OS-RELEA   ", 0x20, osrelease_clus, len(osrelease_bytes))
+
         write_clus(pseudos_clus, d3)
 
         # PROTECT dir contains KRNL and BOOTMGR
@@ -144,7 +158,7 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
         write_clus(krnl_clus, dk)
 
         # BOOTMGR dir with BOOT.CFG
-        cfg_bytes = b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\kernel.bin\r\ncmdline=quiet devpath=hardware\r\ndefault_resolution=1280x720\r\n"
+        cfg_bytes = b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\kernel.bin\r\nautoinit=\\protected\\krnl\\autoinit.bin\r\nshell=\\protected\\crit\\xshss.bin\r\ncmdline=quiet devpath=hardware\r\ndefault_resolution=1280x720\r\n"
         write_clus(bootcfg_clus, cfg_bytes)
 
         db = bytearray(sec_per_clus * sector_size)

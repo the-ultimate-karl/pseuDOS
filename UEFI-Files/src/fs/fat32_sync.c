@@ -163,6 +163,15 @@ static void to_dos_name(const char *src, char *dos_name) {
     memset(dos_name, ' ', 11);
     if (!src || src[0] == '\0') return;
 
+    if (strcasecmp(src, "protected") == 0) {
+        memcpy(dos_name, "PROTECT    ", 11);
+        return;
+    }
+    if (strcasecmp(src, "os-release") == 0) {
+        memcpy(dos_name, "OS-RELEA   ", 11);
+        return;
+    }
+
     if (strcmp(src, ".") == 0) {
         dos_name[0] = '.';
         return;
@@ -196,6 +205,15 @@ static void to_dos_name(const char *src, char *dos_name) {
 }
 
 static void from_dos_name(const char *dos_name, char *out_name) {
+    if (memcmp(dos_name, "PROTECT    ", 11) == 0) {
+        strcpy(out_name, "protected");
+        return;
+    }
+    if (memcmp(dos_name, "OS-RELEA   ", 11) == 0) {
+        strcpy(out_name, "os-release");
+        return;
+    }
+
     char name_part[9];
     char ext_part[4];
     int n_len = 0, e_len = 0;
@@ -328,6 +346,9 @@ int fat32_sync_create_file(const char *path) {
                 entries[i].file_size = 0;
 
                 write_cluster(c, cluster_buf);
+                if (g_sync_dev && g_sync_dev->flush) {
+                    g_sync_dev->flush(g_sync_dev);
+                }
                 return 0;
             } else if (memcmp(entries[i].name, dos_name, 11) == 0) {
                 return 0; /* Already exists */
@@ -402,6 +423,9 @@ int fat32_sync_write_file(const char *path, const char *text, int append) {
 
                 write_cluster(file_cluster, data_buf);
                 write_cluster(c, cluster_buf);
+                if (g_sync_dev && g_sync_dev->flush) {
+                    g_sync_dev->flush(g_sync_dev);
+                }
                 return (int)entries[i].file_size;
             }
         }
@@ -467,6 +491,9 @@ int fat32_sync_mkdir(const char *path) {
                 entries[i].fst_clus_lo = (uint16_t)(new_dir_clus & 0xFFFF);
 
                 write_cluster(c, cluster_buf);
+                if (g_sync_dev && g_sync_dev->flush) {
+                    g_sync_dev->flush(g_sync_dev);
+                }
                 return 0;
             }
         }
@@ -606,17 +633,26 @@ static void load_fat32_dir_recursive(uint32_t dir_cluster, const char *vfs_paren
                 vfs_node_t *file_node = vfs_create_file(sub_path);
                 if (file_node) {
                     file_node->size = entries[i].file_size;
-                    /* Read file content into memory if text/config file */
-                    if (entries[i].file_size > 0 && entries[i].file_size <= 65536) {
-                        uint8_t file_buf[4096];
-                        if (read_cluster(start_cluster, file_buf) == 0) {
-                            file_node->capacity = (entries[i].file_size + 1 + 255) & ~255;
-                            file_node->content = (char *)kmalloc(file_node->capacity);
-                            if (file_node->content) {
-                                size_t to_copy = entries[i].file_size > sizeof(file_buf) ? sizeof(file_buf) : entries[i].file_size;
-                                memcpy(file_node->content, file_buf, to_copy);
-                                file_node->content[to_copy] = '\0';
+                    /* Read full file content into memory across FAT cluster chain */
+                    if (entries[i].file_size > 0 && entries[i].file_size <= 4 * 1024 * 1024) {
+                        file_node->capacity = (entries[i].file_size + 1 + 255) & ~255;
+                        file_node->content = (char *)kmalloc(file_node->capacity);
+                        if (file_node->content) {
+                            uint32_t fc = start_cluster;
+                            size_t bytes_read = 0;
+                            uint8_t clus_buf[4096];
+                            size_t max_chunk = g_sync_cluster_size > sizeof(clus_buf) ? sizeof(clus_buf) : g_sync_cluster_size;
+                            if (max_chunk == 0) max_chunk = 4096;
+
+                            while (fc >= 2 && fc < 0x0FFFFFF8 && bytes_read < entries[i].file_size) {
+                                if (read_cluster(fc, clus_buf) != 0) break;
+                                size_t chunk = entries[i].file_size - bytes_read;
+                                if (chunk > max_chunk) chunk = max_chunk;
+                                memcpy(file_node->content + bytes_read, clus_buf, chunk);
+                                bytes_read += chunk;
+                                fc = get_fat_entry(fc);
                             }
+                            file_node->content[bytes_read] = '\0';
                         }
                     }
                 }

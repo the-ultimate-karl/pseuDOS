@@ -105,6 +105,16 @@ static void unicode_to_ascii(const CHAR16 *src, char *dst, size_t max_len) {
     dst[i] = '\0';
 }
 
+static void ascii_to_unicode(const char *src, CHAR16 *dst, size_t max_len) {
+    size_t i = 0;
+    if (!src || !dst || max_len == 0) return;
+    while (src[i] != '\0' && i + 1 < max_len) {
+        dst[i] = (CHAR16)(unsigned char)src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     uart_init();
 
@@ -322,16 +332,57 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
     boot_msg(SystemTable, "[ok]\n");
 
-    /* 9. Check for Boot Manager Configuration */
+    /* 9. Check and Parse Boot Manager Configuration */
+    strcpy(boot_info.autoinit_path, "\\protected\\krnl\\autoinit.bin");
+    strcpy(boot_info.shell_path, "\\protected\\crit\\xshss.bin");
+    strcpy(boot_info.cmdline, "quiet devpath=hardware");
+
+    char cfg_kernel_path[128] = "";
     const CHAR16 bootcfg_path1[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', 'e', 'd', '\\', 'b', 'o', 'o', 't', 'm', 'g', 'r', '\\', 'b', 'o', 'o', 't', '.', 'c', 'f', 'g', 0 };
     const CHAR16 bootcfg_path2[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', '\\', 'b', 'o', 'o', 't', 'm', 'g', 'r', '\\', 'b', 'o', 'o', 't', '.', 'c', 'f', 'g', 0 };
     EFI_FILE_PROTOCOL *cfg_file = NULL;
-    status = root_dir->Open(root_dir, &cfg_file, bootcfg_path1, EFI_FILE_MODE_READ, 0);
+    status = root_dir->Open(root_dir, &cfg_file, (CHAR16 *)bootcfg_path1, EFI_FILE_MODE_READ, 0);
     if (EFI_ERROR(status) || !cfg_file) {
-        status = root_dir->Open(root_dir, &cfg_file, bootcfg_path2, EFI_FILE_MODE_READ, 0);
+        status = root_dir->Open(root_dir, &cfg_file, (CHAR16 *)bootcfg_path2, EFI_FILE_MODE_READ, 0);
     }
     if (!EFI_ERROR(status) && cfg_file) {
-        boot_msg(SystemTable, "[bootmgfw] reading boot configuration \\protected\\bootmgr\\boot.cfg... [ok]\n");
+        char cfg_buf[1024];
+        UINTN cfg_read_size = sizeof(cfg_buf) - 1;
+        status = cfg_file->Read(cfg_file, &cfg_read_size, cfg_buf);
+        if (!EFI_ERROR(status) && cfg_read_size > 0) {
+            cfg_buf[cfg_read_size] = '\0';
+            char *line = cfg_buf;
+            while (*line) {
+                while (*line == ' ' || *line == '\t' || *line == '\r' || *line == '\n') line++;
+                if (*line == '\0') break;
+                char *line_end = line;
+                while (*line_end && *line_end != '\r' && *line_end != '\n') line_end++;
+                char orig_end = *line_end;
+                *line_end = '\0';
+
+                if (*line != '#') {
+                    char *eq = strchr(line, '=');
+                    if (eq) {
+                        *eq = '\0';
+                        char *key = trim(line);
+                        char *val = trim(eq + 1);
+                        if (strcmp(key, "kernel") == 0) {
+                            strncpy(cfg_kernel_path, val, sizeof(cfg_kernel_path) - 1);
+                        } else if (strcmp(key, "autoinit") == 0) {
+                            strncpy(boot_info.autoinit_path, val, sizeof(boot_info.autoinit_path) - 1);
+                        } else if (strcmp(key, "shell") == 0) {
+                            strncpy(boot_info.shell_path, val, sizeof(boot_info.shell_path) - 1);
+                        } else if (strcmp(key, "cmdline") == 0) {
+                            strncpy(boot_info.cmdline, val, sizeof(boot_info.cmdline) - 1);
+                        }
+                    }
+                }
+
+                if (orig_end == '\0') break;
+                line = line_end + 1;
+            }
+            boot_msg(SystemTable, "[bootmgfw] parsed boot configuration \\protected\\bootmgr\\boot.cfg [ok]\n");
+        }
         cfg_file->Close(cfg_file);
     }
 
@@ -342,21 +393,35 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     const CHAR16 kernel_path_legacy[] = { '\\', 'E', 'F', 'I', '\\', 'p', 's', 'e', 'u', 'D', 'O', 'S', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'b', 'i', 'n', 0 };
     EFI_FILE_PROTOCOL *kernel_file = NULL;
 
-    status = root_dir->Open(root_dir, &kernel_file, kernel_path_win1, EFI_FILE_MODE_READ, 0);
-    if (EFI_ERROR(status) || !kernel_file) {
-        status = root_dir->Open(root_dir, &kernel_file, kernel_path_win2, EFI_FILE_MODE_READ, 0);
+    if (cfg_kernel_path[0] != '\0') {
+        CHAR16 cfg_kernel_path16[128];
+        ascii_to_unicode(cfg_kernel_path, cfg_kernel_path16, sizeof(cfg_kernel_path16) / sizeof(CHAR16));
+        status = root_dir->Open(root_dir, &kernel_file, cfg_kernel_path16, EFI_FILE_MODE_READ, 0);
+        if (!EFI_ERROR(status) && kernel_file) {
+            strcpy(boot_info.boot_file_path, cfg_kernel_path);
+            boot_msg(SystemTable, "[bootmgfw] found kernel from boot.cfg: ");
+            boot_msg(SystemTable, cfg_kernel_path);
+            boot_msg(SystemTable, " [ok]\n");
+        }
     }
 
-    if (!EFI_ERROR(status) && kernel_file) {
-        strcpy(boot_info.boot_file_path, "\\protected\\krnl\\kernel.bin");
-        boot_msg(SystemTable, "[bootmgfw] found kernel at \\protected\\krnl\\kernel.bin [ok]\n");
-    } else {
-        status = root_dir->Open(root_dir, &kernel_file, kernel_path_legacy, EFI_FILE_MODE_READ, 0);
+    if (!kernel_file) {
+        status = root_dir->Open(root_dir, &kernel_file, (CHAR16 *)kernel_path_win1, EFI_FILE_MODE_READ, 0);
+        if (EFI_ERROR(status) || !kernel_file) {
+            status = root_dir->Open(root_dir, &kernel_file, (CHAR16 *)kernel_path_win2, EFI_FILE_MODE_READ, 0);
+        }
+
         if (!EFI_ERROR(status) && kernel_file) {
-            strcpy(boot_info.boot_file_path, "\\EFI\\pseuDOS\\kernel.bin");
-            boot_msg(SystemTable, "[bootmgfw] found kernel at \\EFI\\pseuDOS\\kernel.bin (fallback) [ok]\n");
+            strcpy(boot_info.boot_file_path, "\\protected\\krnl\\kernel.bin");
+            boot_msg(SystemTable, "[bootmgfw] found kernel at \\protected\\krnl\\kernel.bin [ok]\n");
         } else {
-            error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "kernel image not found (checked \\protected\\krnl and \\EFI\\pseuDOS)");
+            status = root_dir->Open(root_dir, &kernel_file, (CHAR16 *)kernel_path_legacy, EFI_FILE_MODE_READ, 0);
+            if (!EFI_ERROR(status) && kernel_file) {
+                strcpy(boot_info.boot_file_path, "\\EFI\\pseuDOS\\kernel.bin");
+                boot_msg(SystemTable, "[bootmgfw] found kernel at \\EFI\\pseuDOS\\kernel.bin (fallback) [ok]\n");
+            } else {
+                error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "kernel image not found (checked boot.cfg, \\protected\\krnl and \\EFI\\pseuDOS)");
+            }
         }
     }
 

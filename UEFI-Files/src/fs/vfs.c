@@ -1,5 +1,6 @@
 #include "fs.h"
 #include "storage.h"
+#include "rtc.h"
 #include "lib.h"
 #include "drivers.h"
 
@@ -15,6 +16,18 @@ static vfs_node_t *create_node(const char *name, vfs_node_type_t type, vfs_node_
     strncpy(node->name, name, sizeof(node->name) - 1);
     node->type = type;
     node->parent = parent;
+
+    /* Initialize Creation, Access, and Modification timestamps from CMOS RTC */
+    rtc_datetime_t dt;
+    if (rtc_get_datetime(&dt) == 0) {
+        rtc_format_datetime(node->date_created, sizeof(node->date_created), &dt);
+        strncpy(node->date_accessed, node->date_created, sizeof(node->date_accessed) - 1);
+        strncpy(node->date_modified, node->date_created, sizeof(node->date_modified) - 1);
+    } else {
+        strcpy(node->date_created, "0000-00-00 00:00:00");
+        strcpy(node->date_accessed, "0000-00-00 00:00:00");
+        strcpy(node->date_modified, "0000-00-00 00:00:00");
+    }
 
     if (parent) {
         if (!parent->first_child) {
@@ -50,7 +63,7 @@ static void normalize_path(const char *path, char *out_buf, size_t max_len) {
     }
     full[sizeof(full) - 1] = '\0';
 
-    char segments[32][64];
+    char segments[64][64];
     int seg_count = 0;
     char token[64];
     int token_len = 0;
@@ -64,7 +77,7 @@ static void normalize_path(const char *path, char *out_buf, size_t max_len) {
                 } else if (strcmp(token, "..") == 0) {
                     if (seg_count > 0) seg_count--;
                 } else {
-                    if (seg_count < 32) {
+                    if (seg_count < 64) {
                         strncpy(segments[seg_count++], token, 63);
                     }
                 }
@@ -84,7 +97,7 @@ static void normalize_path(const char *path, char *out_buf, size_t max_len) {
         } else if (strcmp(token, "..") == 0) {
             if (seg_count > 0) seg_count--;
         } else {
-            if (seg_count < 32) {
+            if (seg_count < 64) {
                 strncpy(segments[seg_count++], token, 63);
             }
         }
@@ -231,16 +244,15 @@ vfs_node_t *vfs_create_file(const char *path) {
     return node;
 }
 
-int vfs_write_file(const char *path, const char *text, int append) {
-    if (!path || !text) return -1;
+int vfs_write_file_bytes(const char *path, const void *data, size_t size, int append) {
+    if (!path) return -1;
+    const char *bytes = (const char *)data;
 
     vfs_node_t *node = vfs_create_file(path);
     if (!node || node->type != VFS_NODE_FILE) return -1;
 
-    size_t text_len = strlen(text);
-
     if (append && node->content) {
-        size_t new_size = node->size + text_len;
+        size_t new_size = node->size + size;
         if (new_size + 1 > node->capacity) {
             size_t new_cap = (new_size + 1 + 255) & ~255;
             char *new_buf = (char *)krealloc(node->content, new_cap);
@@ -248,28 +260,71 @@ int vfs_write_file(const char *path, const char *text, int append) {
             node->content = new_buf;
             node->capacity = new_cap;
         }
-        memcpy(node->content + node->size, text, text_len);
+        if (size > 0 && bytes) {
+            memcpy(node->content + node->size, bytes, size);
+        }
         node->size = new_size;
         node->content[node->size] = '\0';
     } else {
-        if (!node->content || (text_len + 1) > node->capacity) {
+        if (!node->content || (size + 1) > node->capacity) {
             if (node->content) kfree(node->content);
-            node->capacity = (text_len + 1 + 255) & ~255;
+            node->capacity = (size + 1 + 255) & ~255;
             node->content = (char *)kmalloc(node->capacity);
             if (!node->content) return -1;
         }
-        memcpy(node->content, text, text_len);
-        node->size = text_len;
+        if (size > 0 && bytes) {
+            memcpy(node->content, bytes, size);
+        }
+        node->size = size;
         node->content[node->size] = '\0';
     }
 
-    if (fat32_is_mounted()) {
+    if (fat32_is_mounted() && bytes) {
         char norm_path[256];
         normalize_path(path, norm_path, sizeof(norm_path));
-        fat32_sync_write_file(norm_path, text, append);
+        fat32_sync_write_file(norm_path, bytes, append);
+    }
+
+    rtc_datetime_t dt;
+    if (rtc_get_datetime(&dt) == 0) {
+        rtc_format_datetime(node->date_modified, sizeof(node->date_modified), &dt);
+        rtc_format_datetime(node->date_accessed, sizeof(node->date_accessed), &dt);
     }
 
     return (int)node->size;
+}
+
+int vfs_write_file(const char *path, const char *text, int append) {
+    if (!path || !text) return -1;
+    return vfs_write_file_bytes(path, text, strlen(text), append);
+}
+
+int vfs_read_file_offset(const char *path, char *buffer, size_t max_len, size_t offset) {
+    if (!path || !buffer || max_len == 0) return -1;
+
+    vfs_node_t *node = vfs_find_node(path);
+    if (!node || node->type != VFS_NODE_FILE) return -1;
+
+    if (offset >= node->size) {
+        buffer[0] = '\0';
+        return 0; /* EOF */
+    }
+
+    size_t avail = node->size - offset;
+    size_t to_read = (avail < max_len) ? avail : max_len;
+    if (to_read > 0 && node->content) {
+        memcpy(buffer, node->content + offset, to_read);
+    }
+    if (to_read < max_len) {
+        buffer[to_read] = '\0';
+    }
+
+    rtc_datetime_t dt;
+    if (rtc_get_datetime(&dt) == 0) {
+        rtc_format_datetime(node->date_accessed, sizeof(node->date_accessed), &dt);
+    }
+
+    return (int)to_read;
 }
 
 int vfs_read_file(const char *path, char *buffer, size_t max_len) {
@@ -283,6 +338,12 @@ int vfs_read_file(const char *path, char *buffer, size_t max_len) {
         memcpy(buffer, node->content, to_read);
     }
     buffer[to_read] = '\0';
+
+    rtc_datetime_t dt;
+    if (rtc_get_datetime(&dt) == 0) {
+        rtc_format_datetime(node->date_accessed, sizeof(node->date_accessed), &dt);
+    }
+
     return (int)to_read;
 }
 
@@ -465,6 +526,32 @@ void vfs_listdir(const char *path) {
     console_printf("  total: %d item(s)\n", count);
 }
 
+int vfs_listdir_names(const char *path, char *buf, size_t buf_size) {
+    vfs_node_t *target = NULL;
+    if (!path || path[0] == '\0') {
+        target = g_vfs_cwd ? g_vfs_cwd : g_vfs_root;
+    } else {
+        char norm_path[256];
+        normalize_path(path, norm_path, sizeof(norm_path));
+        target = vfs_find_node(norm_path);
+    }
+
+    if (!target) return -2; /* -ENOENT */
+    if (target->type != VFS_NODE_DIRECTORY) return -20; /* -ENOTDIR */
+
+    size_t total_bytes = 0;
+    vfs_node_t *child = target->first_child;
+    while (child) {
+        size_t name_len = strlen(child->name) + 1; /* includes null terminator */
+        if (buf && total_bytes + name_len <= buf_size) {
+            memcpy(buf + total_bytes, child->name, name_len);
+        }
+        total_bytes += name_len;
+        child = child->next_sibling;
+    }
+    return (int)total_bytes;
+}
+
 int vfs_init_initramfs(void) {
     /* 1. Create root directory node if not present */
     if (!g_vfs_root) {
@@ -486,8 +573,36 @@ int vfs_init_initramfs(void) {
     vfs_node_t *boot_efi = vfs_create_file("/EFI/BOOT/BOOTX64.EFI");
     if (boot_efi) boot_efi->size = boot_size;
 
+    /* Deploy BOOTX64.EFI and pseudos.efi to /EFI/pseuDOS for GRUB / os-prober */
+    vfs_node_t *pseudos_boot = vfs_create_file("/EFI/pseuDOS/BOOTX64.EFI");
+    if (pseudos_boot) pseudos_boot->size = boot_size;
+
+    vfs_node_t *pseudos_efi = vfs_create_file("/EFI/pseuDOS/pseudos.efi");
+    if (pseudos_efi) pseudos_efi->size = boot_size;
+
+    /* GRUB 2 configuration snippet */
+    vfs_write_file("/EFI/pseuDOS/grub.cfg",
+        "# GRUB 2 configuration snippet for pseuDOS\n"
+        "# Add this to /etc/grub.d/40_custom or /boot/grub/grub.cfg\n"
+        "\n"
+        "menuentry \"pseuDOS x86_64\" {\n"
+        "    insmod fat\n"
+        "    insmod chain\n"
+        "    search --no-floppy --set=root --file /EFI/pseuDOS/BOOTX64.EFI\n"
+        "    chainloader /EFI/pseuDOS/BOOTX64.EFI\n"
+        "}\n", 0);
+
+    /* Standard OS identification file */
+    vfs_write_file("/EFI/pseuDOS/os-release",
+        "NAME=\"pseuDOS\"\n"
+        "ID=pseudos\n"
+        "VERSION=\"0.6.0\"\n"
+        "PRETTY_NAME=\"pseuDOS v0.6.0 (x86_64 UEFI)\"\n"
+        "HOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\n", 0);
+
     /* 3. Create standard user and volatile directories */
     vfs_mkdir("/home");
+    vfs_mkdir("/home/user");
     vfs_mkdir("/tmp");
     vfs_mkdir("/services");
 
@@ -505,11 +620,25 @@ int vfs_init_initramfs(void) {
     vfs_node_t *coreutils = vfs_mkdir("/coreutils");
     if (coreutils) coreutils->is_protected = 1;
 
-    /* 5. Deploy kernel payload and Windows-style boot manager configuration */
+    /* 5. Deploy kernel and userland payloads */
     size_t krnl_size = 0;
     payload_get_kernel(&krnl_size);
     vfs_node_t *krnl_bin = vfs_create_file("/protected/krnl/kernel.bin");
     if (krnl_bin) krnl_bin->size = krnl_size;
+
+    /* Deploy autoinit.bin payload */
+    size_t autoinit_size = 0;
+    const uint8_t *autoinit_data = payload_get_autoinit(&autoinit_size);
+    if (autoinit_data && autoinit_size > 0) {
+        vfs_write_file_bytes("/protected/krnl/autoinit.bin", autoinit_data, autoinit_size, 0);
+    }
+
+    /* Deploy xshss.bin payload */
+    size_t xshss_size = 0;
+    const uint8_t *xshss_data = payload_get_xshss(&xshss_size);
+    if (xshss_data && xshss_size > 0) {
+        vfs_write_file_bytes("/protected/crit/xshss.bin", xshss_data, xshss_size, 0);
+    }
 
     /* Maintain fallback copy in /EFI/pseuDOS */
     vfs_node_t *krnl_legacy = vfs_create_file("/EFI/pseuDOS/kernel.bin");
@@ -519,9 +648,11 @@ int vfs_init_initramfs(void) {
         "# pseuDOS Boot Configuration\n"
         "# Architecture: x86_64 UEFI\n"
         "kernel=\\protected\\krnl\\kernel.bin\n"
+        "autoinit=\\protected\\krnl\\autoinit.bin\n"
+        "shell=\\protected\\crit\\xshss.bin\n"
         "cmdline=quiet devpath=hardware\n"
         "default_resolution=1280x720\n"
-        "bootmgr_version=1.0.0\n", 0);
+        "bootmgr_version=1.1.0\n", 0);
 
     return 0;
 }

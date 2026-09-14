@@ -54,6 +54,7 @@ void idt_set_descriptor(uint8_t vector, void *isr, uint8_t flags);
 void pic_remap(void);
 void pic_send_eoi(uint8_t irq);
 void pic_unmask_irq(uint8_t irq);
+void pic_mask_irq(uint8_t irq);
 
 /* C Interrupt Dispatcher called from isr_common_stub */
 void isr_dispatch(uint64_t vector, uint64_t error_code, interrupt_frame_t *frame, registers_t *regs);

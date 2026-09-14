@@ -6,6 +6,12 @@
 extern const uint8_t g_payload_bootx64_data[];
 extern const uint64_t g_payload_bootx64_size;
 
+extern const uint8_t g_payload_autoinit_data[];
+extern const uint64_t g_payload_autoinit_size;
+
+extern const uint8_t g_payload_xshss_data[];
+extern const uint64_t g_payload_xshss_size;
+
 extern const BootInfo *g_boot_info_global;
 
 const uint8_t *payload_get_bootloader(size_t *out_size) {
@@ -24,4 +30,14 @@ const uint8_t *payload_get_kernel(size_t *out_size) {
     }
     if (out_size) *out_size = 512 * 1024;
     return (const uint8_t *)0x10000000;
+}
+
+const uint8_t *payload_get_autoinit(size_t *out_size) {
+    if (out_size) *out_size = (size_t)g_payload_autoinit_size;
+    return g_payload_autoinit_data;
+}
+
+const uint8_t *payload_get_xshss(size_t *out_size) {
+    if (out_size) *out_size = (size_t)g_payload_xshss_size;
+    return g_payload_xshss_data;
 }

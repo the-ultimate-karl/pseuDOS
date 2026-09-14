@@ -1,5 +1,6 @@
 #include "drivers.h"
 #include "bootinfo.h"
+#include "pmm.h"
 #include "lib.h"
 
 /* Standard UEFI Memory Descriptor format */
@@ -86,4 +87,19 @@ void memory_print_info(const MemoryMapInfo *mem_info) {
     }
     console_printf("  Memory Descriptors: %u entries (Descriptor size: %lu B)\n", descriptor_count, mem_info->descriptor_size);
     console_printf("  Kernel Heap Used  : %lu KB / %lu KB total\n", heap_get_used() / 1024, heap_get_total() / 1024);
+
+    /* Phase A Verification: PMM & Hardware Control Registers */
+    uint64_t cr3_val = 0;
+    uint16_t cs_val = 0, ss_val = 0, tr_val = 0;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3_val));
+    __asm__ volatile ("mov %%cs, %0" : "=r"(cs_val));
+    __asm__ volatile ("mov %%ss, %0" : "=r"(ss_val));
+    __asm__ volatile ("str %0" : "=r"(tr_val));
+
+    console_printf("\nMemory Management & Control Registers (Phase A):\n");
+    console_printf("  PMM Free Pages    : %lu / %lu pages (%lu MB free)\n",
+        pmm_get_free_pages(), pmm_get_total_pages(), (pmm_get_free_pages() * 4096) / (1024 * 1024));
+    console_printf("  Page Directory CR3: 0x%016lX (Master Kernel PML4)\n", cr3_val);
+    console_printf("  Active Selectors  : CS=0x%04X (Kernel Code), SS=0x%04X, TR=0x%04X (TSS)\n",
+        cs_val, ss_val, tr_val);
 }

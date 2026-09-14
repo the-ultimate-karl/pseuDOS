@@ -1,6 +1,7 @@
 #include "drivers.h"
 #include "io.h"
 #include "lib.h"
+#include "scheduler.h"
 
 #define PS2_DATA_PORT    0x60
 #define PS2_STATUS_PORT  0x64
@@ -115,7 +116,40 @@ void keyboard_init(void) {
     }
 }
 
+static char g_char_buf[4];
+static int g_char_buf_len = 0;
+static int g_char_buf_pos = 0;
+static int g_extended_scancode = 0;
+
 static char translate_scancode(uint8_t scancode) {
+    if (scancode == 0xE0) {
+        g_extended_scancode = 1;
+        return 0;
+    }
+
+    if (g_extended_scancode) {
+        g_extended_scancode = 0;
+        if (scancode & 0x80) return 0; /* Extended key release */
+        if (scancode == 0x48) { /* Up Arrow */
+            g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = 'A';
+            g_char_buf_len = 3; g_char_buf_pos = 1;
+            return 27;
+        } else if (scancode == 0x50) { /* Down Arrow */
+            g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = 'B';
+            g_char_buf_len = 3; g_char_buf_pos = 1;
+            return 27;
+        } else if (scancode == 0x4D) { /* Right Arrow */
+            g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = 'C';
+            g_char_buf_len = 3; g_char_buf_pos = 1;
+            return 27;
+        } else if (scancode == 0x4B) { /* Left Arrow */
+            g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = 'D';
+            g_char_buf_len = 3; g_char_buf_pos = 1;
+            return 27;
+        }
+        return 0;
+    }
+
     /* Handle key releases (scancode bit 7 set) */
     if (scancode & 0x80) {
         uint8_t released = scancode & 0x7F;
@@ -157,6 +191,11 @@ static char translate_scancode(uint8_t scancode) {
 
 char keyboard_getchar(void) {
     while (1) {
+        /* Check buffered characters (e.g. from multi-byte escape sequences) */
+        if (g_char_buf_pos < g_char_buf_len) {
+            return g_char_buf[g_char_buf_pos++];
+        }
+
         /* 1. Check Serial Port (only if physical UART is detected) */
         if (uart_is_present() && (inb(SERIAL_LSR) & 0x01)) {
             char c = (char)inb(SERIAL_DATA);
@@ -187,6 +226,9 @@ char keyboard_getchar(void) {
         }
 
         /* Wait for interrupt or serial activity */
+        if (scheduler_is_enabled()) {
+            scheduler_yield();
+        }
         __asm__ volatile ("pause");
     }
 }

@@ -1,4 +1,5 @@
 #include "lib.h"
+#include "drivers.h"
 
 typedef struct heap_block {
     size_t size;               /* Size of payload data in bytes */
@@ -34,6 +35,9 @@ void *kmalloc(size_t size) {
 
     heap_block_t *curr = g_free_list;
     while (curr) {
+        if ((uint8_t *)curr < g_heap_start || (uint8_t *)curr >= g_heap_start + g_heap_total_size) {
+            break;
+        }
         if (curr->is_free && curr->size >= size) {
             /* Can we split this block? */
             if (curr->size >= size + BLOCK_HEADER_SIZE + 32) {
@@ -136,6 +140,9 @@ size_t heap_get_used(void) {
     size_t used = 0;
     heap_block_t *curr = (heap_block_t *)g_heap_start;
     while (curr) {
+        if ((uint8_t *)curr < g_heap_start || (uint8_t *)curr >= g_heap_start + g_heap_total_size) {
+            break;
+        }
         if (!curr->is_free) {
             used += curr->size + BLOCK_HEADER_SIZE;
         }

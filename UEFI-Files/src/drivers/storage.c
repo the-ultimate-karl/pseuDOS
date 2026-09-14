@@ -382,17 +382,22 @@ int storage_inspect_fs(StorageDevice *dev, StorageFsInfo *out_info) {
 
     memset(out_info, 0, sizeof(StorageFsInfo));
 
-    StorageDriveInfo drive_info;
-    if (storage_inspect_drive(dev, &drive_info) != 0) return -1;
+    StorageDriveInfo *drive_info = (StorageDriveInfo *)kmalloc(sizeof(StorageDriveInfo));
+    if (!drive_info) return -1;
 
-    out_info->has_partition_table = drive_info.has_partition_table;
-    strncpy(out_info->part_table_type, drive_info.part_table_type, sizeof(out_info->part_table_type) - 1);
+    if (storage_inspect_drive(dev, drive_info) != 0) {
+        kfree(drive_info);
+        return -1;
+    }
 
-    if (drive_info.partition_count > 0) {
-        StoragePartitionInfo *selected = &drive_info.partitions[0];
-        for (uint32_t i = 0; i < drive_info.partition_count; i++) {
-            if (drive_info.partitions[i].has_fs) {
-                selected = &drive_info.partitions[i];
+    out_info->has_partition_table = drive_info->has_partition_table;
+    strncpy(out_info->part_table_type, drive_info->part_table_type, sizeof(out_info->part_table_type) - 1);
+
+    if (drive_info->partition_count > 0) {
+        StoragePartitionInfo *selected = &drive_info->partitions[0];
+        for (uint32_t i = 0; i < drive_info->partition_count; i++) {
+            if (drive_info->partitions[i].has_fs) {
+                selected = &drive_info->partitions[i];
                 break;
             }
         }
@@ -434,6 +439,7 @@ int storage_inspect_fs(StorageDevice *dev, StorageFsInfo *out_info) {
         strcpy(out_info->health_status, "Unformatted");
     }
 
+    kfree(drive_info);
     return 0;
 }
 

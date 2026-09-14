@@ -134,5 +134,7 @@ StorageDevice *storage_get_boot_device(const char *boot_devpath, int *out_drive_
 /* Embedded Installer Payloads */
 const uint8_t *payload_get_bootloader(size_t *out_size);
 const uint8_t *payload_get_kernel(size_t *out_size);
+const uint8_t *payload_get_autoinit(size_t *out_size);
+const uint8_t *payload_get_xshss(size_t *out_size);
 
 #endif /* STORAGE_H */

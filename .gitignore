@@ -6,6 +6,7 @@
 *.pyc
 *.md
 !README.md
+!WORKING.md
 *.log
 *.txt
 *.img

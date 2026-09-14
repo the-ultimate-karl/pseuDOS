@@ -121,4 +121,48 @@ ANTIGRAVITY (2026-09-08 20:37)
 
 [IMPORTANT-BUGS]
 - NVMe solid-state drives utilize volatile internal SRAM/DRAM write caches; uncommitted sector writes are discarded when power is cut via ACPI S5 unless an explicit NVME_CMD_FLUSH (Opcode 0x00) and Normal Shutdown Notification (CC.SHN = 01b, CSTS.SHST == 10b) are performed before powering off. Multi-cluster FAT file unlinking produces large bursts of sector operations that exceed busy-wait loop timeouts if CPU pause instructions and adequate timeout bounds are omitted. VFS nodes must only be unlinked in RAM after physical disk synchronization succeeds to prevent in-memory state diverging from physical disk media.
+ANTIGRAVITY (2026-09-11 17:15)
+- 'cp' and 'mv' commands failed with "write error" when destination was an existing directory, caused by vfs_write_file treating existing directory node as un-creatable file, lack of directory path resolution, and string-only write routines truncating binary data [FIXED + 2026-09-11 17:15]
 
+[IMPORTANT-BUGS]
+- VFS file operations like 'cp' and 'mv' targeting a directory path must resolve the destination filename from the source basename, and file writes must use binary-safe APIs rather than strlen() to support binary files.
+
+ANTIGRAVITY (2026-09-13 12:48)
+- System hang on SYS_SLEEP caused by hlt instruction executed with interrupts masked (IF=0) during fast syscalls in src/drivers/pit.c and src/drivers/keyboard.c [FIXED + 2026-09-13 12:48]
+
+[IMPORTANT-BUGS]
+- IA32_SFMASK clears the Interrupt Flag (IF) upon syscall entry; any busy loop or sleep routine executing hlt with IF=0 permanently halts the CPU unless it yields to the preemptive scheduler or enables interrupts via sti
+
+ANTIGRAVITY (2026-09-13 15:10)
+- Page fault exception #PF (0x15) upon userland syscall return caused by CS=0x23 CPL 3 transition attempting to execute from supervisor-only (U/S=0) heap pages in src/kernel/syscall_entry.s and src/kernel/process.c [FIXED + 2026-09-13 15:10]
+
+[IMPORTANT-BUGS]
+- Ring 3 CPL transitions require full user-page mapping (PTE_USER U/S=1) on all executable and stack pages; per Design Decision D4, pseuDOS implements privilege separation via kernel-enforced process privilege level policy checks (PRIV_USER vs PRIV_KERNEL) rather than CPL 3 CPU ring transitions
+
+ANTIGRAVITY (2026-09-13 18:11)
+- Python struct pack error in mkentry caused by 10-character 8.3 filename "PSEUDOSEFI" resizing bytearray buffer from 32 to 31 bytes in UEFI-Files/scripts/make_iso.py and src/fs/gpt_fat32.c [FIXED + 2026-09-13 18:11]
+
+[IMPORTANT-BUGS]
+- FAT 8.3 directory entry names must be formatted to exactly 11 characters (8 name padded with spaces + 3 extension padded with spaces); shorter strings cause buffer resizing or null-padding corruption in directory structures
+
+ANTIGRAVITY (2026-09-13 20:25)
+- Incomplete file loading on persistent media caused by single-cluster 4KB read cap in load_fat32_dir_recursive in src/fs/fat32_sync.c [FIXED + 2026-09-13 20:00]
+- Directory name mismatch on persistent disk mount caused by 8.3 truncation of "protected" to "PROTECTE" instead of "PROTECT    " in src/fs/fat32_sync.c [FIXED + 2026-09-13 20:05]
+
+[IMPORTANT-BUGS]
+- FAT32 directory recursive loader must follow the FAT cluster chain (via get_fat_entry) until EOF (>= 0x0FFFFFF8) to avoid truncating executables exceeding the 4KB cluster boundary
+- FAT 8.3 directory name mapping must explicitly handle reserved 9+ character system directories like "protected" to align with installer on-disk FAT entries
+
+ANTIGRAVITY (2026-09-13 21:20)
+- General Protection Fault (#GP vector 0x0D, err 0x0) in heap_get_used or kmalloc during 'fs' command caused by process stack overflow (16KB PROCESS_STACK_SIZE exceeded by nested 5KB StorageDriveInfo stack allocations and sector buffers in storage_inspect_fs and storage_inspect_drive) overwriting adjacent heap block metadata in UEFI-Files/include/process.h, UEFI-Files/src/drivers/storage.c, UEFI-Files/src/kernel/shell.c, and UEFI-Files/src/lib/heap.c [FIXED + 2026-09-13 21:20]
+
+[IMPORTANT-BUGS]
+- Deep kernel and userspace call stacks performing storage inspections, partition analysis, and formatted console printing require substantial stack headroom; allocating heavy structs (>5KB StorageDriveInfo) directly on the execution stack causes stack exhaustion past 16KB and smashes adjacent heap block headers, causing non-canonical pointer dereferences (#GP). Heavy structures must be dynamically allocated (kmalloc/kfree) and PROCESS_STACK_SIZE expanded to 64KB with defensive boundary checks in heap traversal.
+
+ANTIGRAVITY (2026-09-13 22:40)
+- Reappearing files post-reboot on SATA drives caused by missing AHCI dev.flush and dev.shutdown hooks (ATA_CMD_FLUSH_CACHE_EXT 0xEA, ATA_CMD_FLUSH_CACHE 0xE7, ATA_CMD_STANDBY_IMMED 0xE0) and missing cache flush on fat32_sync write/create/mkdir paths [FIXED + 2026-09-13 22:40]
+- Silent termination of userland init (PID 1) without kernel panic caused by missing PID 1 check in process_kill and process_exit in src/kernel/process.c [FIXED + 2026-09-13 22:40]
+
+[IMPORTANT-BUGS]
+- SATA drives utilize volatile onboard write caches; without an explicit FLUSH CACHE EXT (0xEA) / FLUSH CACHE (0xE7) non-data FIS command before power-off or after FAT32 directory and cluster updates, sector writes remain in volatile drive RAM and are lost on sudden reset or power cut
+- PID 1 (autoinit) is the root userland supervisor; if killed or exited, the kernel must panic with 'Attempted to kill init! (PID 1)' to prevent orphaned processes or unrecoverable idle hangs

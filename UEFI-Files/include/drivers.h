@@ -22,6 +22,7 @@ void fb_scroll_up(uint32_t pixels, uint32_t bg_color);
 /* Text Console Output */
 void console_init(void);
 void console_clear(void);
+void console_set_colors(uint32_t fg, uint32_t bg);
 void console_rebuild_layout(void);
 void console_putc(char c);
 void console_puts(const char *str);

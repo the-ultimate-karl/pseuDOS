@@ -2,6 +2,8 @@
 #include "io.h"
 #include "drivers.h"
 #include "lib.h"
+#include "scheduler.h"
+#include "panic.h"
 
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA    0x21
@@ -58,6 +60,20 @@ void pic_unmask_irq(uint8_t irq) {
         irq -= 8;
     }
     value = (uint8_t)(inb(port) & ~(1 << irq));
+    outb(port, value);
+}
+
+void pic_mask_irq(uint8_t irq) {
+    uint16_t port;
+    uint8_t value;
+
+    if (irq < 8) {
+        port = PIC1_DATA;
+    } else {
+        port = PIC2_DATA;
+        irq -= 8;
+    }
+    value = (uint8_t)(inb(port) | (1 << irq));
     outb(port, value);
 }
 
@@ -141,6 +157,13 @@ void isr_dispatch(uint64_t vector, uint64_t error_code, interrupt_frame_t *frame
     /* 4. Timer IRQ 0 (Vector 32) */
     if (vector == 32) {
         pic_send_eoi(0);
+        scheduler_tick(frame, regs);
+        return;
+    }
+
+    /* 5. Software Yield (Vector 48) */
+    if (vector == 48) {
+        scheduler_schedule(frame, regs);
         return;
     }
 
@@ -197,23 +220,20 @@ void isr_dispatch(uint64_t vector, uint64_t error_code, interrupt_frame_t *frame
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
     }
 
-    console_printf("\n============================================================\n");
-    console_printf("[CPU EXCEPTION] Unhandled CPU Fault!\n");
-    console_printf("  Vector:     0x%02lX (%s)\n", vector, name);
-    console_printf("  Error Code: 0x%016lX\n", error_code);
+    panic_context_t pctx;
+    memset(&pctx, 0, sizeof(pctx));
+    pctx.vector = vector;
+    pctx.error_code = error_code;
+    pctx.vector_name = name;
     if (frame) {
-        console_printf("  RIP:        0x%016lX\n", frame->ip);
-        console_printf("  CS:         0x%04lX\n", frame->cs);
-        console_printf("  RFLAGS:     0x%016lX\n", frame->flags);
-        console_printf("  RSP:        0x%016lX\n", frame->sp);
-        console_printf("  SS:         0x%04lX\n", frame->ss);
+        pctx.rip = frame->ip;
+        pctx.rsp = frame->sp;
     }
-    if (vector == 14) {
-        console_printf("  Fault Addr: 0x%016lX (CR2)\n", cr2);
-    }
-    console_printf("============================================================\n");
+    pctx.cr2 = cr2;
 
-    __asm__ volatile ("cli; hlt");
+    char reason[128];
+    snprintf(reason, sizeof(reason), "unhandled CPU fault %s (Vector 0x%02lX, Err 0x%lX)", name, vector, error_code);
+    kernel_panic(reason, &pctx);
 }
 
 void idt_init(void) {
@@ -223,6 +243,10 @@ void idt_init(void) {
     for (int i = 0; i < 256; i++) {
         idt_set_descriptor((uint8_t)i, g_isr_stub_table[i], 0x8E);
     }
+
+    /* Set DPL 3 (0xEE) for software yield and syscall interrupt gates */
+    idt_set_descriptor(48, g_isr_stub_table[48], 0xEE);
+    idt_set_descriptor(0x80, g_isr_stub_table[0x80], 0xEE);
 
     /* Load IDTR */
     g_idtr.limit = sizeof(g_idt) - 1;

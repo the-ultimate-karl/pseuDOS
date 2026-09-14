@@ -51,6 +51,9 @@ typedef struct {
 
     char hardware_devpath[384];
     char boot_file_path[128];
+    char autoinit_path[128];
+    char shell_path[128];
+    char cmdline[256];
 } BootInfo;
 
 #define BOOTINFO_MAGIC 0x50534555 /* "PSEU" */

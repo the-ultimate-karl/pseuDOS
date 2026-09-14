@@ -25,6 +25,9 @@
 #define ATA_CMD_IDENTIFY      0xEC
 #define ATA_CMD_READ_DMA_EX   0x25
 #define ATA_CMD_WRITE_DMA_EX  0x35
+#define ATA_CMD_FLUSH_CACHE      0xE7
+#define ATA_CMD_FLUSH_CACHE_EXT  0xEA
+#define ATA_CMD_STANDBY_IMMED    0xE0
 
 #define AHCI_MAX_PORTS 32
 
@@ -268,6 +271,105 @@ static int ahci_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t co
     return 0;
 }
 
+static int ahci_flush_cache_impl(StorageDevice *dev) {
+    if (!dev || !dev->driver_priv) return -1;
+    AhciPortDriver *driver = (AhciPortDriver *)dev->driver_priv;
+    HbaPort *port = driver->port;
+
+    /* Clear pending interrupt flags and errors */
+    port->is = (uint32_t)-1;
+    port->serr = (uint32_t)-1;
+
+    HbaCmdHeader *cmd_header = &driver->cmd_headers[0];
+    cmd_header->cfl = sizeof(uint32_t) * 5 / 4; /* 5 Dwords */
+    cmd_header->w = 0; /* Non-data command */
+    cmd_header->prdtl = 0; /* No data buffer */
+
+    HbaCmdTable *cmd_table = driver->cmd_tables;
+    memset(cmd_table, 0, sizeof(HbaCmdTable));
+
+    uint8_t *fis = cmd_table->cfis;
+    fis[0] = 0x27;       /* Host to Device Register FIS */
+    fis[1] = 1 << 7;     /* Command (C bit) */
+    fis[2] = ATA_CMD_FLUSH_CACHE_EXT;
+    fis[3] = 0;          /* Feature */
+    fis[7] = 1 << 6;     /* LBA mode */
+
+    /* Issue command to slot 0 */
+    port->ci = 1;
+
+    int timeout = 2000000;
+    while ((port->ci & 1) && --timeout > 0) {
+        if ((port->is & (1 << 30)) || (port->tfd & (1 << 0))) {
+            break;
+        }
+        __asm__ volatile ("pause");
+    }
+
+    /* Fallback to standard 28-bit FLUSH CACHE if EXT is not supported or errored */
+    if ((port->is & (1 << 30)) || (port->tfd & (1 << 0))) {
+        port->is = (uint32_t)-1;
+        port->serr = (uint32_t)-1;
+        memset(cmd_table, 0, sizeof(HbaCmdTable));
+
+        fis[0] = 0x27;
+        fis[1] = 1 << 7;
+        fis[2] = ATA_CMD_FLUSH_CACHE;
+        fis[7] = 1 << 6;
+
+        port->ci = 1;
+        timeout = 2000000;
+        while ((port->ci & 1) && --timeout > 0) {
+            if ((port->is & (1 << 30)) || (port->tfd & (1 << 0))) {
+                return -1;
+            }
+            __asm__ volatile ("pause");
+        }
+    }
+
+    if (timeout == 0 || (port->is & (1 << 30)) || (port->tfd & (1 << 0))) {
+        return -1;
+    }
+    return 0;
+}
+
+static void ahci_shutdown_impl(StorageDevice *dev) {
+    if (!dev || !dev->driver_priv) return;
+
+    /* 1. Flush volatile write caches to persistent media */
+    ahci_flush_cache_impl(dev);
+
+    /* 2. Issue ATA STANDBY IMMEDIATE (0xE0) to park heads / spin down */
+    AhciPortDriver *driver = (AhciPortDriver *)dev->driver_priv;
+    HbaPort *port = driver->port;
+
+    port->is = (uint32_t)-1;
+    port->serr = (uint32_t)-1;
+
+    HbaCmdHeader *cmd_header = &driver->cmd_headers[0];
+    cmd_header->cfl = sizeof(uint32_t) * 5 / 4;
+    cmd_header->w = 0;
+    cmd_header->prdtl = 0;
+
+    HbaCmdTable *cmd_table = driver->cmd_tables;
+    memset(cmd_table, 0, sizeof(HbaCmdTable));
+
+    uint8_t *fis = cmd_table->cfis;
+    fis[0] = 0x27;
+    fis[1] = 1 << 7;
+    fis[2] = ATA_CMD_STANDBY_IMMED;
+    fis[7] = 1 << 6;
+
+    port->ci = 1;
+    int timeout = 500000;
+    while ((port->ci & 1) && --timeout > 0) {
+        if ((port->is & (1 << 30)) || (port->tfd & (1 << 0))) {
+            break;
+        }
+        __asm__ volatile ("pause");
+    }
+}
+
 static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t slot, uint8_t func) {
     if (g_ahci_driver_count >= AHCI_MAX_PORTS) return;
 
@@ -389,6 +491,8 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     dev.driver_priv = driver;
     dev.read_sectors = ahci_read_sectors_impl;
     dev.write_sectors = ahci_write_sectors_impl;
+    dev.flush = ahci_flush_cache_impl;
+    dev.shutdown = ahci_shutdown_impl;
 
     storage_format_size(dev.total_sectors * 512, dev.size_str, sizeof(dev.size_str));
     snprintf(dev.devpath, sizeof(dev.devpath), "PciRoot(0x0)/Pci(0x%X,0x%X)/Sata(0x%X,0x0,0x0)", slot, func, port_num);

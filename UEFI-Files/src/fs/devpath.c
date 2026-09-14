@@ -4,7 +4,7 @@
 BootLocationInfo g_boot_location = {
     .base_hardware_path = "",
     .partition_boot_file = "\\protected\\krnl\\kernel.bin",
-    .mode = DEVPATH_MODE_FIRMWARE
+    .mode = DEVPATH_MODE_SOFTWARE
 };
 
 void fs_init_devpath(const BootInfo *boot_info) {

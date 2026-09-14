@@ -270,6 +270,22 @@ int strcasecmp(const char *s1, const char *s2) {
     return *(const unsigned char *)s1 - *(const unsigned char *)s2;
 }
 
+int strncasecmp(const char *s1, const char *s2, size_t n) {
+    if (!s1 || !s2 || n == 0) return 0;
+    while (n-- && *s1 && *s2) {
+        char c1 = *s1;
+        char c2 = *s2;
+        if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
+        if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+        if (c1 != c2) {
+            return (unsigned char)c1 - (unsigned char)c2;
+        }
+        s1++;
+        s2++;
+    }
+    return 0;
+}
+
 char *strcpy(char *dest, const char *src) {
     char *d = dest;
     if (!dest || !src) return dest;
