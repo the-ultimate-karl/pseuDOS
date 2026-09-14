@@ -1,13 +1,13 @@
-﻿# pseuDOS
+# pseuDOS
 
-**A 64-Bit Bare-Metal Operating System for Modern UEFI Hardware**
+**A 64-Bit Preemptive Multitasking Operating System for Modern UEFI Hardware**
 
 [![Architecture: x86_64](https://img.shields.io/badge/Architecture-x86__64-blue.svg)](#)
 [![Firmware: UEFI 64-bit](https://img.shields.io/badge/Firmware-UEFI%20Class%203-brightgreen.svg)](#)
-[![Version: v0.5.4-baremetal](https://img.shields.io/badge/Version-v0.5.4--baremetal-orange.svg)](#)
+[![Version: v0.6.0-scheduling](https://img.shields.io/badge/Version-v0.6.0--scheduling-orange.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](#)
 
-pseuDOS is a freestanding, 64-bit operating system engineered from scratch for modern x86_64 personal computers. It boots natively from UEFI firmware, transitions to long mode without legacy BIOS dependencies, and provides custom bare-metal drivers for NVMe PCIe SSDs, AHCI SATA drives, xHCI/EHCI USB storage, ACPI hardware power management, and dynamic FAT32 filesystem synchronization.
+pseuDOS is a freestanding, 64-bit operating system engineered from scratch for modern x86_64 personal computers. It boots natively from UEFI firmware, transitions to long mode without legacy BIOS dependencies, and provides preemptive round-robin multitasking, fast x86_64 syscalls, a modular userspace boot chain (`autoinit` -> `xshss`), custom bare-metal drivers for NVMe PCIe SSDs, AHCI SATA drives, xHCI/EHCI USB storage, ACPI hardware power management, and dynamic FAT32 filesystem synchronization.
 
 ---
 
@@ -23,30 +23,43 @@ pseuDOS started as a Python-simulated environment. It has been completely re-eng
 
 ## Key Features & Architecture
 
-### 1. UEFI Boot Manager (`BOOTX64.EFI` / `[bootmgfw]`)
-- **PE32+ Executable Engine**: Parses Windows-format PE32+ kernel binaries, maps sections into physical execution pages, cleanly zeroes uninitialized `.bss` memory, and applies dynamic `.reloc` base relocations (`DIR64` and `HIGHLOW`).
+### 1. Modular Boot Chain & PE32+ Relocatable Loader
+- **Boot Chain**: `BOOTX64.EFI` (UEFI boot manager) → `kernel.bin` (PID 0 kernel idle) → `autoinit.bin` (PID 1 supervisor) → `xshss.bin` (PID 2 experimental shell subsystem).
+- **Standalone PE32+ Loader**: Relocatable PE32+ executable engine (`pe_loader.c`) that dynamically allocates memory, maps `.text`, `.data`, and `.bss` sections, and applies `DIR64` base relocations.
 - **Dynamic VM vs. Bare-Metal GOP Resolution**:
   - Uses `cpuid` leaf `1` (ECX bit 31 hypervisor detection) to inspect the execution environment.
   - Automatically targets **1280x720 (720p)** in virtualized environments (QEMU, KVM, VMware, VirtualBox, Hyper-V).
   - Automatically targets **1920x1080 (1080p True Color)** on bare-metal hardware.
-- **Auto-Centered Diagnostic Recovery (`errtext`)**: In the event of missing or corrupted kernel payloads, presents an auto-centered, formatted recovery dialog detailing diagnostics and recovery instructions.
-- **Payload Preservation**: Retains the pristine, unrelocated raw kernel binary in memory so the self-installer (`flash`) can format and deploy to disks on the fly.
 - **Clean Firmware Handoff**: Discovers ACPI RSDP table pointers, captures physical RAM descriptors, and exits UEFI Boot Services seamlessly.
 
-### 2. Kernel Core & Hardware Drivers
-- **Fast Framebuffer Console**: Hardware double-buffered text renderer using an embedded 8x16 bitmap font. Framebuffer scrolling updates dirty rows in system RAM and uses 64-bit Write-Combining memory copy routines to prevent PCIe MMIO read stalls.
-- **Full 256-Vector IDT & Exception Normalizer**: Dedicated assembly interrupt service routines (`isr_stubs.s`) with uniform stack frame normalization, error code synthesis, and 8259 PIC spurious IRQ 7 / IRQ 15 suppression.
-- **Dual Keyboard Subsystem**: Hardware i8042 PS/2 controller driver configured via command byte `0x60` for IRQ 1 interrupts, backed by a non-racing hardware polling fallback and scratch-register-validated COM1 UART serial loopback.
-- **Physical Memory Management**: Dynamic 16 MB kernel heap allocator (`kmalloc`, `kcalloc`, `kfree`) with arithmetic overflow guards and pointer integrity checks.
+### 2. Preemptive Multitasking & Fast Syscall Interface
+- **Preemptive Round-Robin Scheduler**: Driven by 8254 Programmable Interval Timer (PIT) IRQ 0 at 100 Hz (10ms tick rate) with time-slice quantum slicing (`DEFAULT_TIME_SLICE = 5` ticks = 50ms).
+- **Process Management**: 64-slot process table (`process.c`) tracking process state, isolated 64KB execution stacks, CPU ticks, and privilege levels.
+- **Fast x86_64 Syscalls**: Implemented via `STAR`, `LSTAR`, and `SFMASK` Model-Specific Registers (MSRs) with assembly context save/restore stubs (`syscall_entry.s`).
+- **Policy-Based Privilege Separation**: Kernel-enforced privilege tokens (`PRIV_USER` and `PRIV_KERNEL`) with `sudo`, `kernel`/`su`, `drop`, and `exit` controls. Unprivileged processes are barred from modifying protected paths (`/protected/`), killing other processes, or flashing disks.
 
-### 3. Storage Drivers & Direct DMA
+### 3. Memory Architecture & Hardware Protection
+- **64-bit GDT & TSS**: Custom segment descriptors and Task State Segment with `rsp0` interrupt stack for ring transition safety (`gdt.c`).
+- **Physical Memory Manager (PMM)**: 4KB bitmap page allocator managing physical memory blocks discovered via the UEFI memory map (`pmm.c`).
+- **Virtual Memory Manager (VMM)**: 4-level paging (PML4, PDPT, PD, PT) with identity-mapped physical memory and kernel higher-half mappings (`vmm.c`).
+- **Kernel Panic Screen (BSOD)**: Blue screen exception handler detailing register state (`RIP`, `RSP`, `CR3`), CPU brand, uptime, and dashed address formatting (`0x0000-0000-0000-0000`).
+
+### 4. Storage Drivers & Direct DMA
 - **NVMe PCIe SSD Driver**: High-performance NVM Express driver supporting PCIe DMA with 4KB page-aligned PRPs. Features volatile cache flushing (`NVME_CMD_FLUSH 0x00`) and graceful ACPI shutdown notifications (`CC.SHN = 01b`, `CSTS.SHST == 10b`) to protect on-disk flash.
 - **AHCI SATA Controller Driver**: Full SATA 1.5/3.0/6.0 Gbps support utilizing 1024-byte command lists (CLB), 256-byte received FIS buffers (FB), 128-byte command tables (CTBA), and BIOS/OS handoff (`BOHC`).
 - **USB Mass Storage**: xHCI (USB 3.0/3.1) and EHCI (USB 2.0) device enumeration with strict interface class verification (`0x08`) protecting USB HID keyboards from accidental reset.
 
-### 4. Filesystem & Self-Installer (`flash`)
-- **Dynamic FAT32 Synchronization**: Physical write-through synchronization for file creation, writes, appends, and recursive deletion (`del -rf`).
+### 5. Filesystem, Self-Installer (`flash`) & GRUB 2 Integration
+- **Dynamic FAT32 Synchronization**: Physical write-through synchronization for file creation, writes, appends, and recursive deletion (`del -rf`), backed by multi-cluster recursive directory loading.
 - **Disk Self-Installer (`flash`)**: Automatically scans for attached internal SATA/NVMe or external USB storage, partitions the target with a Protective MBR and GUID Partition Table (GPT), formats the EFI System Partition (ESP) with dynamic FAT32 cluster geometry, installs `BOOTX64.EFI`, `kernel.bin`, and writes an automated `startup.nsh` boot hook.
+- **GRUB 2 Compatibility**: Out-of-the-box dual-boot support deploying `/EFI/pseuDOS/` payloads and a built-in `grub` helper command displaying chainloader configuration snippets.
+
+### 6. Shell Subsystem (`xshss`) & Coreutils
+- **Interactive History**: 16-entry ring buffer with Up/Down arrow recall in `readline()` and `history` command.
+- **I/O Redirection**: Standard output redirection (`>` overwrite and `>>` append) with multi-chunk buffer flushing.
+- **Wildcards (`*`)**: Single-star glob pattern expansion across directory nodes.
+- **Shell Environment**: Variable storage (`USER`, `HOSTNAME`, `PWD`, `HOME`, `SHELL`), dynamic `PWD` tracking, and `$VAR` parameter expansion.
+- **Linux-style Unprivileged Shutdown**: 1-minute default timer with cancellation (`shutdown -c`) or immediate poweroff (`shutdown now`).
 
 ---
 
@@ -187,27 +200,48 @@ Once you have installed pseuDOS to a virtual drive using `flash`, boot directly 
 | Command | Arguments | Description |
 | :--- | :--- | :--- |
 | `help` | — | Displays all available kernel shell commands. |
-| `ls` / `dir` | `[path]` | Lists files and directories in the current or specified path. |
-| `cd` | `<path>` | Changes the current working directory. |
+| `echo` | `<text>` | Prints text directly to console or redirected target. |
+| `date` / `time` | — | Displays the current hardware RTC date and time (`YYYY-MM-DD HH:MM:SS`). |
+| `uptime` | — | Displays system uptime and 100 Hz PIT timer tick count. |
+| `uname` | `[-a\|-r\|-m\|-s]` | Displays system identification, kernel release, and machine architecture. |
+| `env` | — | Lists all active shell environment variables (`NAME=VALUE`). |
+| `set` / `export` | `[name=value]` | Sets or inspects shell environment variables (supports `$VAR` expansion). |
+| `history` | — | Displays recent command history with numbered recall entries. |
+| `ls` / `dir` | `[-l] [-a] [path]` | Lists directory entries (supports `-l` detailed format and wildcards `*`). |
+| `cd` | `<path>` | Changes current working directory and updates `$PWD`. |
 | `pwd` | — | Prints the absolute working directory path. |
-| `cat` / `type` | `<file>` | Displays the contents of a text file. |
+| `cat` / `type` | `<file>` | Displays the contents of a text file (supports wildcard filenames). |
+| `more` / `less` | `<file>` | Paginated plaintext viewer (Space/Enter/Q controls). |
+| `data` | `<file>` | Displays creation/access/modification timestamps and metadata. |
 | `touch` | `<file>` | Creates a new, empty file on the active filesystem. |
-| `write` | `<file> <text>` | Writes or appends plaintext data to a file. |
+| `write` | `[-a] <file> <text>` | Writes or appends plaintext data to a file. |
+| `cp` | `<src> <dst>` | Copies files with directory resolution and write-through sync. |
+| `mv` | `<src> <dst>` | Moves or renames files with failure preservation guards. |
 | `mkdir` | `<path>` | Creates a new directory on the active filesystem. |
 | `del` / `rm` | `[-rf] <path>` | Removes files or directories (`-rf` enables recursive deletion). |
-| `fs` | `[drive_no]` | Displays active VFS statistics, boot hardware devpath, and partition health. |
-| `attached-drives`| `[--internal\|--external\|--all]` | Lists all detected storage drives, connection buses, and capacities. |
-| `switch-target` | `<--internal\|--external>` | Toggles default storage target views. |
-| `flash` | — | Interactive GPT & FAT32 partitioner and bare-metal OS self-installer. |
+| `ps` | — | Lists active processes, states, CPU ticks, and privilege levels. |
+| `kill` | `<pid>` | Terminates a process (requires `sudo` for non-owned processes). |
+| `proctest` | — | Tests preemptive multitasking with concurrent background tasks. |
+| `syscalltest` | — | Validates the fast x86_64 syscall interface from userspace. |
+| `kernel` / `su` | — | Escalates privilege level to `PRIV_KERNEL` (root mode). |
+| `exit` / `drop` | — | Drops elevated privileges back to `PRIV_USER` mode, or exits shell. |
+| `sudo` | `<command>` | Executes a single command with elevated `PRIV_KERNEL` privileges. |
+| `dmesg` | — | Dumps the in-memory kernel message buffer ring. |
+| `grub` | — | Displays GRUB 2 chainloader configuration snippets and setup steps. |
+| `flash` | — | Interactive GPT partitioner, FAT32 ESP formatter, and OS installer. |
+| `fs` | `[drive_no\|--drives]` | Displays active VFS statistics, storage devpath, and partition health. |
+| `attached-drives`| `[--all]` | Lists all detected storage drives, connection buses, and capacities. |
+| `switch-target` | `<--int\|--ext>` | Toggles default mass-storage target views. |
 | `screenres` | `[width height]` | Queries or dynamically switches GOP graphical display resolutions. |
 | `cpu` | — | Displays CPU vendor, brand string, topology, and architectural feature flags. |
 | `mem` | — | Displays physical RAM regions, memory types, and kernel heap consumption. |
 | `pci` | — | Scans and lists connected PCI and PCI Express bus devices and class codes. |
-| `devpath` | `[--show\|--toggle]` | Displays the active UEFI boot media device path string. |
-| `clear` / `cls` | — | Clears the graphical screen and resets console cursor position. |
-| `reboot` | — | Commits storage write caches and resets the CPU via ACPI or 8042 reset. |
-| `shutdown` | — | Issues NVMe flush and shutdown notifications, then powers off the PC via ACPI S5. |
-| `halt` | — | Disables CPU interrupts (`cli`) and suspends execution (`hlt`). |
+| `devpath` | `[--mode\|--info]` | Displays and toggles boot media device path string representation. |
+| `panic` | `[reason]` | Triggers a Blue Screen of Death (BSOD) kernel panic for diagnostic testing. |
+| `clear` / `cls` | — | Clears the screen and resets console cursor position. |
+| `reboot` | — | Commits storage write caches and resets the CPU. |
+| `shutdown` | `[now\|-c]` | Schedules shutdown in 1 minute, or 'now' to power off immediately via ACPI. |
+| `halt` | — | Suspends CPU execution via `hlt` (requires sudo). |
 
 ---
 
