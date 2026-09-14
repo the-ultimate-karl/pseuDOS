@@ -165,6 +165,9 @@ process_t *pe_spawn_process(const char *name, const char *path, process_privileg
         return NULL;
     }
 
+    proc->image_base = image_base;
+    proc->image_size = image_size;
+
     klog_info("PE spawn: launched PID %u '%s' from %s", proc->pid, proc->name, norm_path);
     return proc;
 }

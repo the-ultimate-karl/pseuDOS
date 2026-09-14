@@ -228,6 +228,26 @@ void isr_dispatch(uint64_t vector, uint64_t error_code, interrupt_frame_t *frame
     if (frame) {
         pctx.rip = frame->ip;
         pctx.rsp = frame->sp;
+        pctx.rflags = frame->flags;
+        pctx.cs = frame->cs;
+        pctx.ss = frame->ss;
+    }
+    if (regs) {
+        pctx.rax = regs->rax;
+        pctx.rbx = regs->rbx;
+        pctx.rcx = regs->rcx;
+        pctx.rdx = regs->rdx;
+        pctx.rsi = regs->rsi;
+        pctx.rdi = regs->rdi;
+        pctx.rbp = regs->rbp;
+        pctx.r8  = regs->r8;
+        pctx.r9  = regs->r9;
+        pctx.r10 = regs->r10;
+        pctx.r11 = regs->r11;
+        pctx.r12 = regs->r12;
+        pctx.r13 = regs->r13;
+        pctx.r14 = regs->r14;
+        pctx.r15 = regs->r15;
     }
     pctx.cr2 = cr2;
 

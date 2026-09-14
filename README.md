@@ -87,31 +87,34 @@ pseuDOS/
 │       ├── fs/                  # GPT partitioning, FAT32 sync, and VFS tree
 │       ├── kernel/              # Kernel entry, command shell, and payloads
 │       └── lib/                 # Memory heap, GUID matching, string routines
+├── check_env.ps1                # Automated host environment validator & installer (Windows)
+├── check_env.sh                 # Automated host environment validator & installer (Linux/macOS)
 ├── build.ps1                    # Native Windows 11 PowerShell build orchestrator
 ├── build.sh                     # Linux / macOS Bash build script
 ├── run_normal.ps1               # Standard QEMU virtual machine runner
 ├── run_debug.ps1                # QEMU runner with timestamped bootlogging
-├── run_realistic.ps1            # Strict bare-metal simulation (Q35, IOMMU, NUMA)
-├── AGENTS.md                    # Engineering protocols for autonomous maintainers
-└── BUGSPAWN.LOG                 # Comprehensive regression and bug tracking log
+└── run_realistic.ps1            # Strict bare-metal simulation (Q35, IOMMU, NUMA)
 ```
 
 ---
 
 ## Toolchain & Build Prerequisites
 
-### Windows (Recommended)
-1. **MinGW-w64 GCC**: `gcc` and `ld` on your system `PATH` (e.g., via WinLibs or MSYS2: `C:\mingw64\bin`).
-2. **Python 3.8+**: Used for building the bootable El Torito ISO and embedding PE payloads.
-3. **QEMU for Windows**: `qemu-system-x86_64` (installed at `C:\Program Files\qemu` or on `PATH`).
-4. **EDK2 / OVMF UEFI Firmware**: Standard OVMF code binary (`edk2-x86_64-code.fd` or `OVMF.fd`).
+To verify and automatically install all required compiler (`gcc`, `ld`), build (`make`), scripting (`python3`), and hypervisor (`qemu`, `ovmf`) tools on your machine:
 
-### Linux / WSL
-Install standard development packages:
-```bash
-sudo apt update
-sudo apt install build-essential gcc-mingw-w64-x86-64 qemu-system-x86 ovmf python3
+### Windows PowerShell:
+```powershell
+.\check_env.ps1
 ```
+
+### Linux / macOS:
+```bash
+./check_env.sh
+```
+
+### Manual Requirements
+- **Windows**: MinGW-w64 GCC (x86_64), GNU Make, Python 3.8+, QEMU for Windows, and EDK2/OVMF UEFI firmware (`edk2-x86_64-code.fd`).
+- **Linux / WSL**: `build-essential gcc-mingw-w64-x86-64 qemu-system-x86 ovmf python3`.
 
 ---
 
@@ -247,7 +250,7 @@ Once you have installed pseuDOS to a virtual drive using `flash`, boot directly 
 
 ## Testing & Quality Assurance
 
-All modifications are tested against real hardware and virtualization suites according to the guidelines in [AGENTS.md](AGENTS.md). All discovered bugs, regression causes, and hardware-specific edge cases are strictly documented in [BUGSPAWN.LOG](BUGSPAWN.LOG).
+All modifications are tested against real hardware and virtualization suites.
 
 ---
 

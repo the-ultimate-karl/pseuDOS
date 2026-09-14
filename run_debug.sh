@@ -101,22 +101,36 @@ while [ $# -gt 0 ]; do
             ATTACH_NVME=1
             ATTACH_USB3=1
             ;;
+        --iso|--cdrom)
+            NO_ISO=0
+            BOOT_FROM="iso"
+            ;;
         --no-iso|--no-cdrom|--disk-boot)
             NO_ISO=1
             ;;
         --boot-from)
-            NO_ISO=1
             shift
             if [ $# -gt 0 ]; then
                 BOOT_FROM="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+                if [ "$BOOT_FROM" != "iso" ] && [ "$BOOT_FROM" != "cdrom" ]; then
+                    NO_ISO=1
+                else
+                    NO_ISO=0
+                    BOOT_FROM="iso"
+                fi
             else
-                echo "[ERROR] --boot-from requires an argument: sata, nvme, or usb" >&2
+                echo "[ERROR] --boot-from requires an argument: sata, nvme, usb, or iso" >&2
                 exit 1
             fi
             ;;
         --boot-from=*)
-            NO_ISO=1
             BOOT_FROM="$(echo "${1#*=}" | tr '[:upper:]' '[:lower:]')"
+            if [ "$BOOT_FROM" != "iso" ] && [ "$BOOT_FROM" != "cdrom" ]; then
+                NO_ISO=1
+            else
+                NO_ISO=0
+                BOOT_FROM="iso"
+            fi
             ;;
         *)
             EXTRA_ARGS+=("$1")
@@ -130,15 +144,22 @@ if [ -n "$BOOT_FROM" ]; then
     case "$BOOT_FROM" in
         sata)
             ATTACH_SATA=1
+            NO_ISO=1
             ;;
         nvme)
             ATTACH_NVME=1
+            NO_ISO=1
             ;;
         usb)
             ATTACH_USB3=1
+            NO_ISO=1
+            ;;
+        iso|cdrom)
+            NO_ISO=0
+            BOOT_FROM="iso"
             ;;
         *)
-            echo "[ERROR] Invalid option for --boot-from: '$BOOT_FROM'. Supported options: sata, nvme, usb" >&2
+            echo "[ERROR] Invalid option for --boot-from: '$BOOT_FROM'. Supported options: sata, nvme, usb, iso" >&2
             exit 1
             ;;
     esac

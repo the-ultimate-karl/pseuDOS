@@ -45,6 +45,9 @@ typedef struct process {
     void *user_stack_base;
     uint64_t user_stack;      /* Top of user stack */
 
+    void *image_base;
+    size_t image_size;
+
     void (*entry)(void);
     int exit_code;
     uint64_t time_slice;
@@ -61,5 +64,6 @@ process_t *process_get_by_pid(uint32_t pid);
 int process_kill(uint32_t pid);
 void process_exit(int exit_code);
 void process_dump_list(void);
+void process_free_resources(process_t *proc);
 
 #endif /* PROCESS_H */

@@ -9,6 +9,7 @@ param(
     [Alias("scsi")][switch]$Usb,
     [switch]$Usb2,
     [switch]$All,
+    [Alias("cdrom")][switch]$Iso,
     [Alias("no-iso", "no-cdrom", "disk-boot")][switch]$NoIso,
     [Alias("boot-from", "boot")][string]$BootFrom,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$ExtraArgs
@@ -65,6 +66,9 @@ $AttachNvme = [bool]$Nvme
 $AttachUsb3 = [bool]$Usb
 $AttachUsb2 = [bool]$Usb2
 $IsNoIso = [bool]$NoIso
+if ($Iso) {
+    $IsNoIso = $false
+}
 if ($All) {
     $AttachSata = $true
     $AttachNvme = $true
@@ -109,20 +113,34 @@ while ($i -lt $rawArgs.Count) {
             $AttachNvme = $true
             $AttachUsb3 = $true
         }
+        "^--?(iso|cdrom)$" {
+            $IsNoIso = $false
+            $ResolvedBootFrom = "iso"
+        }
         "^--?(no-iso|no-cdrom|disk-boot)$" {
             $IsNoIso = $true
         }
         "^--?boot-from=(.+)$" {
-            $IsNoIso = $true
             $ResolvedBootFrom = $Matches[1].ToLower()
+            if ($ResolvedBootFrom -ne "iso" -and $ResolvedBootFrom -ne "cdrom") {
+                $IsNoIso = $true
+            } else {
+                $IsNoIso = $false
+                $ResolvedBootFrom = "iso"
+            }
         }
         "^--?boot-from$" {
-            $IsNoIso = $true
             if ($i + 1 -lt $rawArgs.Count) {
                 $i++
                 $ResolvedBootFrom = $rawArgs[$i].ToLower()
+                if ($ResolvedBootFrom -ne "iso" -and $ResolvedBootFrom -ne "cdrom") {
+                    $IsNoIso = $true
+                } else {
+                    $IsNoIso = $false
+                    $ResolvedBootFrom = "iso"
+                }
             } else {
-                Write-Error "[ERROR] --boot-from requires an argument: sata, nvme, or usb"
+                Write-Error "[ERROR] --boot-from requires an argument: sata, nvme, usb, or iso"
                 exit 1
             }
         }
@@ -135,13 +153,14 @@ while ($i -lt $rawArgs.Count) {
 
 # Validate boot-from if specified
 if ($ResolvedBootFrom) {
-    $IsNoIso = $true
     switch ($ResolvedBootFrom) {
-        "sata" { $AttachSata = $true }
-        "nvme" { $AttachNvme = $true }
-        "usb"  { $AttachUsb3 = $true }
+        "sata"  { $AttachSata = $true; $IsNoIso = $true }
+        "nvme"  { $AttachNvme = $true; $IsNoIso = $true }
+        "usb"   { $AttachUsb3 = $true; $IsNoIso = $true }
+        "iso"   { $IsNoIso = $false }
+        "cdrom" { $IsNoIso = $false; $ResolvedBootFrom = "iso" }
         default {
-            Write-Error "[ERROR] Invalid option for --boot-from: '$ResolvedBootFrom'. Supported options: sata, nvme, usb"
+            Write-Error "[ERROR] Invalid option for --boot-from: '$ResolvedBootFrom'. Supported options: sata, nvme, usb, iso"
             exit 1
         }
     }

@@ -86,7 +86,11 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             uint32_t target_pid = (uint32_t)a1;
             process_t *target = process_get_by_pid(target_pid);
             if (!target) return -ESRCH;
-            if (target->state == PROCESS_STATE_KILLED || target->state == PROCESS_STATE_UNUSED) {
+            if (target->state == PROCESS_STATE_KILLED) {
+                process_free_resources(target);
+                return (int64_t)target_pid;
+            }
+            if (target->state == PROCESS_STATE_UNUSED) {
                 return (int64_t)target_pid;
             }
             return 0;

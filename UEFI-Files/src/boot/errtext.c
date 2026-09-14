@@ -2,9 +2,35 @@
 #include "io.h"
 #include "lib.h"
 
+static int g_err_uart_checked = 0;
+static int g_err_uart_present = 0;
+
+static int is_err_uart_present(void) {
+    if (!g_err_uart_checked) {
+        const char *sig = "hi lol";
+        int ok = 1;
+        for (int i = 0; sig[i] != '\0'; i++) {
+            outb(0x3F8 + 7, (uint8_t)sig[i]);
+            if (inb(0x3F8 + 7) != (uint8_t)sig[i]) {
+                ok = 0;
+                break;
+            }
+        }
+        if (ok) {
+            g_err_uart_present = 1;
+        }
+        g_err_uart_checked = 1;
+    }
+    return g_err_uart_present;
+}
+
 static void uart_putc(char c) {
-    while ((inb(0x3F8 + 5) & 0x20) == 0);
-    outb(0x3F8, (uint8_t)c);
+    if (!is_err_uart_present()) return;
+    int timeout = 50000;
+    while ((inb(0x3F8 + 5) & 0x20) == 0 && --timeout > 0);
+    if (timeout > 0) {
+        outb(0x3F8, (uint8_t)c);
+    }
 }
 
 static void uart_puts(const char *str) {

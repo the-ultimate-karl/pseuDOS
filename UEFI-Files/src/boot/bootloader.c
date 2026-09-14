@@ -46,19 +46,48 @@ static int is_running_in_vm(void) {
     return 0;
 }
 
+static int g_boot_uart_checked = 0;
+static int g_boot_uart_present = 0;
+
+static int is_uart_present(void) {
+    if (!g_boot_uart_checked) {
+        /* Test scratch register with "hi lol" to detect UART presence */
+        const char *sig = "hi lol";
+        int ok = 1;
+        for (int i = 0; sig[i] != '\0'; i++) {
+            outb(0x3F8 + 7, (uint8_t)sig[i]);
+            if (inb(0x3F8 + 7) != (uint8_t)sig[i]) {
+                ok = 0;
+                break;
+            }
+        }
+        if (ok) {
+            g_boot_uart_present = 1;
+            /* Initialize UART 115200 8N1 */
+            outb(0x3F8 + 1, 0x00);
+            outb(0x3F8 + 3, 0x80);
+            outb(0x3F8 + 0, 0x01);
+            outb(0x3F8 + 1, 0x00);
+            outb(0x3F8 + 3, 0x03);
+            outb(0x3F8 + 2, 0xC7);
+            outb(0x3F8 + 4, 0x0B);
+        }
+        g_boot_uart_checked = 1;
+    }
+    return g_boot_uart_present;
+}
+
 static void uart_init(void) {
-    outb(0x3F8 + 1, 0x00);
-    outb(0x3F8 + 3, 0x80);
-    outb(0x3F8 + 0, 0x01);
-    outb(0x3F8 + 1, 0x00);
-    outb(0x3F8 + 3, 0x03);
-    outb(0x3F8 + 2, 0xC7);
-    outb(0x3F8 + 4, 0x0B);
+    (void)is_uart_present();
 }
 
 static void uart_putc(char c) {
-    while ((inb(0x3F8 + 5) & 0x20) == 0);
-    outb(0x3F8, (uint8_t)c);
+    if (!is_uart_present()) return;
+    int timeout = 50000;
+    while ((inb(0x3F8 + 5) & 0x20) == 0 && --timeout > 0);
+    if (timeout > 0) {
+        outb(0x3F8, (uint8_t)c);
+    }
 }
 
 static void uart_puts(const char *str) {

@@ -71,17 +71,55 @@ void process_init(void) {
     klog_info("Process manager initialized. PID 0 (kernel) created.");
 }
 
+void process_free_resources(process_t *p) {
+    if (!p) return;
+    if (p->pid == 0 || p->pid == 1) return;
+
+    if (p->kernel_stack_base) {
+        kfree(p->kernel_stack_base);
+        p->kernel_stack_base = NULL;
+        p->kernel_stack = 0;
+    }
+    if (p->user_stack_base) {
+        kfree(p->user_stack_base);
+        p->user_stack_base = NULL;
+        p->user_stack = 0;
+    }
+    if (p->image_base) {
+        kfree(p->image_base);
+        p->image_base = NULL;
+        p->image_size = 0;
+    }
+
+    p->state = PROCESS_STATE_UNUSED;
+}
+
 process_t *process_create(const char *name, void (*entry)(void), process_privilege_t priv) {
     if (!entry) return NULL;
 
-    /* Find free slot */
+    /* 1. Prefer truly unused slots */
     int slot = -1;
     for (int i = 1; i < MAX_PROCESSES; i++) {
-        if (g_process_table[i].state == PROCESS_STATE_UNUSED || g_process_table[i].state == PROCESS_STATE_KILLED) {
+        if (g_process_table[i].state == PROCESS_STATE_UNUSED) {
             slot = i;
             break;
         }
     }
+
+    /* 2. If table is full, reclaim oldest un-reaped KILLED zombie (except PID 0 and 1) */
+    if (slot < 0) {
+        for (int i = 1; i < MAX_PROCESSES; i++) {
+            if (g_process_table[i].state == PROCESS_STATE_KILLED &&
+                g_process_table[i].pid != 0 && g_process_table[i].pid != 1) {
+                klog_info("Process table full: reclaiming zombie PID %u '%s' in slot %d",
+                          g_process_table[i].pid, g_process_table[i].name, i);
+                process_free_resources(&g_process_table[i]);
+                slot = i;
+                break;
+            }
+        }
+    }
+
     if (slot < 0) {
         klog_warn("Process table full! Cannot create process '%s'", name ? name : "unnamed");
         return NULL;
@@ -89,15 +127,8 @@ process_t *process_create(const char *name, void (*entry)(void), process_privile
 
     process_t *p = &g_process_table[slot];
 
-    /* Clean up previous stack memory if reused killed slot */
-    if (p->kernel_stack_base) {
-        kfree(p->kernel_stack_base);
-        p->kernel_stack_base = NULL;
-    }
-    if (p->user_stack_base) {
-        kfree(p->user_stack_base);
-        p->user_stack_base = NULL;
-    }
+    /* Clean up any existing resources if slot was previously used */
+    process_free_resources(p);
 
     memset(p, 0, sizeof(process_t));
 

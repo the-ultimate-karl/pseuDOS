@@ -1,4 +1,4 @@
-﻿# pseuDOS
+# pseuDOS
 
 **A 64-Bit Bare-Metal Operating System for Modern UEFI Hardware**
 
@@ -78,9 +78,7 @@ pseuDOS/
 ├── build.sh                     # Linux / macOS Bash build script
 ├── run_normal.ps1               # Standard QEMU virtual machine runner
 ├── run_debug.ps1                # QEMU runner with timestamped bootlogging
-├── run_realistic.ps1            # Strict bare-metal simulation (Q35, IOMMU, NUMA)
-├── AGENTS.md                    # Engineering protocols for autonomous maintainers
-└── BUGSPAWN.LOG                 # Comprehensive regression and bug tracking log
+└── run_realistic.ps1            # Strict bare-metal simulation (Q35, IOMMU, NUMA)
 ```
 
 ---
@@ -213,7 +211,7 @@ Once you have installed pseuDOS to a virtual drive using `flash`, boot directly 
 
 ## Testing & Quality Assurance
 
-All modifications are tested against real hardware and virtualization suites according to the guidelines in [AGENTS.md](AGENTS.md). All discovered bugs, regression causes, and hardware-specific edge cases are strictly documented in [BUGSPAWN.LOG](BUGSPAWN.LOG).
+All modifications are tested against real hardware and virtualization suites.
 
 ---
 

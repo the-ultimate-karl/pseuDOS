@@ -28,16 +28,14 @@ int uart_is_present(void) {
 }
 
 static void uart_init(void) {
-    /* Test scratch register to detect UART presence */
-    outb(0x3F8 + 7, 0x55);
-    if (inb(0x3F8 + 7) != 0x55) {
-        g_uart_present = 0;
-        return;
-    }
-    outb(0x3F8 + 7, 0xAA);
-    if (inb(0x3F8 + 7) != 0xAA) {
-        g_uart_present = 0;
-        return;
+    /* Test scratch register with "hi lol" to detect UART presence */
+    const char *sig = "hi lol";
+    for (int i = 0; sig[i] != '\0'; i++) {
+        outb(0x3F8 + 7, (uint8_t)sig[i]);
+        if (inb(0x3F8 + 7) != (uint8_t)sig[i]) {
+            g_uart_present = 0;
+            return;
+        }
     }
 
     g_uart_present = 1;

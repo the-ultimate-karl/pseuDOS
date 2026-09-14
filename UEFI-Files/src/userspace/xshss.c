@@ -307,32 +307,35 @@ static void readline(char *buf, size_t max_len, const char *prompt) {
 }
 
 static void resolve_path(const char *arg, char *out_buf, size_t max_len) {
-    if (!arg || arg[0] == '\0') {
+    if (!out_buf || max_len == 0) return;
+    if (!arg || arg[0] == '\0' || strcmp(arg, ".") == 0) {
         syscall(SYS_GETCWD, (uint64_t)(uintptr_t)out_buf, max_len, 0, 0, 0);
         return;
     }
-    if (arg[0] == '/' || arg[0] == '\\') {
-        size_t j = 0;
-        for (size_t i = 0; arg[i] && j < max_len - 1; i++) {
-            out_buf[j++] = (arg[i] == '\\') ? '/' : arg[i];
-        }
-        out_buf[j] = '\0';
-        return;
-    }
-    char cwd[256];
-    syscall(SYS_GETCWD, (uint64_t)(uintptr_t)cwd, sizeof(cwd), 0, 0, 0);
-    size_t cwd_len = strlen(cwd);
+    char res[256];
     size_t j = 0;
-    for (size_t i = 0; i < cwd_len && j < max_len - 1; i++) {
-        out_buf[j++] = cwd[i];
+    if (arg[0] == '/' || arg[0] == '\\') {
+        for (size_t i = 0; arg[i] && j < sizeof(res) - 1; i++) {
+            res[j++] = (arg[i] == '\\') ? '/' : arg[i];
+        }
+        res[j] = '\0';
+    } else {
+        char cwd[256];
+        syscall(SYS_GETCWD, (uint64_t)(uintptr_t)cwd, sizeof(cwd), 0, 0, 0);
+        size_t cwd_len = strlen(cwd);
+        for (size_t i = 0; i < cwd_len && j < sizeof(res) - 1; i++) {
+            res[j++] = cwd[i];
+        }
+        if (j > 0 && res[j - 1] != '/' && j < sizeof(res) - 1) {
+            res[j++] = '/';
+        }
+        for (size_t i = 0; arg[i] && j < sizeof(res) - 1; i++) {
+            res[j++] = (arg[i] == '\\') ? '/' : arg[i];
+        }
+        res[j] = '\0';
     }
-    if (j > 0 && out_buf[j - 1] != '/' && j < max_len - 1) {
-        out_buf[j++] = '/';
-    }
-    for (size_t i = 0; arg[i] && j < max_len - 1; i++) {
-        out_buf[j++] = (arg[i] == '\\') ? '/' : arg[i];
-    }
-    out_buf[j] = '\0';
+    strncpy(out_buf, res, max_len - 1);
+    out_buf[max_len - 1] = '\0';
 }
 
 /* Environment Variables */
@@ -710,7 +713,8 @@ static void cmd_cd(const char *arg) {
 
 static void cmd_ls(const char *arg) {
     int long_mode = 0;
-    const char *target_path = NULL;
+    char target_path[256];
+    target_path[0] = '\0';
 
     if (arg && arg[0] != '\0') {
         char temp[256];
@@ -731,12 +735,13 @@ static void cmd_ls(const char *arg) {
             p = trim(next + 1);
         }
         if (p && p[0] != '\0') {
-            target_path = p;
+            strncpy(target_path, p, sizeof(target_path) - 1);
+            target_path[sizeof(target_path) - 1] = '\0';
         }
     }
 
     if (!long_mode) {
-        if (target_path) {
+        if (target_path[0] != '\0') {
             char path[256];
             resolve_path(target_path, path, sizeof(path));
             syscall(SYS_READDIR, (uint64_t)(uintptr_t)path, 0, 0, 0, 0);
@@ -748,14 +753,14 @@ static void cmd_ls(const char *arg) {
 
     /* Long listing mode (-l) */
     char path[256];
-    resolve_path(target_path ? target_path : ".", path, sizeof(path));
+    resolve_path(target_path[0] != '\0' ? target_path : NULL, path, sizeof(path));
 
     char names[2048];
     int64_t nbytes = syscall(SYS_LISTDIR, (uint64_t)(uintptr_t)path,
                              (uint64_t)(uintptr_t)names, sizeof(names), 0, 0);
     if (nbytes < 0) {
         puts("ls: cannot access '");
-        puts(target_path ? target_path : path);
+        puts(target_path[0] != '\0' ? target_path : path);
         puts("': no such file or directory\n");
         return;
     }
@@ -787,7 +792,7 @@ static void cmd_ls(const char *arg) {
 
         vfs_stat_t st;
         if (syscall(SYS_STAT, (uint64_t)(uintptr_t)child_path, (uint64_t)(uintptr_t)&st, 0, 0, 0) == 0) {
-            if (st.type == 2) {
+            if (st.type == VFS_TYPE_DIR) {
                 puts("  drwx");
             } else {
                 puts("  -rw-");
@@ -919,7 +924,7 @@ static void cmd_data(const char *arg) {
     puts(path);
     puts("\n");
     puts("    node type:          ");
-    puts((st.type == 2) ? "directory\n" : "regular file\n");
+    puts((st.type == VFS_TYPE_DIR) ? "directory\n" : "regular file\n");
     puts("    file size:          ");
     print_num(st.size);
     puts(" bytes\n");
@@ -1001,7 +1006,7 @@ static int do_cp(const char *src, const char *dst, int verbose) {
     /* If destination is a directory, append src basename */
     vfs_stat_t st_dst;
     if (syscall(SYS_STAT, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)&st_dst, 0, 0, 0) == 0) {
-        if (st_dst.type == 2) { /* Directory */
+        if (st_dst.type == VFS_TYPE_DIR) { /* Directory */
             size_t len = strlen(dst_path);
             if (len > 0 && dst_path[len - 1] != '/' && len + 1 < sizeof(dst_path)) {
                 dst_path[len] = '/';

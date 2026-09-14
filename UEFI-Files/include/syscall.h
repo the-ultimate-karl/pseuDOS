@@ -52,6 +52,10 @@
 #define SYS_LISTDIR          48
 #define SYS_PANIC            99
 
+/* VFS Node Types for SYS_STAT */
+#define VFS_TYPE_FILE        0
+#define VFS_TYPE_DIR         1
+
 /* VFS Stat Structure for SYS_STAT */
 typedef struct {
     uint32_t size;

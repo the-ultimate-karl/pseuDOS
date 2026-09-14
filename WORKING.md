@@ -659,3 +659,111 @@ All 9 Phase H features have been implemented and verified end-to-end:
   - `test_init_panic.py`: Passed 100% (kill 1 protection and fatal exception BSOD).
   - `test_shutdown_and_dashed_addr.py`: Passed 100% (dashed addresses, scheduled shutdown, shutdown cancel, immediate shutdown).
 
+---
+
+## Post-Phase H Bug Fix: `ls <dir>` Stack Corruption & Directory Permissions (2026-09-15 06:20)
+
+### Issue
+Running `cd protected` followed by `ls bootmgr` resulted in `ls: cannot access '/protected//protected/...//p': no such file or directory`. In addition, directory entries in `ls -l` and `cmd_data` were displayed as regular files (`-rw-`) rather than directories (`drwx`).
+
+### Root Cause
+1. In `cmd_ls()` (`UEFI-Files/src/userspace/xshss.c`), `char temp[256]` was declared inside an inner `if (arg && arg[0] != '\0')` block. `target_path = p;` saved a pointer to this inner stack buffer. Once the `if` block exited, `temp` went out of scope and its stack space was reused by `char path[256]`.
+2. When `resolve_path(target_path, path, sizeof(path))` copied the current working directory (`/protected/`) into `path`, `target_path` pointed into the exact destination buffer, creating a self-referential loop that repeatedly concatenated `/protected/` until buffer truncation.
+3. In `cmd_ls`, `cmd_data`, and `do_cp`, node types were compared against `st.type == 2` (POSIX `S_IFDIR`), but pseuDOS `vfs_node_type_t` defines `VFS_NODE_DIRECTORY = 1` and `VFS_NODE_FILE = 0`.
+
+### Resolution
+1. Defined `VFS_TYPE_FILE` (0) and `VFS_TYPE_DIR` (1) in `UEFI-Files/include/syscall.h`.
+2. Allocated a dedicated `target_path[256]` in `cmd_ls()` so path arguments persist across the entire command lifetime.
+3. Added intermediate buffer in `resolve_path()` to guard against buffer aliasing and handled `"."` by returning CWD directly.
+4. Updated `cmd_ls`, `cmd_data`, and `do_cp` to use `VFS_TYPE_DIR`.
+5. Verified with `test_repro_ls.py` and `test_phase_h.py` (100% passed in QEMU).
+
+---
+
+## Toolchain & Environment Automation (2026-09-15 08:58)
+- Added `check_env.ps1` and `check_env.sh` (along with `setup_env.ps1` and `setup_env.sh` forwarders).
+- Validates host toolchain requirements: C compiler (`gcc`/`x86_64-w64-mingw32-gcc`), linker (`ld`/`x86_64-w64-mingw32-ld`), build utility (`make`), Python 3, QEMU emulator (`qemu-system-x86_64`), and EDK2/OVMF UEFI firmware.
+- If dependencies are missing, automatically detects host package manager (`winget`, `choco`, `apt-get`, `dnf`, `pacman`, `apk`, `zypper`, `brew`) and installs missing packages.
+- Verified execution on Windows PowerShell and Git Bash.
+
+---
+
+## Boot from ISO Support in Runner Scripts (2026-09-15 14:15)
+- Added `-Iso` switch (`-cdrom`) and `--boot-from iso` / `--boot-from cdrom` options across all 6 runner scripts:
+  - `run_normal.ps1`, `run_normal.sh`
+  - `run_debug.ps1`, `run_debug.sh`
+  - `run_realistic.ps1`, `run_realistic.sh`
+- Allows forcing live CD-ROM boot even when persistent disk images (SATA, NVMe, USB) are attached. Attached disks remain accessible for installation (`sudo flash`) or inspection without stealing `bootindex=1`.
+
+---
+
+## Codebase Audit & Architectural Debugging (2026-09-15 14:20)
+Comprehensive audit performed per user request without modifying source code:
+1. **Bootloader & Early UART Hang**: Unbounded `while ((inb(0x3F8 + 5) & 0x20) == 0);` in `bootloader.c` and `errtext.c` locks hardware without COM1 before kernel initializes.
+2. **Process Manager & Memory Leaks**:
+   - `pe_loader.c`: `image_buffer` allocated via `kmalloc` is never stored or freed on process death.
+   - `process.c`: `kernel_stack_base` (64KB) is never freed when a process exits or is killed.
+   - `syscall.c` (`SYS_WAITPID`): Does not transition reaped processes from `PROCESS_STATE_KILLED` to `PROCESS_STATE_UNUSED`, exhausting the 64-process table after 64 process spawns.
+3. **Virtual Memory & Address Space Sharing**:
+   - `vmm.c`: `new_pml4[0] = g_kernel_pml4[0]` shallow-copies the first 512GB PDPT, causing userspace page mappings to alter the kernel's page table.
+   - `process.c`: `process_create()` assigns `p->cr3 = vmm_get_kernel_pml4()`, meaning all processes currently execute with the shared kernel PML4 rather than isolated address spaces.
+4. **Scheduler Quantum & Yield Behavior**:
+   - `scheduler_schedule()`: Voluntarily yielded tasks (`scheduler_yield` / `int $48`) do not get their `time_slice` reset to `DEFAULT_TIME_SLICE`, causing them to run for partial ticks upon next dispatch.
+5. **Storage & Boot Latency**:
+   - `storage.c`: `ahci_init()`, `nvme_init()`, and `usb_storage_init()` each execute redundant full 65,536-function PCI bus sweeps (196,608 total I/O cycles), adding ~1-2 seconds to boot time.
+   - `fat32_sync.c`: `get_fat_entry()` performs an uncached single-sector disk read for every cluster traversed.
+## Phase 1 Fix: Process Lifecycle & Memory Leak Elimination (2026-09-15 14:26)
+- **Issue**:
+  1. `SYS_WAITPID` never marked reaped processes as `PROCESS_STATE_UNUSED`, causing dead processes to occupy slots indefinitely. After 64 processes were launched and terminated, the process table starved out and no further processes could be spawned.
+  2. Each process launch permanently leaked its 64 KB `kernel_stack_base` and its PE executable buffer (`image_buffer`) from the 16 MB kernel heap upon termination.
+- **Resolution**:
+  1. Extended `process_t` in `include/process.h` with `void *image_base` and `size_t image_size`.
+  2. Stored `image_base` and `image_size` upon process launch in `src/kernel/pe_loader.c`.
+  3. Implemented `process_free_resources(process_t *p)` in `src/kernel/process.c`, safely freeing `kernel_stack_base` and `image_base` via `kfree` and setting `state = PROCESS_STATE_UNUSED` while strictly protecting PID 0 (`kernel`) and PID 1 (`autoinit`).
+  4. Updated `SYS_WAITPID` in `src/kernel/syscall.c` to invoke `process_free_resources` when reaping `PROCESS_STATE_KILLED` processes.
+  5. Updated `process_create()` in `src/kernel/process.c` to prioritize `PROCESS_STATE_UNUSED` slots and safely reclaim un-reaped `PROCESS_STATE_KILLED` zombies if the table ever fills up.
+- **Verification**:
+  - `test_proc_lifecycle.py`: Passed 100% (verified process creation, `proctest` background worker execution, multiple consecutive shell exits and `autoinit` waitpid reaping/respawn cycles, and clean ACPI shutdown).
+  - `test_cleanups.py`: Passed 100% (file operations, write overwrite/append, mv safety, clear, shutdown).
+  - `test_phase_h.py`: Passed 100% (echo, date, uptime, uname, env & $VAR, I/O redirection, ls -l, wildcards, history, arrow recall).
+  - `test_fs_and_ls.py`: Passed 100% (classic ls, fs, cpu, mem, pci, devpath, screenres).
+  - `test_repro_ls.py`: Passed 100% (`cd protected` -> `ls bootmgr` directory navigation).
+
+---
+
+## Phase 2 Fix: COM1 UART Infinite Busy Loop in Bootloader (2026-09-15 15:00)
+- **Issue**:
+  - In `UEFI-Files/src/boot/bootloader.c` and `UEFI-Files/src/boot/errtext.c`, `uart_putc` executed an unbounded `while ((inb(0x3F8 + 5) & 0x20) == 0);`.
+  - On bare-metal PCs or UEFI systems without COM1 enabled, port 0x3F8 + 5 reads floating 0x00, causing the bootloader to lock up permanently in an infinite busy loop on the very first boot message before kernel loading.
+- **Resolution**:
+  - Implemented scratch register loopback tests (`outb(0x3F8 + 7, sig[i])`) across `bootloader.c`, `errtext.c`, and `console.c` verifying the `"hi lol"` string sequence character-by-character to detect UART presence reliably before transmitting.
+  - Initialized UART baud rate and framing only when hardware is verified present.
+  - Bounded TX ready wait polling in `uart_putc` with a 50,000-cycle timeout, preventing any hang even if a disconnected or faulty serial port is present.
+- **Verification**:
+  - Full system build succeeded (`build.ps1` -> `BOOTX64.EFI`, `kernel.bin`, `pseuDOS.iso`).
+  - Tested in QEMU via `test_proc_lifecycle.py`: bootloader booted smoothly, GOP initialized, handoff completed, shell reached, commands executed, and clean shutdown passed 100%.
+
+---
+
+## Interactive Panic Recovery Menu & Register Dump (2026-09-17 17:25)
+- **Feature**:
+  - Added an interactive recovery menu to the kernel panic BSOD screen.
+  - Users can press `(r)` to restart, `(d)` to dump 64-bit CPU register states, or `(s)` to trigger a clean ACPI shutdown.
+- **Implementation**:
+  - `include/panic.h`: Extended `panic_context_t` with complete GPRs (`rax`..`rdx`, `rsi`, `rdi`, `rbp`, `r8`..`r15`), `rflags`, `cs`, and `ss`.
+  - `src/drivers/idt.c`: IDT exception handler populates all GPRs and frame registers into `panic_context_t` before invoking `kernel_panic`.
+  - `src/kernel/panic.c`:
+    - `dump_registers()`: Formats and displays 64-bit dashed registers (`RAX`..`R15`, `RIP`, `RFLAGS`, `CS`, `SS`, `CR0`, `CR2`, `CR3`, `CR4`).
+    - Direct hardware keyboard polling via `keyboard_getchar()`: When interrupts are disabled by `cli`, `keyboard_getchar()` automatically bypasses the IRQ queue and directly polls PS/2 ports `0x60`/`0x64` and COM1 UART `0x3F8`.
+    - Key dispatch loop:
+      - `(r)` / `(R)`: Restarts machine via `acpi_reboot()`.
+      - `(d)` / `(D)`: Displays full register dump and reprompts.
+      - `(s)` / `(S)`: Powers off machine via `acpi_shutdown()`.
+- **Verification**:
+  - `test_panic_recovery.py`: Triggered panic from shell (`panic interactive recovery test`), verified BSOD rendering, pressed `d` to dump all registers (`cr0`, `cr3`, `rax`, `rip`), then pressed `s` to verify clean ACPI shutdown and QEMU process exit.
+  - `test_panic_reboot.py`: Triggered panic from shell, pressed `r` to verify ACPI reboot back into firmware/bootloader (`bootmgfw`).
+  - `test_cleanups.py`: Regression test suite passed 100%.
+
+
+
+
