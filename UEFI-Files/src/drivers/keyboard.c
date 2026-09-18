@@ -42,11 +42,11 @@ static const char g_scancode_table_shifted[128] = {
 void keyboard_isr_handler(void) {
     uint8_t status = inb(PS2_STATUS_PORT);
     if (status & 0x01) {
-        uint8_t scancode = inb(PS2_DATA_PORT);
-        /* If bit 5 (AUX) is set, this byte is from the PS/2 mouse; discard it */
         if (status & 0x20) {
+            mice_handle_irq();
             return;
         }
+        uint8_t scancode = inb(PS2_DATA_PORT);
         uint8_t next_head = (g_queue_head + 1) & 0xFF;
         if (next_head != g_queue_tail) {
             g_key_queue[g_queue_head] = scancode;
@@ -193,7 +193,10 @@ int keyboard_has_char(void) {
     if (g_char_buf_pos < g_char_buf_len) return 1;
     if (uart_is_present() && (inb(SERIAL_LSR) & 0x01)) return 1;
     if (g_queue_head != g_queue_tail) return 1;
-    if (!(get_rflags() & 0x200) && (inb(PS2_STATUS_PORT) & 0x01)) return 1;
+    if (!(get_rflags() & 0x200)) {
+        uint8_t status = inb(PS2_STATUS_PORT);
+        if ((status & 0x01) && !(status & 0x20)) return 1;
+    }
     return 0;
 }
 
@@ -225,8 +228,10 @@ char keyboard_getchar(void) {
         if (!(get_rflags() & 0x200)) {
             uint8_t status = inb(PS2_STATUS_PORT);
             if (status & 0x01) {
-                uint8_t scancode = inb(PS2_DATA_PORT);
-                if (!(status & 0x20)) { /* Not mouse packet */
+                if (status & 0x20) {
+                    mice_handle_irq();
+                } else {
+                    uint8_t scancode = inb(PS2_DATA_PORT);
                     char c = translate_scancode(scancode);
                     if (c != 0) return c;
                 }

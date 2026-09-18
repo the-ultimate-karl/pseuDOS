@@ -30,7 +30,7 @@ static int g_mice_initialized = 0;
 static int mice_wait_write(void) {
     int timeout = 100000;
     while ((inb(PS2_STATUS_PORT) & 0x02) && --timeout > 0) {
-        io_wait();
+        __asm__ volatile ("pause");
     }
     return timeout > 0;
 }
@@ -38,7 +38,7 @@ static int mice_wait_write(void) {
 static int mice_wait_read(void) {
     int timeout = 100000;
     while (!(inb(PS2_STATUS_PORT) & 0x01) && --timeout > 0) {
-        io_wait();
+        __asm__ volatile ("pause");
     }
     return timeout > 0;
 }
@@ -88,29 +88,39 @@ void mice_init(const FramebufferInfo *fb) {
     /* 1. Enable Auxiliary Device */
     mice_write_cmd(0xA8);
 
-    /* 2. Enable IRQ 12 in Controller Command Byte */
+    /* 2. Configure Controller Command Byte:
+     *    Bit 0: Enable IRQ 1 (keyboard)
+     *    Bit 1: Enable IRQ 12 (mouse)
+     *    Bit 4: Disable keyboard clock inhibit (0 = clock on)
+     *    Bit 5: Disable mouse clock inhibit (0 = clock on)
+     *    Bit 6: Translation enable (Scan Code Set 1 translation)
+     */
     mice_write_cmd(0x20);
-    uint8_t status = mice_read_data();
-    status |= 0x02;  /* Enable IRQ 12 */
-    status &= ~0x20; /* Enable mouse clock */
-    status |= 0x01;  /* Ensure IRQ 1 keyboard is enabled */
+    uint8_t config = mice_read_data();
+    if (config == 0) {
+        config = 0x47;
+    }
+    config |= 0x43;  /* Bits 0, 1, 6 */
+    config &= ~0x30; /* Clear bits 4 and 5 */
     mice_write_cmd(0x60);
-    mice_write_data(status);
+    mice_write_data(config);
+
+    /* Flush output buffer */
+    int timeout = 1000;
+    while ((inb(PS2_STATUS_PORT) & 0x01) && --timeout > 0) {
+        inb(PS2_DATA_PORT);
+    }
 
     /* 3. Reset Mouse */
     mice_send_to_mouse(0xFF);
-    (void)mice_read_data(); /* 0xAA self-test */
-    (void)mice_read_data(); /* 0x00 mouse ID */
+    mice_read_data(); /* 0xAA */
+    mice_read_data(); /* 0x00 */
 
-    /* 4. IntelliMouse Magic Sequence: sample rates 200, 100, 80 */
-    mice_send_to_mouse(0xF3);
-    mice_send_to_mouse(200);
-    mice_send_to_mouse(0xF3);
-    mice_send_to_mouse(100);
-    mice_send_to_mouse(0xF3);
-    mice_send_to_mouse(80);
+    /* 4. IntelliMouse sequence */
+    mice_send_to_mouse(0xF3); mice_send_to_mouse(200);
+    mice_send_to_mouse(0xF3); mice_send_to_mouse(100);
+    mice_send_to_mouse(0xF3); mice_send_to_mouse(80);
 
-    /* Query Device ID */
     mice_send_to_mouse(0xF2);
     uint8_t mouse_id = mice_read_data();
     if (mouse_id == 3 || mouse_id == 4) {
@@ -123,9 +133,15 @@ void mice_init(const FramebufferInfo *fb) {
         klog_info("Standard PS/2 mouse detected (ID %u, 3-byte packets armed)", mouse_id);
     }
 
-    /* 5. Set default settings and enable data reporting */
+    /* 5. Set defaults and enable reporting */
     mice_send_to_mouse(0xF6);
     mice_send_to_mouse(0xF4);
+
+    /* Flush any leftover bytes in controller buffer */
+    timeout = 1000;
+    while ((inb(PS2_STATUS_PORT) & 0x01) && --timeout > 0) {
+        inb(PS2_DATA_PORT);
+    }
 
     g_mice_initialized = 1;
     klog_info("Mice subsystem armed (bounds: %ux%u, initial pos: %d,%d)", g_max_x + 1, g_max_y + 1, g_mouse_x, g_mouse_y);
@@ -158,16 +174,13 @@ void mice_handle_irq(void) {
         int32_t dy = (int32_t)g_packet[2];
         int32_t dz = 0;
 
-        /* Apply sign extension if sign bit is set */
         if (flags & 0x10) dx |= ~0xFF;
         if (flags & 0x20) dy |= ~0xFF;
 
-        /* Discard overflowed packets */
         if (flags & 0xC0) {
             return;
         }
 
-        /* IntelliMouse scroll wheel */
         if (g_has_wheel) {
             int8_t wheel_val = (int8_t)(g_packet[3] & 0x0F);
             if (wheel_val & 0x08) wheel_val |= ~0x0F;
@@ -175,22 +188,18 @@ void mice_handle_irq(void) {
             g_scroll_wheel += wheel_val;
         }
 
-        /* Update buttons */
         uint8_t btns = flags & 0x07;
         uint8_t prev_btns = g_buttons;
         g_buttons = btns;
 
-        /* Screen Y coordinates increase downwards; PS/2 dy increases upwards */
         g_mouse_x += dx;
         g_mouse_y -= dy;
 
-        /* Clamp pointer to screen bounds so it never flies into unmapped pixels */
         if (g_mouse_x < 0) g_mouse_x = 0;
         if (g_mouse_x > (int32_t)g_max_x) g_mouse_x = (int32_t)g_max_x;
         if (g_mouse_y < 0) g_mouse_y = 0;
         if (g_mouse_y > (int32_t)g_max_y) g_mouse_y = (int32_t)g_max_y;
 
-        /* Queue event */
         mouse_event_t ev;
         ev.x = g_mouse_x;
         ev.y = g_mouse_y;
@@ -219,7 +228,7 @@ void mice_handle_irq(void) {
 int mice_get_event(mouse_event_t *ev) {
     if (!ev) return 0;
     if (g_queue_head == g_queue_tail) {
-        return 0; /* Queue empty */
+        return 0;
     }
     *ev = g_event_queue[g_queue_tail];
     g_queue_tail = (g_queue_tail + 1) % MOUSE_QUEUE_SIZE;
