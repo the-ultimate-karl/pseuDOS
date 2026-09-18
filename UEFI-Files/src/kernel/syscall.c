@@ -179,12 +179,20 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
 
         case SYS_UNLINK: {
             const char *path = (const char *)a1;
+            uint64_t flags = a2;
             if (!path) return -EFAULT;
             vfs_node_t *node = vfs_find_node(path);
             if ((is_protected_path(path) || (node && node->is_protected)) && curr->privilege_level != PRIV_KERNEL) {
                 return -EPERM;
             }
-            int res = vfs_remove_node(path);
+            int recursive = (flags & 1) ? 1 : 0;
+            int force = (flags & 2) ? 1 : 0;
+            int res = vfs_remove_node_ex(path, recursive, force);
+            if (res == -1) return -ENOENT;
+            if (res == -2) return -ENOTEMPTY;
+            if (res == -3) return -EINVAL;
+            if (res == -4) return -EPERM;
+            if (res == -5) return -EIO;
             return (res == 0) ? 0 : -ENOENT;
         }
 

@@ -678,7 +678,7 @@ static void cmd_help(void) {
     puts(" mkdir <path>                : create directory\n");
     puts(" touch <file>                : create empty file\n");
     puts(" write [-a] <file> <txt>     : write (or -a append) text to file\n");
-    puts(" del / rm <path>             : delete file or directory\n");
+    puts(" del / rm [-r] [-f] <path...> : delete file or directory\n");
     puts(" fs [drive_no | --drives]    : query filesystem stats and disk partitions\n");
     puts(" ps                          : list processes and CPU time\n");
     puts(" kill <pid>                  : terminate process\n");
@@ -1007,20 +1007,88 @@ static void cmd_mkdir(const char *arg) {
     }
 }
 
-static void cmd_del(const char *arg) {
+static void cmd_del(const char *cmd_name, const char *arg) {
+    if (!cmd_name) cmd_name = "rm";
     if (!arg || arg[0] == '\0') {
-        puts("del: missing operand\n");
+        puts(cmd_name);
+        puts(": missing operand\nusage: ");
+        puts(cmd_name);
+        puts(" [-r] [-f] <file...>\n");
         return;
     }
-    char path[256];
-    resolve_path(arg, path, sizeof(path));
-    int64_t res = syscall(SYS_UNLINK, (uint64_t)(uintptr_t)path, 0, 0, 0, 0);
-    if (res == -EPERM) {
-        puts("del: permission denied: protected system path requires 'sudo' or KERNEL mode\n");
-    } else if (res != 0) {
-        puts("del: cannot remove '");
-        puts(arg);
-        puts("': no such file or directory\n");
+
+    int recursive = 0;
+    int force = 0;
+    int operand_count = 0;
+
+    char buf[512];
+    strncpy(buf, arg, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *token = buf;
+    int stop_flags = 0;
+
+    while (*token) {
+        while (*token == ' ') token++;
+        if (*token == '\0') break;
+
+        char *next_space = strchr(token, ' ');
+        if (next_space) {
+            *next_space = '\0';
+        }
+
+        if (!stop_flags && token[0] == '-' && token[1] != '\0') {
+            if (strcmp(token, "--") == 0) {
+                stop_flags = 1;
+            } else {
+                for (size_t i = 1; token[i] != '\0'; i++) {
+                    if (token[i] == 'r' || token[i] == 'R') recursive = 1;
+                    else if (token[i] == 'f' || token[i] == 'F') force = 1;
+                }
+            }
+        } else {
+            operand_count++;
+            char path[256];
+            resolve_path(token, path, sizeof(path));
+            uint64_t flags = 0;
+            if (recursive) flags |= 1;
+            if (force) flags |= 2;
+
+            int64_t res = syscall(SYS_UNLINK, (uint64_t)(uintptr_t)path, flags, 0, 0, 0);
+            if (res == -EPERM) {
+                puts(cmd_name);
+                puts(": permission denied: protected system path requires 'sudo' or KERNEL mode\n");
+            } else if (res == -ENOTEMPTY) {
+                puts(cmd_name);
+                puts(": cannot remove '");
+                puts(token);
+                puts("': directory not empty\n");
+            } else if (res == -ENOENT) {
+                if (!force) {
+                    puts(cmd_name);
+                    puts(": cannot remove '");
+                    puts(token);
+                    puts("': no such file or directory\n");
+                }
+            } else if (res != 0) {
+                if (!force) {
+                    puts(cmd_name);
+                    puts(": cannot remove '");
+                    puts(token);
+                    puts("': operation failed\n");
+                }
+            }
+        }
+
+        if (!next_space) break;
+        token = next_space + 1;
+    }
+
+    if (operand_count == 0) {
+        puts(cmd_name);
+        puts(": missing operand\nusage: ");
+        puts(cmd_name);
+        puts(" [-r] [-f] <file...>\n");
     }
 }
 
@@ -1675,7 +1743,7 @@ static void execute_command_internal(char *cmd_line) {
     } else if (strcmp(cmd, "mkdir") == 0) {
         cmd_mkdir(arg);
     } else if (strcmp(cmd, "del") == 0 || strcmp(cmd, "rm") == 0) {
-        cmd_del(arg);
+        cmd_del(cmd, arg);
     } else if (strcmp(cmd, "cp") == 0 || strcmp(cmd, "copy") == 0) {
         cmd_cp(arg);
     } else if (strcmp(cmd, "mv") == 0 || strcmp(cmd, "move") == 0) {

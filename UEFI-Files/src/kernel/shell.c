@@ -898,23 +898,25 @@ static void cmd_write(const char *arg) {
     }
 }
 
-static void cmd_del(const char *arg) {
+static void cmd_del(const char *cmd_name, const char *arg) {
+    if (!cmd_name) cmd_name = "del";
     if (!arg || arg[0] == '\0') {
-        console_puts("del: missing operand\n");
-        console_puts("usage: del [-r] [-f] <path>\n");
+        console_printf("%s: missing operand\n", cmd_name);
+        console_printf("usage: %s [-r] [-f] <path...>\n", cmd_name);
         return;
     }
 
     int recursive = 0;
     int force = 0;
-    char target_path[256];
-    target_path[0] = '\0';
+    int operand_count = 0;
 
-    char buf[256];
+    char buf[512];
     strncpy(buf, arg, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
 
     char *token = buf;
+    int stop_flags = 0;
+
     while (*token) {
         while (*token == ' ') token++;
         if (*token == '\0') break;
@@ -924,36 +926,39 @@ static void cmd_del(const char *arg) {
             *next_space = '\0';
         }
 
-        if (token[0] == '-') {
-            for (size_t i = 1; token[i] != '\0'; i++) {
-                if (token[i] == 'r' || token[i] == 'R') recursive = 1;
-                else if (token[i] == 'f' || token[i] == 'F') force = 1;
+        if (!stop_flags && token[0] == '-' && token[1] != '\0') {
+            if (strcmp(token, "--") == 0) {
+                stop_flags = 1;
+            } else {
+                for (size_t i = 1; token[i] != '\0'; i++) {
+                    if (token[i] == 'r' || token[i] == 'R') recursive = 1;
+                    else if (token[i] == 'f' || token[i] == 'F') force = 1;
+                }
             }
         } else {
-            strncpy(target_path, token, sizeof(target_path) - 1);
-            target_path[sizeof(target_path) - 1] = '\0';
+            operand_count++;
+            int res = vfs_remove_node_ex(token, recursive, force);
+            if (res == -1) {
+                if (!force) {
+                    console_printf("%s: cannot remove '%s': no such file or directory\n", cmd_name, token);
+                }
+            } else if (res == -2) {
+                console_printf("%s: cannot remove '%s': directory not empty\n", cmd_name, token);
+            } else if (res == -3) {
+                console_printf("%s: cannot remove '%s': invalid argument\n", cmd_name, token);
+            } else if (res == -4) {
+                console_printf("%s: recursive deletion error: targeted directory is protected! please use the force (-f) flag to override.\n", cmd_name);
+            } else if (res == -5) {
+                console_printf("%s: cannot remove '%s': disk I/O synchronization error\n", cmd_name, token);
+            }
         }
 
         if (!next_space) break;
         token = next_space + 1;
     }
 
-    if (target_path[0] == '\0') {
-        console_puts("del: missing file or directory operand\n");
-        return;
-    }
-
-    int res = vfs_remove_node_ex(target_path, recursive, force);
-    if (res == -1) {
-        console_printf("del: cannot remove '%s': no such file or directory\n", target_path);
-    } else if (res == -2) {
-        console_printf("del: cannot remove '%s': directory not empty\n", target_path);
-    } else if (res == -3) {
-        console_printf("del: cannot remove '%s': invalid argument\n", target_path);
-    } else if (res == -4) {
-        console_puts("del: recursive deletion error: targeted directory is protected! please use the force (-f) flag to override.\n");
-    } else if (res == -5) {
-        console_printf("del: cannot remove '%s': disk I/O synchronization error\n", target_path);
+    if (operand_count == 0) {
+        console_printf("%s: missing file or directory operand\n", cmd_name);
     }
 }
 
@@ -1100,7 +1105,7 @@ void shell_run(const BootInfo *boot_info) {
         } else if (strcmp(cmd, "write") == 0) {
             cmd_write(arg);
         } else if (strcmp(cmd, "del") == 0 || strcmp(cmd, "rm") == 0) {
-            cmd_del(arg);
+            cmd_del(cmd, arg);
         } else if (strcmp(cmd, "cpu") == 0) {
             cpu_print_info();
         } else if (strcmp(cmd, "mem") == 0) {

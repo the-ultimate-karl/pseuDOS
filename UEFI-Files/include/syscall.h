@@ -97,6 +97,7 @@ typedef struct {
 #define EINVAL       22  /* Invalid argument */
 #define EPIPE        32  /* Broken pipe */
 #define ENOSYS       38  /* Function not implemented */
+#define ENOTEMPTY    39  /* Directory not empty */
 #define EAFNOSUPPORT 97  /* Address family not supported */
 #define EADDRINUSE   98  /* Address already in use */
 #define EISCONN      106 /* Transport endpoint is already connected */
