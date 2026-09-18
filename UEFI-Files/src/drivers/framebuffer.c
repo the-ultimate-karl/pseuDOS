@@ -178,7 +178,9 @@ int fb_set_resolution(uint32_t width, uint32_t height) {
 }
 
 static inline uint32_t color_to_raw(uint32_t rgb) {
-    if (g_fb.pixel_format == FB_FORMAT_BGR) {
+    /* On x86_64 little-endian, a uint32 0x00RRGGBB in memory has bytes [BB, GG, RR, 00].
+       Therefore, FB_FORMAT_BGR is the native memory layout. Only FB_FORMAT_RGB needs R and B swapped. */
+    if (g_fb.pixel_format == FB_FORMAT_RGB) {
         uint32_t r = (rgb >> 16) & 0xFF;
         uint32_t g = (rgb >> 8) & 0xFF;
         uint32_t b = rgb & 0xFF;

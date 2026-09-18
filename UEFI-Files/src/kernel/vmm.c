@@ -57,6 +57,8 @@ int vmm_map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
         if (!new_table) return -1;
         memset((void *)(uintptr_t)new_table, 0, PAGE_SIZE);
         pml4[pml4_idx] = new_table | PTE_PRESENT | PTE_WRITABLE | (flags & PTE_USER);
+    } else if (flags & PTE_USER) {
+        pml4[pml4_idx] |= (PTE_USER | PTE_WRITABLE);
     }
     uint64_t *pdpt = (uint64_t *)(uintptr_t)(pml4[pml4_idx] & ~0xFFFULL);
 
@@ -66,6 +68,8 @@ int vmm_map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
         if (!new_table) return -1;
         memset((void *)(uintptr_t)new_table, 0, PAGE_SIZE);
         pdpt[pdpt_idx] = new_table | PTE_PRESENT | PTE_WRITABLE | (flags & PTE_USER);
+    } else if (flags & PTE_USER) {
+        pdpt[pdpt_idx] |= (PTE_USER | PTE_WRITABLE);
     }
     uint64_t *pd = (uint64_t *)(uintptr_t)(pdpt[pdpt_idx] & ~0xFFFULL);
 
@@ -86,6 +90,8 @@ int vmm_map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
             new_pt[i] = (old_phys_base + i * PAGE_SIZE) | (old_flags & ~PTE_HUGE) | PTE_PRESENT;
         }
         pd[pd_idx] = new_table | PTE_PRESENT | PTE_WRITABLE | (flags & PTE_USER);
+    } else if (flags & PTE_USER) {
+        pd[pd_idx] |= (PTE_USER | PTE_WRITABLE);
     }
     uint64_t *pt = (uint64_t *)(uintptr_t)(pd[pd_idx] & ~0xFFFULL);
 
@@ -122,7 +128,7 @@ uint64_t *vmm_create_user_address_space(void) {
     memcpy(&new_pml4[256], &g_kernel_pml4[256], 256 * sizeof(uint64_t));
 
     /* Also keep identity mapping in entry 0 for smooth transitions */
-    new_pml4[0] = g_kernel_pml4[0];
+    new_pml4[0] = g_kernel_pml4[0] | PTE_USER | PTE_WRITABLE;
 
     return new_pml4;
 }

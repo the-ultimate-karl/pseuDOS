@@ -11,6 +11,9 @@
 #include "lib.h"
 #include "panic.h"
 #include "kernel.h"
+#include "mice.h"
+#include "ipc.h"
+#include "shm.h"
 
 extern const BootInfo *g_boot_info_global;
 
@@ -139,6 +142,9 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
                 }
                 return (int64_t)count;
             }
+            if (fd >= SOCKET_FD_BASE) {
+                return sys_send(fd, buf, count, 0);
+            }
             return -EBADF;
         }
 
@@ -157,7 +163,18 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
                 }
                 return (int64_t)read_bytes;
             }
+            if (fd >= SOCKET_FD_BASE) {
+                return sys_recv(fd, buf, count, 0);
+            }
             return -EBADF;
+        }
+
+        case SYS_CLOSE: {
+            int fd = (int)a1;
+            if (fd >= SOCKET_FD_BASE) {
+                return (int64_t)sys_close_socket(fd);
+            }
+            return 0;
         }
 
         case SYS_UNLINK: {
@@ -382,6 +399,55 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             size_t size = (size_t)a3;
             return (int64_t)vfs_listdir_names(path, buf, size);
         }
+
+        case SYS_GET_MOUSE_EVENT: {
+            mouse_event_t *ev = (mouse_event_t *)a1;
+            if (!ev) return -EFAULT;
+            return (int64_t)mice_get_event(ev);
+        }
+
+        case SYS_GET_MOUSE_STATE: {
+            mouse_state_t *st = (mouse_state_t *)a1;
+            if (!st) return -EFAULT;
+            mice_get_state(st);
+            return 0;
+        }
+
+        case SYS_SOCKET:
+            return (int64_t)sys_socket((int)a1, (int)a2, (int)a3);
+
+        case SYS_BIND:
+            return (int64_t)sys_bind((int)a1, (const sockaddr_un_t *)a2, (size_t)a3);
+
+        case SYS_CONNECT:
+            return (int64_t)sys_connect((int)a1, (const sockaddr_un_t *)a2, (size_t)a3);
+
+        case SYS_LISTEN:
+            return (int64_t)sys_listen((int)a1, (int)a2);
+
+        case SYS_ACCEPT:
+            return (int64_t)sys_accept((int)a1, (sockaddr_un_t *)a2, (size_t *)a3);
+
+        case SYS_SEND:
+            return sys_send((int)a1, (const void *)a2, (size_t)a3, (int)a4);
+
+        case SYS_RECV:
+            return sys_recv((int)a1, (void *)a2, (size_t)a3, (int)a4);
+
+        case SYS_POLL:
+            return (int64_t)sys_poll((pollfd_t *)a1, (size_t)a2, (int)a3);
+
+        case SYS_SHM_CREATE:
+            return (int64_t)sys_shm_create((const char *)a1, (size_t)a2);
+
+        case SYS_SHM_MAP:
+            return (int64_t)(uintptr_t)sys_shm_map((int)a1, (void *)a2, (int)a3);
+
+        case SYS_SHM_UNMAP:
+            return (int64_t)sys_shm_unmap((void *)a1);
+
+        case SYS_SHM_CLOSE:
+            return (int64_t)sys_shm_close((int)a1);
 
         case SYS_PANIC: {
             const char *reason = (const char *)a1;

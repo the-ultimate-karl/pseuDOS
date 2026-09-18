@@ -189,6 +189,14 @@ static char translate_scancode(uint8_t scancode) {
     return c;
 }
 
+int keyboard_has_char(void) {
+    if (g_char_buf_pos < g_char_buf_len) return 1;
+    if (uart_is_present() && (inb(SERIAL_LSR) & 0x01)) return 1;
+    if (g_queue_head != g_queue_tail) return 1;
+    if (!(get_rflags() & 0x200) && (inb(PS2_STATUS_PORT) & 0x01)) return 1;
+    return 0;
+}
+
 char keyboard_getchar(void) {
     while (1) {
         /* Check buffered characters (e.g. from multi-byte escape sequences) */

@@ -1,6 +1,7 @@
 #include "idt.h"
 #include "io.h"
 #include "drivers.h"
+#include "mice.h"
 #include "lib.h"
 #include "scheduler.h"
 #include "panic.h"
@@ -109,14 +110,11 @@ void pic_remap(void) {
     outb(PIC2_DATA, ICW4_8086);
     io_wait();
 
-    /* Mask all IRQs except IRQ 1 (Keyboard).
-       Bit 0: IRQ 0 Timer (masked = 1)
-       Bit 1: IRQ 1 Keyboard (UNMASKED = 0)
-       Bit 2: IRQ 2 Cascade (masked = 1)
-       Bits 3..7: masked = 1
+    /* Unmask IRQ 1 (Keyboard) and IRQ 2 (Cascade to Slave PIC) on Master PIC.
+       Unmask IRQ 12 (Mouse = bit 4) on Slave PIC.
     */
-    outb(PIC1_DATA, 0xFD); /* 0b11111101: only IRQ 1 unmasked */
-    outb(PIC2_DATA, 0xFF); /* 0b11111111: all slave IRQs masked */
+    outb(PIC1_DATA, 0xF9); /* 0b11111001: IRQ 1 and IRQ 2 unmasked */
+    outb(PIC2_DATA, 0xEF); /* 0b11101111: IRQ 12 (mouse) unmasked */
 }
 
 void isr_dispatch(uint64_t vector, uint64_t error_code, interrupt_frame_t *frame, registers_t *regs) {
@@ -169,10 +167,7 @@ void isr_dispatch(uint64_t vector, uint64_t error_code, interrupt_frame_t *frame
 
     /* 5. PS/2 Mouse IRQ 12 (Vector 44 = 40 + 4) */
     if (vector == 44) {
-        /* Drain byte from data port to clear pending mouse packet */
-        if (inb(PS2_STATUS_PORT) & 0x01) {
-            (void)inb(PS2_DATA_PORT);
-        }
+        mice_handle_irq();
         pic_send_eoi(12);
         return;
     }

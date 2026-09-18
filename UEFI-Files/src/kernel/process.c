@@ -1,12 +1,15 @@
 #include "process.h"
 #include "scheduler.h"
 #include "vmm.h"
+#include "pmm.h"
 #include "lib.h"
 #include "drivers.h"
 #include "klog.h"
 #include "gdt.h"
 #include "syscall.h"
 #include "panic.h"
+#include "ipc.h"
+#include "shm.h"
 
 extern uint64_t g_current_kernel_rsp;
 
@@ -91,6 +94,14 @@ void process_free_resources(process_t *p) {
         p->image_size = 0;
     }
 
+    ipc_close_process_sockets(p->pid);
+    shm_cleanup_process(p->pid);
+
+    if (p->cr3 && p->cr3 != (uint64_t)(uintptr_t)vmm_get_kernel_pml4()) {
+        pmm_free_page(p->cr3);
+        p->cr3 = 0;
+    }
+
     p->state = PROCESS_STATE_UNUSED;
 }
 
@@ -137,7 +148,8 @@ process_t *process_create(const char *name, void (*entry)(void), process_privile
     strncpy(p->name, name ? name : "process", sizeof(p->name) - 1);
     p->privilege_level = priv;
     p->entry = entry;
-    p->cr3 = (uint64_t)(uintptr_t)vmm_get_kernel_pml4();
+    uint64_t *user_pml4 = vmm_create_user_address_space();
+    p->cr3 = user_pml4 ? (uint64_t)(uintptr_t)user_pml4 : (uint64_t)(uintptr_t)vmm_get_kernel_pml4();
     p->time_slice = DEFAULT_TIME_SLICE;
     p->total_ticks = 0;
     strncpy(p->cwd, g_current_process ? g_current_process->cwd : "/", sizeof(p->cwd) - 1);

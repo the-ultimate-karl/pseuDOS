@@ -60,6 +60,8 @@ KERNEL_SRCS = src/kernel/kernel.c \
               src/kernel/process.c \
               src/kernel/scheduler.c \
               src/kernel/syscall.c \
+              src/kernel/ipc.c \
+              src/kernel/shm.c \
               src/kernel/pe_loader.c \
               src/kernel/shell.c \
               src/kernel/panic.c \
@@ -76,6 +78,7 @@ KERNEL_SRCS = src/kernel/kernel.c \
               src/drivers/console.c \
               src/drivers/idt.c \
               src/drivers/keyboard.c \
+              src/drivers/mice.c \
               src/drivers/cpu.c \
               src/drivers/memory.c \
               src/drivers/pci.c \

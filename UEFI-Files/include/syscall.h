@@ -50,6 +50,20 @@
 #define SYS_GET_PROMPT_PATH  46
 #define SYS_UPTIME           47
 #define SYS_LISTDIR          48
+#define SYS_GET_MOUSE_EVENT  50
+#define SYS_GET_MOUSE_STATE  51
+#define SYS_SOCKET           52
+#define SYS_BIND             53
+#define SYS_CONNECT          54
+#define SYS_LISTEN           55
+#define SYS_ACCEPT           56
+#define SYS_SEND             57
+#define SYS_RECV             58
+#define SYS_POLL             59
+#define SYS_SHM_CREATE       60
+#define SYS_SHM_MAP          61
+#define SYS_SHM_UNMAP        62
+#define SYS_SHM_CLOSE        63
 #define SYS_PANIC            99
 
 /* VFS Node Types for SYS_STAT */
@@ -67,20 +81,27 @@ typedef struct {
 } vfs_stat_t;
 
 /* Standard Error Numbers */
-#define EPERM   1  /* Operation not permitted */
-#define ENOENT  2  /* No such file or directory */
-#define ESRCH   3  /* No such process */
-#define EIO     5  /* I/O error */
-#define EBADF   9  /* Bad file number */
-#define ENOMEM  12 /* Out of memory */
-#define EACCES  13 /* Permission denied */
-#define EFAULT  14 /* Bad address */
-#define EEXIST  17 /* File exists */
-#define ENODEV  19 /* No such device */
-#define ENOTDIR 20 /* Not a directory */
-#define EISDIR  21 /* Is a directory */
-#define EINVAL  22 /* Invalid argument */
-#define ENOSYS  38 /* Function not implemented */
+#define EPERM        1   /* Operation not permitted */
+#define ENOENT       2   /* No such file or directory */
+#define ESRCH        3   /* No such process */
+#define EIO          5   /* I/O error */
+#define EBADF        9   /* Bad file number */
+#define EAGAIN       11  /* Resource temporarily unavailable */
+#define ENOMEM       12  /* Out of memory */
+#define EACCES       13  /* Permission denied */
+#define EFAULT       14  /* Bad address */
+#define EEXIST       17  /* File exists */
+#define ENODEV       19  /* No such device */
+#define ENOTDIR      20  /* Not a directory */
+#define EISDIR       21  /* Is a directory */
+#define EINVAL       22  /* Invalid argument */
+#define EPIPE        32  /* Broken pipe */
+#define ENOSYS       38  /* Function not implemented */
+#define EAFNOSUPPORT 97  /* Address family not supported */
+#define EADDRINUSE   98  /* Address already in use */
+#define EISCONN      106 /* Transport endpoint is already connected */
+#define ENOTCONN     107 /* Transport endpoint is not connected */
+#define ECONNREFUSED 111 /* Connection refused */
 
 void syscall_init(void);
 int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5);

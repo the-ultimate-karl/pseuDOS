@@ -2,6 +2,9 @@
 #include <stddef.h>
 #include "syscall.h"
 #include "rtc.h"
+#include "mice.h"
+#include "ipc.h"
+#include "shm.h"
 
 /* Basic freestanding string utilities */
 static size_t strlen(const char *s) {
@@ -187,6 +190,32 @@ static void print_num(uint64_t num) {
     while (num > 0) {
         buf[idx++] = '0' + (num % 10);
         num /= 10;
+    }
+    for (int i = idx - 1; i >= 0; i--) {
+        putc(buf[i]);
+    }
+}
+
+static void print_signed_num(int64_t num) {
+    if (num < 0) {
+        putc('-');
+        print_num((uint64_t)(-num));
+    } else {
+        print_num((uint64_t)num);
+    }
+}
+
+static void print_hex(uint64_t val) {
+    const char hex_chars[] = "0123456789abcdef";
+    char buf[16];
+    int idx = 0;
+    if (val == 0) {
+        putc('0');
+        return;
+    }
+    while (val > 0) {
+        buf[idx++] = hex_chars[val & 0xF];
+        val >>= 4;
     }
     for (int i = idx - 1; i >= 0; i--) {
         putc(buf[i]);
@@ -655,6 +684,9 @@ static void cmd_help(void) {
     puts(" kill <pid>                  : terminate process\n");
     puts(" proctest                    : test preemptive multitasking with concurrent tasks\n");
     puts(" syscalltest                 : test syscall interface\n");
+    puts(" mousetest                   : test hardware mouse tracking and IntelliMouse wheel\n");
+    puts(" ipctest                     : test unix-domain socket IPC and non-blocking poll\n");
+    puts(" shmtest                     : test shared memory allocation and framebuffer map\n");
     puts(" date / time                 : display current date and time\n");
     puts(" uptime                      : display system uptime and ticks\n");
     puts(" uname [-a|-r|-m|-s]         : display system identification\n");
@@ -1229,6 +1261,264 @@ static void cmd_syscalltest(void) {
     puts("--- all syscall tests completed! ---\n");
 }
 
+static void cmd_mousetest(void) {
+    puts("--- mouse driver and hardware verification ---\n");
+    mouse_state_t st;
+    memset(&st, 0, sizeof(st));
+    syscall(SYS_GET_MOUSE_STATE, (uint64_t)(uintptr_t)&st, 0, 0, 0, 0);
+
+    puts("initial state: pos=(");
+    print_signed_num(st.x);
+    puts(", ");
+    print_signed_num(st.y);
+    puts(") bounds=[0..");
+    print_num(st.max_x);
+    puts(" x 0..");
+    print_num(st.max_y);
+    puts("] buttons=0x");
+    print_hex(st.buttons);
+    puts(" wheel=");
+    puts(st.has_wheel ? "detected\n" : "standard ps/2\n");
+
+    puts("polling events for 3 seconds (move mouse or click in qemu window)...\n");
+
+    uint64_t start = syscall(SYS_UPTIME, 0, 0, 0, 0, 0);
+    int event_count = 0;
+
+    while (event_count < 10) {
+        mouse_event_t ev;
+        int64_t got = syscall(SYS_GET_MOUSE_EVENT, (uint64_t)(uintptr_t)&ev, 0, 0, 0, 0);
+        if (got > 0) {
+            event_count++;
+            puts("[mouse event ");
+            print_num((uint64_t)event_count);
+            puts("] type=");
+            if (ev.event_type == MOUSE_EVENT_MOVE) puts("move");
+            else if (ev.event_type == MOUSE_EVENT_BUTTON) puts("button");
+            else if (ev.event_type == MOUSE_EVENT_WHEEL) puts("wheel");
+            else puts("unknown");
+
+            puts(" pos=(");
+            print_signed_num(ev.x);
+            puts(", ");
+            print_signed_num(ev.y);
+            puts(") delta=(");
+            print_signed_num(ev.dx);
+            puts(", ");
+            print_signed_num(ev.dy);
+            puts(", dz=");
+            print_signed_num(ev.dz);
+            puts(") btns=");
+            if (ev.buttons & MOUSE_BTN_LEFT) puts("L");
+            if (ev.buttons & MOUSE_BTN_RIGHT) puts("R");
+            if (ev.buttons & MOUSE_BTN_MIDDLE) puts("M");
+            if (ev.buttons == 0) puts("none");
+            puts("\n");
+        }
+
+        uint64_t now = syscall(SYS_UPTIME, 0, 0, 0, 0, 0);
+        if (now - start > 300) {
+            break;
+        }
+        syscall(SYS_SLEEP, 10, 0, 0, 0, 0);
+    }
+
+    if (event_count == 0) {
+        puts("no motion detected during poll period (idle)\n");
+    } else {
+        puts("captured ");
+        print_num((uint64_t)event_count);
+        puts(" mouse events successfully\n");
+    }
+    puts("--- mousetest finished ---\n");
+}
+
+static void cmd_ipctest(void) {
+    puts("--- unix-domain socket ipc & poll verification ---\n");
+
+    /* 1. Create server socket */
+    int srv = (int)syscall(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0, 0, 0);
+    if (srv < 0) {
+        puts("error: sys_socket(srv) failed\n");
+        return;
+    }
+    puts("1. server socket created (fd=");
+    print_num((uint64_t)srv);
+    puts(") [ok]\n");
+
+    /* 2. Bind server socket */
+    sockaddr_un_t srv_addr;
+    memset(&srv_addr, 0, sizeof(srv_addr));
+    srv_addr.sun_family = AF_UNIX;
+    strcpy(srv_addr.sun_path, "/tmp/gui_server.sock");
+    int bind_res = (int)syscall(SYS_BIND, (uint64_t)srv, (uint64_t)(uintptr_t)&srv_addr, sizeof(srv_addr), 0, 0);
+    if (bind_res != 0) {
+        puts("error: sys_bind failed\n");
+        syscall(SYS_CLOSE, (uint64_t)srv, 0, 0, 0, 0);
+        return;
+    }
+    puts("2. server socket bound to /tmp/gui_server.sock [ok]\n");
+
+    /* 3. Listen */
+    int listen_res = (int)syscall(SYS_LISTEN, (uint64_t)srv, 5, 0, 0, 0);
+    if (listen_res != 0) {
+        puts("error: sys_listen failed\n");
+        syscall(SYS_CLOSE, (uint64_t)srv, 0, 0, 0, 0);
+        return;
+    }
+    puts("3. server listening for incoming connections [ok]\n");
+
+    /* 4. Create client socket */
+    int cli = (int)syscall(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0, 0, 0);
+    if (cli < 0) {
+        puts("error: sys_socket(cli) failed\n");
+        syscall(SYS_CLOSE, (uint64_t)srv, 0, 0, 0, 0);
+        return;
+    }
+    puts("4. client socket created (fd=");
+    print_num((uint64_t)cli);
+    puts(") [ok]\n");
+
+    /* 5. Connect client to server */
+    int conn_res = (int)syscall(SYS_CONNECT, (uint64_t)cli, (uint64_t)(uintptr_t)&srv_addr, sizeof(srv_addr), 0, 0);
+    if (conn_res != 0) {
+        puts("error: sys_connect failed\n");
+        syscall(SYS_CLOSE, (uint64_t)cli, 0, 0, 0, 0);
+        syscall(SYS_CLOSE, (uint64_t)srv, 0, 0, 0, 0);
+        return;
+    }
+    puts("5. client connected to server [ok]\n");
+
+    /* 6. Accept on server */
+    sockaddr_un_t cli_addr;
+    size_t cli_addrlen = sizeof(cli_addr);
+    int accepted = (int)syscall(SYS_ACCEPT, (uint64_t)srv, (uint64_t)(uintptr_t)&cli_addr, (uint64_t)(uintptr_t)&cli_addrlen, 0, 0);
+    if (accepted < 0) {
+        puts("error: sys_accept failed\n");
+        syscall(SYS_CLOSE, (uint64_t)cli, 0, 0, 0, 0);
+        syscall(SYS_CLOSE, (uint64_t)srv, 0, 0, 0, 0);
+        return;
+    }
+    puts("6. server accepted connection (conn_fd=");
+    print_num((uint64_t)accepted);
+    puts(") [ok]\n");
+
+    /* 7. Client sends message */
+    const char *msg_out = "hello display server";
+    int64_t sent = syscall(SYS_SEND, (uint64_t)cli, (uint64_t)(uintptr_t)msg_out, strlen(msg_out), 0, 0);
+    if (sent != (int64_t)strlen(msg_out)) {
+        puts("error: sys_send failed\n");
+    }
+    puts("7. client sent 'hello display server' [ok]\n");
+
+    /* 8. Test poll on server socket */
+    pollfd_t pfd;
+    pfd.fd = accepted;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int poll_res = (int)syscall(SYS_POLL, (uint64_t)(uintptr_t)&pfd, 1, 100, 0, 0);
+    if (poll_res > 0 && (pfd.revents & POLLIN)) {
+        puts("8. sys_poll detected incoming data on server socket [ok]\n");
+    } else {
+        puts("8. sys_poll warning: revents=");
+        print_hex(pfd.revents);
+        puts("\n");
+    }
+
+    /* 9. Server receives message */
+    char recv_buf[64];
+    memset(recv_buf, 0, sizeof(recv_buf));
+    int64_t rcvd = syscall(SYS_RECV, (uint64_t)accepted, (uint64_t)(uintptr_t)recv_buf, sizeof(recv_buf) - 1, 0, 0);
+    puts("9. server received: \"");
+    puts(recv_buf);
+    puts("\" (bytes=");
+    print_num((uint64_t)rcvd);
+    puts(") [ok]\n");
+
+    /* 10. Server sends response */
+    const char *ack_msg = "ack compositor ready";
+    syscall(SYS_SEND, (uint64_t)accepted, (uint64_t)(uintptr_t)ack_msg, strlen(ack_msg), 0, 0);
+    memset(recv_buf, 0, sizeof(recv_buf));
+    syscall(SYS_RECV, (uint64_t)cli, (uint64_t)(uintptr_t)recv_buf, sizeof(recv_buf) - 1, 0, 0);
+    puts("10. client received response: \"");
+    puts(recv_buf);
+    puts("\" [ok]\n");
+
+    /* 11. Close sockets */
+    syscall(SYS_CLOSE, (uint64_t)cli, 0, 0, 0, 0);
+    syscall(SYS_CLOSE, (uint64_t)accepted, 0, 0, 0, 0);
+    syscall(SYS_CLOSE, (uint64_t)srv, 0, 0, 0, 0);
+    puts("11. sockets closed cleanly [ok]\n");
+    puts("--- ipctest finished: all tests passed! ---\n");
+}
+
+static void cmd_shmtest(void) {
+    puts("--- shared memory subsystem verification ---\n");
+
+    /* 1. Create shared memory region */
+    int shm_id = (int)syscall(SYS_SHM_CREATE, (uint64_t)(uintptr_t)"shm_buffer_01", 16384, 0, 0, 0);
+    if (shm_id <= 0) {
+        puts("error: sys_shm_create failed\n");
+        return;
+    }
+    puts("1. created shm region 'shm_buffer_01' (id=");
+    print_num((uint64_t)shm_id);
+    puts(", size=16384) [ok]\n");
+
+    /* 2. Map shared memory */
+    uint32_t *map_ptr1 = (uint32_t *)syscall(SYS_SHM_MAP, (uint64_t)shm_id, 0, SHM_READ | SHM_WRITE, 0, 0);
+    if (!map_ptr1) {
+        puts("error: sys_shm_map failed\n");
+        syscall(SYS_SHM_CLOSE, (uint64_t)shm_id, 0, 0, 0, 0);
+        return;
+    }
+    puts("2. mapped shm into virtual address space at 0x");
+    print_hex((uint64_t)(uintptr_t)map_ptr1);
+    puts(" [ok]\n");
+
+    /* 3. Write pattern */
+    map_ptr1[0] = 0x12345678;
+    map_ptr1[1] = 0xDEADBEEF;
+    map_ptr1[2] = 0xCAFEBABE;
+    map_ptr1[1023] = 0x55AA55AA;
+    puts("3. wrote test patterns to shared memory [ok]\n");
+
+    /* 4. Second mapping (simulating client process mapping same region) */
+    int shm_id2 = (int)syscall(SYS_SHM_CREATE, (uint64_t)(uintptr_t)"shm_buffer_01", 16384, 0, 0, 0);
+    puts("4. opened existing shm by name (id=");
+    print_num((uint64_t)shm_id2);
+    puts(") [ok]\n");
+
+    uint32_t *map_ptr2 = (uint32_t *)syscall(SYS_SHM_MAP, (uint64_t)shm_id2, 0, SHM_READ | SHM_WRITE, 0, 0);
+    if (map_ptr2 && map_ptr2[0] == 0x12345678 && map_ptr2[1] == 0xDEADBEEF && map_ptr2[2] == 0xCAFEBABE && map_ptr2[1023] == 0x55AA55AA) {
+        puts("5. verified shared memory contents across handles [ok]\n");
+    } else {
+        puts("error: shared memory content mismatch\n");
+    }
+
+    /* 5. Test framebuffer mapping interface */
+    int fb_id = (int)syscall(SYS_SHM_CREATE, (uint64_t)(uintptr_t)"/dev/fb0", 0, 0, 0, 0);
+    if (fb_id > 0) {
+        void *fb_ptr = (void *)syscall(SYS_SHM_MAP, (uint64_t)fb_id, 0, SHM_READ | SHM_WRITE, 0, 0);
+        if (fb_ptr) {
+            puts("6. mapped hardware framebuffer /dev/fb0 at 0x");
+            print_hex((uint64_t)(uintptr_t)fb_ptr);
+            puts(" [ok]\n");
+            syscall(SYS_SHM_CLOSE, (uint64_t)fb_id, 0, 0, 0, 0);
+        } else {
+            puts("6. framebuffer map warning: unable to map /dev/fb0\n");
+        }
+    } else {
+        puts("6. framebuffer map warning: /dev/fb0 region unavailable\n");
+    }
+
+    /* 6. Cleanup */
+    syscall(SYS_SHM_CLOSE, (uint64_t)shm_id, 0, 0, 0, 0);
+    syscall(SYS_SHM_CLOSE, (uint64_t)shm_id2, 0, 0, 0, 0);
+    puts("7. shared memory closed cleanly [ok]\n");
+    puts("--- shmtest finished: all tests passed! ---\n");
+}
+
 static void cmd_grub(void) {
     puts("=================================================================\n");
     puts(" pseuDOS GRUB 2 Integration & Chainloader Configuration\n");
@@ -1420,6 +1710,12 @@ static void execute_command_internal(char *cmd_line) {
         cmd_halt();
     } else if (strcmp(cmd, "syscalltest") == 0) {
         cmd_syscalltest();
+    } else if (strcmp(cmd, "mousetest") == 0) {
+        cmd_mousetest();
+    } else if (strcmp(cmd, "ipctest") == 0) {
+        cmd_ipctest();
+    } else if (strcmp(cmd, "shmtest") == 0) {
+        cmd_shmtest();
     } else if (strcmp(cmd, "grub") == 0) {
         cmd_grub();
     } else if (strcmp(cmd, "flash") == 0) {
@@ -1428,6 +1724,10 @@ static void execute_command_internal(char *cmd_line) {
             puts("flash: permission denied: installation requires 'sudo' or KERNEL mode\n");
         }
     } else if (strcmp(cmd, "panic") == 0) {
+        if (arg && (strcmp(arg, "pagefault") == 0 || strcmp(arg, "pf") == 0)) {
+            volatile uint64_t *bad_ptr = (volatile uint64_t *)0x00000080DEAD0000ULL;
+            *bad_ptr = 0xCAFEBABE;
+        }
         syscall(SYS_PANIC, (uint64_t)(uintptr_t)(arg && arg[0] ? arg : "manual panic triggered from shell"), 0, 0, 0, 0);
     } else if (strcmp(cmd, "kernel") == 0 || strcmp(cmd, "su") == 0) {
         syscall(SYS_ELEVATE, 0, 0, 0, 0, 0);

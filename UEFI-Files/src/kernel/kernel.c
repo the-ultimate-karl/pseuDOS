@@ -16,6 +16,8 @@
 #include "process.h"
 #include "scheduler.h"
 #include "pe_loader.h"
+#include "ipc.h"
+#include "shm.h"
 
 const BootInfo *g_boot_info_global = NULL;
 
@@ -60,7 +62,10 @@ void kernel_main(BootInfo *boot_info) {
     /* 9. Initialize PS/2 Keyboard Driver */
     keyboard_init();
 
-    /* 10. Initialize Boot Location & Devpath */
+    /* 10. Initialize PS/2 IntelliMouse Driver */
+    mice_init(&boot_info->fb);
+
+    /* 11. Initialize Boot Location & Devpath */
     fs_init_devpath(boot_info);
 
     /* 11. Initialize Storage Subsystem (AHCI SATA, NVMe PCIe, USB Mass Storage) */
@@ -70,10 +75,12 @@ void kernel_main(BootInfo *boot_info) {
     vfs_mount_boot_media(boot_info);
     boot_log("OK", "storage subsystem and root filesystem mounted");
 
-    /* 13. Initialize PIT Timer & Syscall MSRs */
+    /* 13. Initialize PIT Timer, Syscalls, IPC, and SHM */
     pit_init(PIT_FREQUENCY_HZ);
     syscall_init();
-    boot_log("OK", "PIT timer and x86_64 syscall interface active");
+    ipc_init();
+    shm_init();
+    boot_log("OK", "PIT timer, syscalls, IPC, and SHM active");
 
     /* 14. Initialize Process Manager & Preemptive Scheduler */
     process_init();

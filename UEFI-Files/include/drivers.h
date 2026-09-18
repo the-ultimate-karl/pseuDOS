@@ -32,8 +32,12 @@ int uart_is_present(void);
 /* Keyboard Input Driver */
 void keyboard_init(void);
 char keyboard_getchar(void);
+int keyboard_has_char(void);
 void keyboard_readline(char *buffer, size_t max_len, const char *prompt);
 void keyboard_isr_handler(void);
+
+/* Mouse Input Driver */
+#include "mice.h"
 
 /* Hardware Inspection */
 void cpu_print_info(void);
