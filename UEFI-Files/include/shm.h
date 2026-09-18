@@ -1,4 +1,4 @@
-﻿#ifndef SHM_H
+#ifndef SHM_H
 #define SHM_H
 
 #include <stdint.h>
@@ -10,6 +10,14 @@
 #define SHM_READ  0x01
 #define SHM_WRITE 0x02
 
+#define MAX_SHM_CLIENTS 16
+
+typedef struct {
+    uint32_t pid;
+    uint64_t virt_addr;
+    int ref_count;
+} shm_client_ref_t;
+
 typedef struct {
     int id;
     int in_use;
@@ -20,6 +28,7 @@ typedef struct {
     int ref_count;
     uint32_t creator_pid;
     int is_framebuffer;
+    shm_client_ref_t clients[MAX_SHM_CLIENTS];
 } shm_region_t;
 
 void shm_init(void);

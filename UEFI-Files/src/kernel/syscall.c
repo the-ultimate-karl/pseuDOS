@@ -61,8 +61,31 @@ static int is_protected_path(const char *path) {
     return 0;
 }
 
+static inline int validate_user_buffer(const void *ptr, size_t len, process_privilege_t priv) {
+    if (priv == PRIV_KERNEL) return 1;
+    if (len == 0) return 1;
+    if (!ptr) return 0;
+    uintptr_t addr = (uintptr_t)ptr;
+    if (addr >= 0x0000800000000000ULL) return 0;
+    if (addr + len < addr) return 0;
+    if (addr + len > 0x0000800000000000ULL) return 0;
+    return 1;
+}
+
+static inline int validate_user_str(const char *str, size_t max_len, process_privilege_t priv) {
+    if (priv == PRIV_KERNEL) return 1;
+    if (!str) return 0;
+    uintptr_t addr = (uintptr_t)str;
+    if (addr >= 0x0000800000000000ULL) return 0;
+    for (size_t i = 0; i < max_len; i++) {
+        if (addr + i >= 0x0000800000000000ULL) return 0;
+        if (str[i] == '\0') return 1;
+    }
+    return 0;
+}
+
 int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a4; (void)a5;
+    (void)a5;
     process_t *curr = process_get_current();
     if (!curr) {
         return -ESRCH;
@@ -78,7 +101,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
 
         case SYS_EXEC: {
             const char *path = (const char *)a1;
-            if (!path) return -EFAULT;
+            if (!validate_user_str(path, 256, curr->privilege_level)) return -EFAULT;
             process_privilege_t priv = (curr->privilege_level == PRIV_KERNEL && a2 == 1) ? PRIV_KERNEL : PRIV_USER;
             process_t *proc = pe_spawn_process(NULL, path, priv);
             if (!proc) return -ENOENT;
@@ -134,7 +157,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             int fd = (int)a1;
             const char *buf = (const char *)a2;
             size_t count = (size_t)a3;
-            if (!buf) return -EFAULT;
+            if (!validate_user_buffer(buf, count, curr->privilege_level)) return -EFAULT;
 
             if (fd == 1 || fd == 2) {
                 for (size_t i = 0; i < count; i++) {
@@ -152,7 +175,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             int fd = (int)a1;
             char *buf = (char *)a2;
             size_t count = (size_t)a3;
-            if (!buf) return -EFAULT;
+            if (!validate_user_buffer(buf, count, curr->privilege_level)) return -EFAULT;
 
             if (fd == 0) {
                 size_t read_bytes = 0;
@@ -180,7 +203,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
         case SYS_UNLINK: {
             const char *path = (const char *)a1;
             uint64_t flags = a2;
-            if (!path) return -EFAULT;
+            if (!validate_user_str(path, 256, curr->privilege_level)) return -EFAULT;
             vfs_node_t *node = vfs_find_node(path);
             if ((is_protected_path(path) || (node && node->is_protected)) && curr->privilege_level != PRIV_KERNEL) {
                 return -EPERM;
@@ -198,7 +221,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
 
         case SYS_MKDIR: {
             const char *path = (const char *)a1;
-            if (!path) return -EFAULT;
+            if (!validate_user_str(path, 256, curr->privilege_level)) return -EFAULT;
             if (is_protected_path(path) && curr->privilege_level != PRIV_KERNEL) {
                 return -EPERM;
             }
@@ -208,7 +231,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
 
         case SYS_CHDIR: {
             const char *path = (const char *)a1;
-            if (!path) return -EFAULT;
+            if (!validate_user_str(path, 256, curr->privilege_level)) return -EFAULT;
             int res = vfs_chdir(path);
             if (res == 0) {
                 strncpy(curr->cwd, vfs_getcwd(), sizeof(curr->cwd) - 1);
@@ -220,7 +243,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
         case SYS_GETCWD: {
             char *buf = (char *)a1;
             size_t size = (size_t)a2;
-            if (!buf || size == 0) return -EINVAL;
+            if (!validate_user_buffer(buf, size, curr->privilege_level) || size == 0) return -EINVAL;
             strncpy(buf, vfs_getcwd(), size - 1);
             buf[size - 1] = '\0';
             return 0;
@@ -228,7 +251,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
 
         case SYS_TIME: {
             rtc_datetime_t *out = (rtc_datetime_t *)a1;
-            if (!out) return -EFAULT;
+            if (!validate_user_buffer(out, sizeof(rtc_datetime_t), curr->privilege_level)) return -EFAULT;
             return (int64_t)rtc_get_datetime(out);
         }
 
@@ -242,6 +265,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
 
         case SYS_READDIR: {
             const char *path = (const char *)a1;
+            if (!validate_user_str(path, 256, curr->privilege_level)) return -EFAULT;
             vfs_listdir(path);
             return 0;
         }
@@ -289,7 +313,8 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
         case SYS_STAT: {
             const char *path = (const char *)a1;
             vfs_stat_t *st = (vfs_stat_t *)a2;
-            if (!path || !st) return -EFAULT;
+            if (!validate_user_str(path, 256, curr->privilege_level) ||
+                !validate_user_buffer(st, sizeof(vfs_stat_t), curr->privilege_level)) return -EFAULT;
             vfs_node_t *node = vfs_find_node(path);
             if (!node) return -ENOENT;
             st->size = (uint32_t)node->size;
@@ -306,7 +331,8 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             char *buf = (char *)a2;
             size_t max_len = (size_t)a3;
             size_t offset = (size_t)a4;
-            if (!path || !buf || max_len == 0) return -EFAULT;
+            if (!validate_user_str(path, 256, curr->privilege_level) ||
+                !validate_user_buffer(buf, max_len, curr->privilege_level) || max_len == 0) return -EFAULT;
             int res = vfs_read_file_offset(path, buf, max_len, offset);
             return (int64_t)res;
         }
@@ -316,7 +342,8 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             const void *buf = (const void *)a2;
             size_t size = (size_t)a3;
             int append = (int)a4;
-            if (!path || !buf) return -EFAULT;
+            if (!validate_user_str(path, 256, curr->privilege_level) ||
+                !validate_user_buffer(buf, size, curr->privilege_level)) return -EFAULT;
             vfs_node_t *node = vfs_find_node(path);
             if ((is_protected_path(path) || (node && node->is_protected)) && curr->privilege_level != PRIV_KERNEL) {
                 return -EPERM;
@@ -327,7 +354,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
 
         case SYS_GET_BOOTINFO: {
             BootInfo *out = (BootInfo *)a1;
-            if (!out) return -EFAULT;
+            if (!validate_user_buffer(out, sizeof(BootInfo), curr->privilege_level)) return -EFAULT;
             if (g_boot_info_global) {
                 memcpy(out, g_boot_info_global, sizeof(BootInfo));
                 return 0;
@@ -393,7 +420,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
         case SYS_GET_PROMPT_PATH: {
             char *buf = (char *)a1;
             size_t size = (size_t)a2;
-            if (!buf || size == 0) return -EINVAL;
+            if (!validate_user_buffer(buf, size, curr->privilege_level) || size == 0) return -EINVAL;
             fs_get_prompt_path(buf, size);
             return 0;
         }
@@ -405,18 +432,20 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             const char *path = (const char *)a1;
             char *buf = (char *)a2;
             size_t size = (size_t)a3;
+            if (!validate_user_str(path, 256, curr->privilege_level) ||
+                !validate_user_buffer(buf, size, curr->privilege_level)) return -EFAULT;
             return (int64_t)vfs_listdir_names(path, buf, size);
         }
 
         case SYS_GET_MOUSE_EVENT: {
             mouse_event_t *ev = (mouse_event_t *)a1;
-            if (!ev) return -EFAULT;
+            if (!validate_user_buffer(ev, sizeof(mouse_event_t), curr->privilege_level)) return -EFAULT;
             return (int64_t)mice_get_event(ev);
         }
 
         case SYS_GET_MOUSE_STATE: {
             mouse_state_t *st = (mouse_state_t *)a1;
-            if (!st) return -EFAULT;
+            if (!validate_user_buffer(st, sizeof(mouse_state_t), curr->privilege_level)) return -EFAULT;
             mice_get_state(st);
             return 0;
         }
@@ -425,27 +454,35 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             return (int64_t)sys_socket((int)a1, (int)a2, (int)a3);
 
         case SYS_BIND:
+            if (!validate_user_buffer((const void *)a2, sizeof(sockaddr_un_t), curr->privilege_level)) return -EFAULT;
             return (int64_t)sys_bind((int)a1, (const sockaddr_un_t *)a2, (size_t)a3);
 
         case SYS_CONNECT:
+            if (!validate_user_buffer((const void *)a2, sizeof(sockaddr_un_t), curr->privilege_level)) return -EFAULT;
             return (int64_t)sys_connect((int)a1, (const sockaddr_un_t *)a2, (size_t)a3);
 
         case SYS_LISTEN:
             return (int64_t)sys_listen((int)a1, (int)a2);
 
         case SYS_ACCEPT:
+            if (a2 && !validate_user_buffer((void *)a2, sizeof(sockaddr_un_t), curr->privilege_level)) return -EFAULT;
+            if (a3 && !validate_user_buffer((void *)a3, sizeof(size_t), curr->privilege_level)) return -EFAULT;
             return (int64_t)sys_accept((int)a1, (sockaddr_un_t *)a2, (size_t *)a3);
 
         case SYS_SEND:
+            if (!validate_user_buffer((const void *)a2, (size_t)a3, curr->privilege_level)) return -EFAULT;
             return sys_send((int)a1, (const void *)a2, (size_t)a3, (int)a4);
 
         case SYS_RECV:
+            if (!validate_user_buffer((void *)a2, (size_t)a3, curr->privilege_level)) return -EFAULT;
             return sys_recv((int)a1, (void *)a2, (size_t)a3, (int)a4);
 
         case SYS_POLL:
+            if (a2 > 0 && !validate_user_buffer((void *)a1, (size_t)a2 * sizeof(pollfd_t), curr->privilege_level)) return -EFAULT;
             return (int64_t)sys_poll((pollfd_t *)a1, (size_t)a2, (int)a3);
 
         case SYS_SHM_CREATE:
+            if (!validate_user_str((const char *)a1, SHM_NAME_MAX, curr->privilege_level)) return -EFAULT;
             return (int64_t)sys_shm_create((const char *)a1, (size_t)a2);
 
         case SYS_SHM_MAP:
@@ -458,11 +495,17 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             return (int64_t)sys_shm_close((int)a1);
 
         case SYS_PANIC: {
+            if (curr->privilege_level != PRIV_KERNEL) {
+                return -EPERM;
+            }
             const char *reason = (const char *)a1;
+            if (reason && !validate_user_str(reason, 256, curr->privilege_level)) {
+                reason = "privileged requested kernel panic";
+            }
             panic_context_t pctx;
             memset(&pctx, 0, sizeof(pctx));
             pctx.rsp = g_syscall_user_rsp;
-            kernel_panic(reason ? reason : "userland requested kernel panic", &pctx);
+            kernel_panic(reason ? reason : "privileged requested kernel panic", &pctx);
             return 0;
         }
 

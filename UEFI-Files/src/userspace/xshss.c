@@ -1796,7 +1796,10 @@ static void execute_command_internal(char *cmd_line) {
             volatile uint64_t *bad_ptr = (volatile uint64_t *)0x00000080DEAD0000ULL;
             *bad_ptr = 0xCAFEBABE;
         }
-        syscall(SYS_PANIC, (uint64_t)(uintptr_t)(arg && arg[0] ? arg : "manual panic triggered from shell"), 0, 0, 0, 0);
+        int64_t res = syscall(SYS_PANIC, (uint64_t)(uintptr_t)(arg && arg[0] ? arg : "manual panic triggered from shell"), 0, 0, 0, 0);
+        if (res == -EPERM) {
+            puts("panic: permission denied: kernel panic requires 'sudo' or KERNEL mode\n");
+        }
     } else if (strcmp(cmd, "kernel") == 0 || strcmp(cmd, "su") == 0) {
         syscall(SYS_ELEVATE, 0, 0, 0, 0, 0);
         env_set("USER", "kernel");

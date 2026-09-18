@@ -1,4 +1,4 @@
-﻿#include "ipc.h"
+#include "ipc.h"
 #include "syscall.h"
 #include "process.h"
 #include "scheduler.h"
@@ -135,13 +135,9 @@ int sys_accept(int sockfd, sockaddr_un_t *addr, size_t *addrlen) {
     process_t *curr = process_get_current();
     uint32_t pid = curr ? curr->pid : 0;
 
-    /* If no connection is pending, yield or wait */
-    uint64_t start_ticks = pit_get_ticks();
-    while (sock->pending_count == 0) {
-        scheduler_yield();
-        if (pit_get_ticks() - start_ticks > 500) {
-            return -EAGAIN;
-        }
+    /* If no connection is pending, return -EAGAIN immediately */
+    if (sock->pending_count == 0) {
+        return -EAGAIN;
     }
 
     int conn_idx = sock->pending_conns[sock->pending_tail];
@@ -168,7 +164,7 @@ int sys_connect(int sockfd, const sockaddr_un_t *addr, size_t addrlen) {
     if (addr->sun_family != AF_UNIX) return -EINVAL;
 
     ipc_socket_t *client_sock = &g_sockets[idx];
-    if (client_sock->state == SOCK_STATE_CONNECTED) return -EISDIR;
+    if (client_sock->state == SOCK_STATE_CONNECTED) return -EISCONN;
 
     /* Find listening socket matching addr->sun_path */
     int srv_idx = -1;
@@ -314,6 +310,19 @@ int sys_close_socket(int sockfd) {
             peer->state = SOCK_STATE_DISCONNECTED;
             peer->peer_idx = -1;
         }
+    }
+
+    /* If listening, drain and close any pending unaccepted connections */
+    if (sock->is_listening) {
+        while (sock->pending_count > 0) {
+            int p_idx = sock->pending_conns[sock->pending_tail];
+            sock->pending_tail = (sock->pending_tail + 1) % MAX_PENDING_CONNS;
+            sock->pending_count--;
+            if (p_idx >= 0 && p_idx < MAX_SOCKETS && g_sockets[p_idx].in_use) {
+                sys_close_socket(idx_to_fd(p_idx));
+            }
+        }
+        sock->is_listening = 0;
     }
 
     sock->in_use = 0;

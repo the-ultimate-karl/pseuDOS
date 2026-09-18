@@ -24,7 +24,10 @@
 void vmm_init(const BootInfo *boot_info);
 int vmm_map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
 int vmm_map_pages(uint64_t *pml4, uint64_t virt, uint64_t phys, size_t count, uint64_t flags);
+int vmm_unmap_page(uint64_t *pml4, uint64_t virt);
+int vmm_unmap_pages(uint64_t *pml4, uint64_t virt, size_t count);
 uint64_t *vmm_create_user_address_space(void);
+void vmm_destroy_user_address_space(uint64_t *pml4);
 void vmm_switch_address_space(uint64_t *pml4);
 uint64_t *vmm_get_kernel_pml4(void);
 

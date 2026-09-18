@@ -61,6 +61,8 @@ process_t *process_create(const char *name, void (*entry)(void), process_privile
 process_t *process_get_current(void);
 void process_set_current(process_t *proc);
 process_t *process_get_by_pid(uint32_t pid);
+process_t *process_get_by_slot(int slot);
+int process_get_slot(const process_t *proc);
 int process_kill(uint32_t pid);
 void process_exit(int exit_code);
 void process_dump_list(void);

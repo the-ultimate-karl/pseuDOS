@@ -2,6 +2,7 @@
 #include "io.h"
 #include "lib.h"
 #include "klog.h"
+#include "pit.h"
 
 #define PS2_DATA_PORT    0x60
 #define PS2_STATUS_PORT  0x64
@@ -25,6 +26,7 @@ static int g_has_wheel = 0;
 static int g_packet_size = 3;
 static uint8_t g_packet[4];
 static int g_packet_idx = 0;
+static uint64_t g_last_byte_tick = 0;
 static int g_mice_initialized = 0;
 
 static int mice_wait_write(void) {
@@ -156,6 +158,13 @@ void mice_handle_irq(void) {
         /* Not mouse data (keyboard) */
         return;
     }
+
+    uint64_t now = pit_get_ticks();
+    if (g_packet_idx > 0 && (now - g_last_byte_tick > 20)) {
+        /* Desync recovery: discard stale incomplete packet after 200ms idle */
+        g_packet_idx = 0;
+    }
+    g_last_byte_tick = now;
 
     uint8_t byte = inb(PS2_DATA_PORT);
 

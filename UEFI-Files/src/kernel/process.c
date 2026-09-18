@@ -41,6 +41,19 @@ process_t *process_get_by_pid(uint32_t pid) {
     return NULL;
 }
 
+process_t *process_get_by_slot(int slot) {
+    if (slot < 0 || slot >= MAX_PROCESSES) return NULL;
+    return &g_process_table[slot];
+}
+
+int process_get_slot(const process_t *proc) {
+    if (!proc) return -1;
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (&g_process_table[i] == proc) return i;
+    }
+    return -1;
+}
+
 static void process_trampoline(void) {
     process_t *p = process_get_current();
     if (p && p->entry) {
@@ -98,7 +111,7 @@ void process_free_resources(process_t *p) {
     shm_cleanup_process(p->pid);
 
     if (p->cr3 && p->cr3 != (uint64_t)(uintptr_t)vmm_get_kernel_pml4()) {
-        pmm_free_page(p->cr3);
+        vmm_destroy_user_address_space((uint64_t *)(uintptr_t)p->cr3);
         p->cr3 = 0;
     }
 

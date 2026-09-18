@@ -96,13 +96,14 @@ void scheduler_schedule(interrupt_frame_t *frame, registers_t *regs) {
         prev->state = PROCESS_STATE_READY;
     }
 
-    /* 2. Find next READY process in round-robin order */
+    /* 2. Find next READY process in round-robin order by slot index */
     process_t *next = NULL;
-    uint32_t current_pid = prev ? prev->pid : 0;
+    int current_slot = process_get_slot(prev);
+    if (current_slot < 0) current_slot = 0;
 
-    for (uint32_t i = 1; i <= MAX_PROCESSES; i++) {
-        uint32_t check_pid = (current_pid + i) % MAX_PROCESSES;
-        process_t *p = process_get_by_pid(check_pid);
+    for (int i = 1; i <= MAX_PROCESSES; i++) {
+        int check_slot = (current_slot + i) % MAX_PROCESSES;
+        process_t *p = process_get_by_slot(check_slot);
         if (p && p->state == PROCESS_STATE_READY) {
             next = p;
             break;

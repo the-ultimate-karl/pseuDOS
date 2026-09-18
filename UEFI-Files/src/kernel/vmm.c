@@ -113,6 +113,39 @@ int vmm_map_pages(uint64_t *pml4, uint64_t virt, uint64_t phys, size_t count, ui
     return 0;
 }
 
+int vmm_unmap_page(uint64_t *pml4, uint64_t virt) {
+    if (!pml4) return -1;
+
+    size_t pml4_idx = (virt >> 39) & 0x1FF;
+    size_t pdpt_idx = (virt >> 30) & 0x1FF;
+    size_t pd_idx   = (virt >> 21) & 0x1FF;
+    size_t pt_idx   = (virt >> 12) & 0x1FF;
+
+    if (!(pml4[pml4_idx] & PTE_PRESENT)) return 0;
+    uint64_t *pdpt = (uint64_t *)(uintptr_t)(pml4[pml4_idx] & ~0xFFFULL);
+
+    if (!(pdpt[pdpt_idx] & PTE_PRESENT)) return 0;
+    uint64_t *pd = (uint64_t *)(uintptr_t)(pdpt[pdpt_idx] & ~0xFFFULL);
+
+    if (!(pd[pd_idx] & PTE_PRESENT)) return 0;
+    if (pd[pd_idx] & PTE_HUGE) return -1;
+
+    uint64_t *pt = (uint64_t *)(uintptr_t)(pd[pd_idx] & ~0xFFFULL);
+    pt[pt_idx] = 0;
+
+    __asm__ volatile ("invlpg (%0)" : : "r"(virt) : "memory");
+    return 0;
+}
+
+int vmm_unmap_pages(uint64_t *pml4, uint64_t virt, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (vmm_unmap_page(pml4, virt + (i * PAGE_SIZE)) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 uint64_t *vmm_create_user_address_space(void) {
     if (!g_kernel_pml4) return NULL;
 
@@ -131,6 +164,44 @@ uint64_t *vmm_create_user_address_space(void) {
     new_pml4[0] = g_kernel_pml4[0] | PTE_USER | PTE_WRITABLE;
 
     return new_pml4;
+}
+
+void vmm_destroy_user_address_space(uint64_t *pml4) {
+    if (!pml4 || pml4 == g_kernel_pml4) return;
+
+    /* Free all dynamically allocated page tables in user half (entries 0..255) */
+    for (size_t i = 0; i < 256; i++) {
+        /* Skip entry 0 if it shares the kernel's identity PDPT */
+        if (i == 0 && g_kernel_pml4 && (pml4[0] & ~0xFFFULL) == (g_kernel_pml4[0] & ~0xFFFULL)) {
+            continue;
+        }
+
+        if (pml4[i] & PTE_PRESENT) {
+            uint64_t pdpt_phys = pml4[i] & ~0xFFFULL;
+            uint64_t *pdpt = (uint64_t *)(uintptr_t)pdpt_phys;
+
+            for (size_t j = 0; j < 512; j++) {
+                if (pdpt[j] & PTE_PRESENT) {
+                    uint64_t pd_phys = pdpt[j] & ~0xFFFULL;
+                    uint64_t *pd = (uint64_t *)(uintptr_t)pd_phys;
+
+                    if (!(pdpt[j] & PTE_HUGE)) {
+                        for (size_t k = 0; k < 512; k++) {
+                            if ((pd[k] & PTE_PRESENT) && !(pd[k] & PTE_HUGE)) {
+                                uint64_t pt_phys = pd[k] & ~0xFFFULL;
+                                pmm_free_page(pt_phys);
+                            }
+                        }
+                    }
+                    pmm_free_page(pd_phys);
+                }
+            }
+            pmm_free_page(pdpt_phys);
+        }
+    }
+
+    /* Finally free the top-level PML4 frame */
+    pmm_free_page((uint64_t)(uintptr_t)pml4);
 }
 
 void vmm_switch_address_space(uint64_t *pml4) {
