@@ -370,8 +370,9 @@ int fat32_sync_create_file(const char *path) {
     return -1;
 }
 
-int fat32_sync_write_file(const char *path, const char *text, int append) {
-    if (!g_is_fat32_mounted || !path || !text) return -1;
+int fat32_sync_write_file_bytes(const char *path, const void *data, size_t size, int append) {
+    if (!g_is_fat32_mounted || !path) return -1;
+    const uint8_t *src_bytes = (const uint8_t *)data;
 
     char file_name[64];
     uint32_t parent_cluster = find_path_parent_cluster(path, file_name);
@@ -394,7 +395,24 @@ int fat32_sync_write_file(const char *path, const char *text, int append) {
 
             if (memcmp(entries[i].name, dos_name, 11) == 0) {
                 uint32_t file_cluster = ((uint32_t)entries[i].fst_clus_hi << 16) | entries[i].fst_clus_lo;
-                size_t text_len = strlen(text);
+                uint32_t old_size = entries[i].file_size;
+                uint32_t new_size = (append && old_size > 0) ? (old_size + (uint32_t)size) : (uint32_t)size;
+
+                if (new_size == 0) {
+                    if (file_cluster >= 2 && file_cluster < 0x0FFFFFF8) {
+                        free_cluster_chain(file_cluster);
+                    }
+                    entries[i].fst_clus_hi = 0;
+                    entries[i].fst_clus_lo = 0;
+                    entries[i].file_size = 0;
+                    write_cluster(c, cluster_buf);
+                    if (g_sync_dev && g_sync_dev->flush) g_sync_dev->flush(g_sync_dev);
+                    return 0;
+                }
+
+                uint32_t clusters_needed = (new_size + g_sync_cluster_size - 1) / g_sync_cluster_size;
+                if (clusters_needed == 0) clusters_needed = 1;
+                if (clusters_needed > 2048) clusters_needed = 2048; /* Up to 8MB */
 
                 if (file_cluster < 2) {
                     file_cluster = alloc_free_cluster();
@@ -403,30 +421,70 @@ int fat32_sync_write_file(const char *path, const char *text, int append) {
                     entries[i].fst_clus_lo = (uint16_t)(file_cluster & 0xFFFF);
                 }
 
-                uint8_t data_buf[4096];
-                memset(data_buf, 0, sizeof(data_buf));
+                /* Build or expand cluster chain */
+                uint32_t chain[2048];
+                uint32_t chain_len = 0;
+                uint32_t cur_c = file_cluster;
+                chain[chain_len++] = cur_c;
 
-                if (append && entries[i].file_size > 0) {
-                    read_cluster(file_cluster, data_buf);
-                    size_t cur_sz = entries[i].file_size;
-                    size_t to_copy = text_len;
-                    if (cur_sz + to_copy > sizeof(data_buf)) {
-                        to_copy = sizeof(data_buf) - cur_sz;
+                while (chain_len < clusters_needed) {
+                    uint32_t next = get_fat_entry(cur_c);
+                    if (next < 2 || next >= 0x0FFFFFF8) {
+                        uint32_t new_c = alloc_free_cluster();
+                        if (new_c == 0) break;
+                        set_fat_entry(cur_c, new_c);
+                        cur_c = new_c;
+                    } else {
+                        cur_c = next;
                     }
-                    memcpy(data_buf + cur_sz, text, to_copy);
-                    entries[i].file_size = (uint32_t)(cur_sz + to_copy);
-                } else {
-                    size_t to_copy = text_len > sizeof(data_buf) ? sizeof(data_buf) : text_len;
-                    memcpy(data_buf, text, to_copy);
-                    entries[i].file_size = (uint32_t)to_copy;
+                    chain[chain_len++] = cur_c;
                 }
 
-                write_cluster(file_cluster, data_buf);
+                /* Mark end of cluster chain */
+                uint32_t trailing = get_fat_entry(cur_c);
+                set_fat_entry(cur_c, 0x0FFFFFFF);
+
+                /* Free any excess clusters if file shrank */
+                if (trailing >= 2 && trailing < 0x0FFFFFF8) {
+                    free_cluster_chain(trailing);
+                }
+
+                /* Write data across the cluster chain */
+                uint8_t data_buf[4096];
+                size_t src_pos = 0;
+
+                for (uint32_t k = 0; k < chain_len; k++) {
+                    uint32_t clus_id = chain[k];
+                    uint32_t clus_file_offset = k * g_sync_cluster_size;
+
+                    memset(data_buf, 0, sizeof(data_buf));
+
+                    if (append && old_size > 0 && clus_file_offset < old_size) {
+                        read_cluster(clus_id, data_buf);
+                        uint32_t start_in_clus = old_size - clus_file_offset;
+                        if (start_in_clus < g_sync_cluster_size && src_pos < size) {
+                            uint32_t to_write = g_sync_cluster_size - start_in_clus;
+                            if (to_write > (uint32_t)(size - src_pos)) to_write = (uint32_t)(size - src_pos);
+                            if (src_bytes) memcpy(data_buf + start_in_clus, src_bytes + src_pos, to_write);
+                            src_pos += to_write;
+                        }
+                    } else {
+                        if (src_pos < size) {
+                            uint32_t to_write = g_sync_cluster_size;
+                            if (to_write > (uint32_t)(size - src_pos)) to_write = (uint32_t)(size - src_pos);
+                            if (src_bytes) memcpy(data_buf, src_bytes + src_pos, to_write);
+                            src_pos += to_write;
+                        }
+                    }
+                    write_cluster(clus_id, data_buf);
+                }
+
+                entries[i].file_size = new_size;
                 write_cluster(c, cluster_buf);
                 if (g_sync_dev && g_sync_dev->flush) {
                     g_sync_dev->flush(g_sync_dev);
                 }
-                return (int)entries[i].file_size;
+                return (int)new_size;
             }
         }
         c = get_fat_entry(c);
@@ -434,10 +492,15 @@ int fat32_sync_write_file(const char *path, const char *text, int append) {
 
     /* If file doesn't exist, create it then write */
     if (fat32_sync_create_file(path) == 0) {
-        return fat32_sync_write_file(path, text, 0);
+        return fat32_sync_write_file_bytes(path, data, size, 0);
     }
 
     return -1;
+}
+
+int fat32_sync_write_file(const char *path, const char *text, int append) {
+    if (!text) return -1;
+    return fat32_sync_write_file_bytes(path, text, strlen(text), append);
 }
 
 int fat32_sync_mkdir(const char *path) {
@@ -588,7 +651,7 @@ int fat32_sync_delete_node(const char *path, int is_dir) {
         c = get_fat_entry(c);
     }
 
-    return -1;
+    return -2; /* Not found on physical disk (e.g. RAM-only / virtual node) */
 }
 
 static void load_fat32_dir_recursive(uint32_t dir_cluster, const char *vfs_parent_path) {
@@ -662,13 +725,25 @@ static void load_fat32_dir_recursive(uint32_t dir_cluster, const char *vfs_paren
     }
 }
 
-int fat32_mount_disk(StorageDevice *dev) {
-    if (!dev || !dev->read_sectors || !dev->write_sectors) return -1;
+int fat32_mount_to_path(StorageDevice *dev, const char *mount_path) {
+    if (!dev || !dev->read_sectors) return -1;
 
     StorageFsInfo info;
     if (storage_inspect_fs(dev, &info) != 0 || !info.has_filesystem) {
         return -1;
     }
+
+    StorageDevice *prev_dev = g_sync_dev;
+    uint64_t prev_part_lba = g_sync_part_lba;
+    uint32_t prev_spc = g_sync_spc;
+    uint32_t prev_bps = g_sync_bps;
+    uint32_t prev_cluster_size = g_sync_cluster_size;
+    uint32_t prev_reserved = g_sync_reserved_sectors;
+    uint32_t prev_num_fats = g_sync_num_fats;
+    uint32_t prev_fat_size = g_sync_fat_size_sectors;
+    uint32_t prev_root_cluster = g_sync_root_cluster;
+    uint64_t prev_data_lba = g_sync_data_lba_base;
+    int prev_mounted = g_is_fat32_mounted;
 
     g_sync_dev = dev;
     g_sync_part_lba = info.part_start_lba;
@@ -680,14 +755,31 @@ int fat32_mount_disk(StorageDevice *dev) {
     g_sync_fat_size_sectors = info.fat_size_sectors;
     g_sync_root_cluster = info.root_cluster > 0 ? info.root_cluster : 2;
     g_sync_data_lba_base = g_sync_part_lba + g_sync_reserved_sectors + (uint64_t)g_sync_num_fats * g_sync_fat_size_sectors;
-    g_is_fat32_mounted = 0; /* Keep disabled during initial load */
+    g_is_fat32_mounted = 0;
 
-    /* Load actual directory tree from disk sectors */
-    load_fat32_dir_recursive(g_sync_root_cluster, "/");
-    vfs_chdir("/");
+    vfs_mkdir(mount_path);
+    load_fat32_dir_recursive(g_sync_root_cluster, mount_path);
 
-    /* Enable live sync write-through */
-    g_is_fat32_mounted = 1;
+    if (strcmp(mount_path, "/") == 0) {
+        vfs_chdir("/");
+        g_is_fat32_mounted = 1;
+    } else {
+        g_sync_dev = prev_dev;
+        g_sync_part_lba = prev_part_lba;
+        g_sync_spc = prev_spc;
+        g_sync_bps = prev_bps;
+        g_sync_cluster_size = prev_cluster_size;
+        g_sync_reserved_sectors = prev_reserved;
+        g_sync_num_fats = prev_num_fats;
+        g_sync_fat_size_sectors = prev_fat_size;
+        g_sync_root_cluster = prev_root_cluster;
+        g_sync_data_lba_base = prev_data_lba;
+        g_is_fat32_mounted = prev_mounted;
+    }
 
     return 0;
+}
+
+int fat32_mount_disk(StorageDevice *dev) {
+    return fat32_mount_to_path(dev, "/");
 }

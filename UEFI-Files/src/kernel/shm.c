@@ -6,8 +6,7 @@
 #include "lib.h"
 #include "klog.h"
 #include "bootinfo.h"
-
-extern const BootInfo *g_boot_info_global;
+#include "drivers.h"
 
 static shm_region_t g_shm_regions[MAX_SHM_REGIONS];
 
@@ -121,32 +120,94 @@ void *sys_shm_map(int shm_id, void *addr_hint, int flags) {
     if (addr_hint && (((uintptr_t)addr_hint & 0xFFFULL) == 0)) {
         virt = (uint64_t)(uintptr_t)addr_hint;
     } else {
-        /* Standard virtual memory mapping window for SHM: 0x0000000080000000 + (id * 16MB) */
-        virt = 0x0000000080000000ULL + ((uint64_t)shm_id * 0x01000000ULL);
+        /* Standard virtual memory mapping window for SHM in PML4[1]: 0x0000008000000000 + (id * 32MB) */
+        virt = 0x0000008000000000ULL + ((uint64_t)shm_id * 0x02000000ULL);
     }
 
     uint64_t pte_flags = PTE_PRESENT | PTE_USER;
     if (flags & SHM_WRITE) {
         pte_flags |= PTE_WRITABLE;
     }
+    if (reg->is_framebuffer) {
+        pte_flags |= PTE_PWT; /* PAT Entry 1: Write-Combining (WC) hardware acceleration */
+    }
 
     for (size_t i = 0; i < reg->num_pages; i++) {
         uint64_t v = virt + (i * PAGE_SIZE);
         uint64_t p = reg->phys_addr + (i * PAGE_SIZE);
         if (vmm_map_page(pml4, v, p, pte_flags) != 0) {
+            if (i > 0) {
+                vmm_unmap_pages(pml4, virt, i);
+            }
             return NULL;
         }
     }
 
     /* Track mapped virtual address for calling process */
+    int client_found = 0;
     for (int c = 0; c < MAX_SHM_CLIENTS; c++) {
         if (reg->clients[c].ref_count > 0 && reg->clients[c].pid == pid) {
             reg->clients[c].virt_addr = virt;
+            client_found = 1;
             break;
         }
     }
+    if (!client_found) {
+        for (int c = 0; c < MAX_SHM_CLIENTS; c++) {
+            if (reg->clients[c].ref_count == 0) {
+                reg->clients[c].pid = pid;
+                reg->clients[c].ref_count = 1;
+                reg->clients[c].virt_addr = virt;
+                reg->ref_count++;
+                break;
+            }
+        }
+    }
+
+    if (reg->is_framebuffer) {
+        console_set_fb_output(0);
+    }
 
     return (void *)(uintptr_t)virt;
+}
+
+static int shm_region_has_active_mappings(const shm_region_t *reg) {
+    if (!reg) return 0;
+    for (int c = 0; c < MAX_SHM_CLIENTS; c++) {
+        if (reg->clients[c].virt_addr != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void shm_free_region_if_ready(shm_region_t *reg) {
+    if (!reg || !reg->in_use) return;
+    /* Never free physical memory while any client holds a mapped virtual address */
+    if (shm_region_has_active_mappings(reg)) {
+        return;
+    }
+    if (reg->ref_count <= 0 || reg->marked_for_deletion) {
+        if (!reg->is_framebuffer && reg->phys_addr) {
+            pmm_free_pages(reg->phys_addr, reg->num_pages);
+        }
+        if (reg->is_framebuffer) {
+            console_set_fb_output(1);
+        }
+        reg->in_use = 0;
+        reg->marked_for_deletion = 0;
+        klog_info("Closed shared memory region %d '%s'", reg->id, reg->name);
+    }
+}
+
+void shm_update_framebuffer(uint64_t phys_base, size_t new_size) {
+    for (int i = 0; i < MAX_SHM_REGIONS; i++) {
+        if (g_shm_regions[i].in_use && g_shm_regions[i].is_framebuffer) {
+            g_shm_regions[i].phys_addr = phys_base;
+            g_shm_regions[i].size = new_size;
+            g_shm_regions[i].num_pages = (new_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        }
+    }
 }
 
 int sys_shm_unmap(void *addr) {
@@ -166,6 +227,9 @@ int sys_shm_unmap(void *addr) {
             if (reg->clients[c].ref_count > 0 && reg->clients[c].pid == pid && reg->clients[c].virt_addr == virt) {
                 vmm_unmap_pages(pml4, virt, reg->num_pages);
                 reg->clients[c].virt_addr = 0;
+                reg->clients[c].ref_count--;
+                reg->ref_count--;
+                shm_free_region_if_ready(reg);
                 return 0;
             }
         }
@@ -183,6 +247,7 @@ int sys_shm_close(int shm_id) {
     uint32_t pid = curr ? curr->pid : 0;
     uint64_t *pml4 = (curr && curr->cr3) ? (uint64_t *)(uintptr_t)curr->cr3 : vmm_get_kernel_pml4();
 
+    int client_found = 0;
     for (int c = 0; c < MAX_SHM_CLIENTS; c++) {
         if (reg->clients[c].ref_count > 0 && reg->clients[c].pid == pid) {
             reg->clients[c].ref_count--;
@@ -190,17 +255,17 @@ int sys_shm_close(int shm_id) {
                 vmm_unmap_pages(pml4, reg->clients[c].virt_addr, reg->num_pages);
                 reg->clients[c].virt_addr = 0;
             }
+            client_found = 1;
             break;
         }
     }
 
-    reg->ref_count--;
-    if (reg->ref_count <= 0) {
-        if (!reg->is_framebuffer && reg->phys_addr) {
-            pmm_free_pages(reg->phys_addr, reg->num_pages);
+    if (client_found) {
+        reg->ref_count--;
+        if (reg->ref_count <= 0) {
+            reg->marked_for_deletion = 1;
         }
-        reg->in_use = 0;
-        klog_info("Closed shared memory region %d '%s'", reg->id, reg->name);
+        shm_free_region_if_ready(reg);
     }
     return 0;
 }
@@ -224,13 +289,9 @@ void shm_cleanup_process(uint32_t pid) {
                 reg->ref_count -= count;
 
                 if (reg->ref_count <= 0) {
-                    if (!reg->is_framebuffer && reg->phys_addr) {
-                        pmm_free_pages(reg->phys_addr, reg->num_pages);
-                    }
-                    reg->in_use = 0;
-                    klog_info("Closed shared memory region %d '%s' (cleaned up for PID %u)",
-                              reg->id, reg->name, (unsigned int)pid);
+                    reg->marked_for_deletion = 1;
                 }
+                shm_free_region_if_ready(reg);
                 break;
             }
         }

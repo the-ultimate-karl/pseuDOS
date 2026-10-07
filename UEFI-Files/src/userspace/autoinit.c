@@ -15,35 +15,52 @@ static void puts(const char *str) {
 }
 
 void autoinit_main(void) {
-    /* 1. Query Boot Information to discover configured shell path */
+    /* 0. Enforce single-instance invariant: autoinit must be PID 1 */
+    int64_t my_pid = syscall(SYS_GETPID, 0, 0, 0, 0, 0);
+    if (my_pid != 1) {
+        puts("[autoinit] CRITICAL: Unexpected second instance of init process detected!\n");
+        syscall(SYS_PANIC, (uint64_t)(uintptr_t)"unexpected second instance of init process detected!", 0, 0, 0, 0);
+        while (1) {
+            syscall(SYS_SLEEP, 1000, 0, 0, 0, 0);
+        }
+    }
+
+    puts("[autoinit] init supervisor starting up...\n");
+
+    /* 1. Query Boot Information to discover configured shell/session path */
     BootInfo bi;
-    char shell_path[128] = "/protected/crit/xshss.bin";
+    char target_path[128] = "/protected/gui/superglue.exe";
 
     int64_t ret = syscall(SYS_GET_BOOTINFO, (uint64_t)(uintptr_t)&bi, 0, 0, 0, 0);
     if (ret == 0 && bi.shell_path[0] != '\0') {
         size_t i = 0, j = 0;
-        while (bi.shell_path[i] != '\0' && j < sizeof(shell_path) - 1) {
-            shell_path[j++] = (bi.shell_path[i] == '\\') ? '/' : bi.shell_path[i];
+        while (bi.shell_path[i] != '\0' && j < sizeof(target_path) - 1) {
+            target_path[j++] = (bi.shell_path[i] == '\\') ? '/' : bi.shell_path[i];
             i++;
         }
-        shell_path[j] = '\0';
+        target_path[j] = '\0';
     }
 
-    /* 2. Supervise Interactive Shell Subsystem */
+    /* 2. Supervise session process */
     while (1) {
-        int64_t child_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)shell_path, 0, 0, 0, 0);
+        int64_t child_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)target_path, 1, 0, 0, 0);
         if (child_pid <= 0) {
-            child_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/crit/xshss.bin", 0, 0, 0, 0);
+            /* Try default superglue.exe if target_path was different */
+            child_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/gui/superglue.exe", 1, 0, 0, 0);
             if (child_pid <= 0) {
-                puts("[autoinit] CRITICAL: unable to launch shell. triggering kernel panic!\n");
-                syscall(SYS_PANIC, (uint64_t)(uintptr_t)"autoinit: unable to execute shell subsystem", 0, 0, 0, 0);
-                while (1) {
-                    syscall(SYS_SLEEP, 1000, 0, 0, 0, 0);
+                puts("[autoinit] WARNING: failed to spawn superglue.exe, falling back to xshss.exe\n");
+                child_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/crit/xshss.exe", 1, 0, 0, 0);
+                if (child_pid <= 0) {
+                    puts("[autoinit] CRITICAL: unable to spawn userland processes\n");
+                    syscall(SYS_PANIC, (uint64_t)(uintptr_t)"unable to spawn userland processes", 0, 0, 0, 0);
+                    while (1) {
+                        syscall(SYS_SLEEP, 1000, 0, 0, 0, 0);
+                    }
                 }
             }
         }
 
-        puts("[autoinit] sucessfully spawned experimental shell subsystem, transitioning...\n");
+        puts("[autoinit] successfully spawned userland session, supervising...\n");
 
         /* 3. Wait for child process termination */
         while (1) {
@@ -51,10 +68,10 @@ void autoinit_main(void) {
             if (waited == child_pid || waited < 0) {
                 break;
             }
-            syscall(SYS_SLEEP, 50, 0, 0, 0, 0);
+            syscall(SYS_SLEEP, 100, 0, 0, 0, 0);
         }
 
-        puts("\n[autoinit] shell subsystem exited; respawning in 1 second...\n");
+        puts("\n[autoinit] session process exited; respawning in 1 second...\n");
         syscall(SYS_SLEEP, 1000, 0, 0, 0, 0);
     }
 }

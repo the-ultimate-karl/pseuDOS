@@ -11,4 +11,7 @@ int pe_load_binary(const uint8_t *raw_file, size_t raw_size, void **out_image_ba
 /* Load PE32+ executable from VFS and create a runnable process */
 process_t *pe_spawn_process(const char *name, const char *path, process_privilege_t priv);
 
+/* Query last error code from PE loader / spawner */
+int pe_get_last_error(void);
+
 #endif /* PE_LOADER_H */

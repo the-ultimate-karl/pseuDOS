@@ -48,6 +48,7 @@ int vfs_init_initramfs(void);
 int vfs_mount_boot_media(const BootInfo *boot_info);
 int fat32_is_mounted(void);
 int fat32_sync_write_file(const char *path, const char *text, int append);
+int fat32_sync_write_file_bytes(const char *path, const void *data, size_t size, int append);
 int fat32_sync_create_file(const char *path);
 int fat32_sync_mkdir(const char *path);
 int fat32_sync_delete_node(const char *path, int is_dir);
@@ -72,5 +73,12 @@ void fs_init_devpath(const BootInfo *boot_info);
 void fs_get_prompt_path(char *out_buf, size_t max_len);
 void devpath_set_mode(devpath_mode_t mode);
 devpath_mode_t devpath_get_mode(void);
+
+/* VFS Mount Subsystem */
+int vfs_mount_device(const char *source, const char *target, const char *fstype, char *out_log, size_t out_cap);
+int vfs_umount_target(const char *target, char *out_log, size_t out_cap);
+int vfs_list_mounts(char *out_buf, size_t out_cap);
+int vfs_auto_mount_all(char *out_log, size_t out_cap);
+void vfs_refresh_mounts_dir(void);
 
 #endif /* FS_H */

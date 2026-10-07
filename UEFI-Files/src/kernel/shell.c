@@ -308,8 +308,19 @@ void cmd_screenres(const char *arg) {
     int res = fb_set_resolution((uint32_t)target_w, (uint32_t)target_h);
     if (res == 0) {
         console_printf("screenres: successfully switched resolution to %ux%u\n", (uint32_t)target_w, (uint32_t)target_h);
+        /* If GUI display server (ntfs.exe) is running, kill it so superglue can orchestrate a clean restart with new screen dimensions */
+        for (int s = 0; s < MAX_PROCESSES; s++) {
+            process_t *p = process_get_by_slot(s);
+            if (p && p->state != PROCESS_STATE_UNUSED && p->state != PROCESS_STATE_KILLED) {
+                if (strstr(p->name, "ntfs") != NULL) {
+                    process_kill(p->pid);
+                    break;
+                }
+            }
+        }
         return;
     }
+
 
     console_printf("screenres: display controller rejected mode %ldx%ld; keeping active mode %ux%u\n",
         target_w, target_h, fb_get_width(), fb_get_height());
@@ -453,6 +464,72 @@ void cmd_fs(const char *arg) {
     } else {
         console_printf("fs: invalid drive number '%s'. type 'attached-drives' to view available drives.\n", arg);
     }
+}
+
+void cmd_mount(const char *arg) {
+    char buf[2048];
+    buf[0] = '\0';
+    if (!arg || arg[0] == '\0') {
+        vfs_list_mounts(buf, sizeof(buf));
+        if (buf[0] != '\0') console_puts(buf);
+        return;
+    }
+    if (strcmp(arg, "-a") == 0) {
+        vfs_auto_mount_all(buf, sizeof(buf));
+        if (buf[0] != '\0') console_puts(buf);
+        return;
+    }
+    char src[64] = "";
+    char tgt[64] = "";
+    char fstype[32] = "auto";
+    char copy[256];
+    strncpy(copy, arg, sizeof(copy) - 1);
+    copy[sizeof(copy) - 1] = '\0';
+    char *tokens[8];
+    int ntokens = 0;
+    char *p = copy;
+    while (*p && ntokens < 8) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        tokens[ntokens++] = p;
+        while (*p && *p != ' ') p++;
+        if (*p) *p++ = '\0';
+    }
+    for (int i = 0; i < ntokens; i++) {
+        if (strcmp(tokens[i], "-t") == 0 && i + 1 < ntokens) {
+            strncpy(fstype, tokens[i + 1], sizeof(fstype) - 1);
+            i++;
+        } else if (src[0] == '\0') {
+            strncpy(src, tokens[i], sizeof(src) - 1);
+        } else if (tgt[0] == '\0') {
+            strncpy(tgt, tokens[i], sizeof(tgt) - 1);
+        }
+    }
+    if (src[0] == '\0') {
+        console_puts("usage: mount [-a] | mount <device> [target] [-t fstype]\n");
+        return;
+    }
+    if (tgt[0] == '\0') {
+        const char *s = src;
+        if (strncmp(s, "/dev/", 5) == 0) s += 5;
+        char tmp_tgt[64];
+        strcpy(tmp_tgt, "/mounts/");
+        strcat(tmp_tgt, s);
+        strncpy(tgt, tmp_tgt, sizeof(tgt) - 1);
+    }
+    vfs_mount_device(src, tgt, fstype, buf, sizeof(buf));
+    if (buf[0] != '\0') console_puts(buf);
+}
+
+void cmd_umount(const char *arg) {
+    if (!arg || arg[0] == '\0') {
+        console_puts("usage: umount <target | device>\n");
+        return;
+    }
+    char buf[1024];
+    buf[0] = '\0';
+    vfs_umount_target(arg, buf, sizeof(buf));
+    if (buf[0] != '\0') console_puts(buf);
 }
 
 void cmd_devpath(const char *arg) {
@@ -995,7 +1072,6 @@ void cmd_halt(void) {
 }
 
 void cmd_mem(void) {
-    extern const BootInfo *g_boot_info_global;
     const BootInfo *bi = g_boot_info ? g_boot_info : g_boot_info_global;
     if (bi) {
         memory_print_info(&bi->mem);
@@ -1066,8 +1142,12 @@ void shell_run(const BootInfo *boot_info) {
             cmd_attached_drives(arg);
         } else if (strcmp(cmd, "flash") == 0) {
             cmd_flash(arg);
-        } else if (strcmp(cmd, "fs") == 0 || strcmp(cmd, "mount") == 0 || strcmp(cmd, "df") == 0) {
+        } else if (strcmp(cmd, "fs") == 0 || strcmp(cmd, "df") == 0) {
             cmd_fs(arg);
+        } else if (strcmp(cmd, "mount") == 0) {
+            cmd_mount(arg);
+        } else if (strcmp(cmd, "umount") == 0 || strcmp(cmd, "unmount") == 0) {
+            cmd_umount(arg);
         } else if (strcmp(cmd, "devpath") == 0) {
             cmd_devpath(arg);
         } else if (strcmp(cmd, "ls") == 0 || strcmp(cmd, "dir") == 0) {
@@ -1119,9 +1199,9 @@ void shell_run(const BootInfo *boot_info) {
         } else if (strcmp(cmd, "clear") == 0 || strcmp(cmd, "cls") == 0) {
             console_clear();
         } else if (strcmp(cmd, "reboot") == 0) {
-            acpi_reboot();
+            system_shutdown_sequence(1);
         } else if (strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) {
-            acpi_shutdown();
+            system_shutdown_sequence(0);
         } else if (strcmp(cmd, "halt") == 0) {
             cmd_halt();
         } else {

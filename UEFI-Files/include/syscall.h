@@ -50,6 +50,7 @@
 #define SYS_GET_PROMPT_PATH  46
 #define SYS_UPTIME           47
 #define SYS_LISTDIR          48
+#define SYS_GET_ARGS         49
 #define SYS_GET_MOUSE_EVENT  50
 #define SYS_GET_MOUSE_STATE  51
 #define SYS_SOCKET           52
@@ -64,6 +65,10 @@
 #define SYS_SHM_MAP          61
 #define SYS_SHM_UNMAP        62
 #define SYS_SHM_CLOSE        63
+#define SYS_TTY_GET          64
+#define SYS_TTY_SET          65
+#define SYS_MOUNT            66
+#define SYS_UMOUNT           67
 #define SYS_PANIC            99
 
 /* VFS Node Types for SYS_STAT */
@@ -80,11 +85,29 @@ typedef struct {
     char date_modified[24];
 } vfs_stat_t;
 
+/* SYS_FLASH Operations & Structures */
+#define FLASH_OP_GET_COUNT    1
+#define FLASH_OP_GET_DEVICE   2
+#define FLASH_OP_INSTALL      3
+
+typedef struct {
+    char name[64];
+    char type_str[16];
+    char bus_speed[32];
+    char size_str[32];
+    char devpath[160];
+    uint32_t type;
+    uint32_t usb_version;
+    uint32_t raw_index;
+    uint64_t total_sectors;
+} flash_dev_info_t;
+
 /* Standard Error Numbers */
 #define EPERM        1   /* Operation not permitted */
 #define ENOENT       2   /* No such file or directory */
 #define ESRCH        3   /* No such process */
 #define EIO          5   /* I/O error */
+#define ENOEXEC      8   /* Exec format error */
 #define EBADF        9   /* Bad file number */
 #define EAGAIN       11  /* Resource temporarily unavailable */
 #define ENOMEM       12  /* Out of memory */

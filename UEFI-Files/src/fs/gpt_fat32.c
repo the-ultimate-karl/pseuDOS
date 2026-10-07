@@ -3,8 +3,6 @@
 #include "fs.h"
 #include "lib.h"
 
-extern const BootInfo *g_boot_info_global;
-
 typedef struct {
     uint8_t  boot_indicator;
     uint8_t  start_head;
@@ -241,39 +239,64 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     uint32_t total_clusters = total_data_sectors / spc;
 
     /* Query embedded payload binaries dynamically */
-    size_t bootx64_size = 0;
-    const uint8_t *bootx64_data = payload_get_bootloader(&bootx64_size);
+    typedef struct {
+        const char *desc;
+        const uint8_t *data;
+        size_t size;
+        uint32_t clusters;
+        uint32_t start_cluster;
+    } DynamicPayload;
 
-    size_t kernel_size = 0;
-    const uint8_t *kernel_data = payload_get_kernel(&kernel_size);
+    DynamicPayload payloads[] = {
+        { "\\EFI\\BOOT\\BOOTX64.EFI boot manager", NULL, 0, 0, 0 },
+        { "\\protected\\krnl\\vpkernel bare-metal payload", NULL, 0, 0, 0 },
+        { "\\protected\\krnl\\autoinit.exe userland init process", NULL, 0, 0, 0 },
+        { "\\protected\\crit\\xshss.exe shell subsystem", NULL, 0, 0, 0 },
+        { "\\protected\\gui\\superglue.exe display compositor", NULL, 0, 0, 0 },
+        { "\\protected\\gui\\ntfs.exe display server", NULL, 0, 0, 0 },
+        { "\\protected\\gui\\lack.exe login/auth session", NULL, 0, 0, 0 },
+        { "\\protected\\gui\\ninds.exe window manager", NULL, 0, 0, 0 },
+        { "\\protected\\gui\\splash.exe splash loader", NULL, 0, 0, 0 },
+        { "\\protected\\gui\\gshss.exe GUI desktop shell", NULL, 0, 0, 0 },
+        { "\\protected\\apps\\shell.exe terminal app", NULL, 0, 0, 0 },
+        { "\\protected\\apps\\sysmon.exe system monitor", NULL, 0, 0, 0 },
+        { "\\protected\\apps\\calc.exe calculator app", NULL, 0, 0, 0 },
+        { "\\protected\\apps\\notepad.exe notepad app", NULL, 0, 0, 0 },
+        { "\\protected\\apps\\paint.exe paint app", NULL, 0, 0, 0 },
+        { "\\protected\\apps\\clock.exe clock app", NULL, 0, 0, 0 }
+    };
+    int num_payloads = sizeof(payloads) / sizeof(payloads[0]);
 
-    size_t autoinit_size = 0;
-    const uint8_t *autoinit_data = payload_get_autoinit(&autoinit_size);
-
-    size_t xshss_size = 0;
-    const uint8_t *xshss_data = payload_get_xshss(&xshss_size);
+    payloads[0].data = payload_get_bootloader(&payloads[0].size);
+    payloads[1].data = payload_get_kernel(&payloads[1].size);
+    payloads[2].data = payload_get_autoinit(&payloads[2].size);
+    payloads[3].data = payload_get_xshss(&payloads[3].size);
+    payloads[4].data = payload_get_superglue(&payloads[4].size);
+    payloads[5].data = payload_get_ntfs(&payloads[5].size);
+    payloads[6].data = payload_get_lack(&payloads[6].size);
+    payloads[7].data = payload_get_ninds(&payloads[7].size);
+    payloads[8].data = payload_get_splash(&payloads[8].size);
+    payloads[9].data = payload_get_gshss(&payloads[9].size);
+    payloads[10].data = payload_get_shell(&payloads[10].size);
+    payloads[11].data = payload_get_sysmon(&payloads[11].size);
+    payloads[12].data = payload_get_calc(&payloads[12].size);
+    payloads[13].data = payload_get_notepad(&payloads[13].size);
+    payloads[14].data = payload_get_paint(&payloads[14].size);
+    payloads[15].data = payload_get_clock(&payloads[15].size);
 
     uint32_t cluster_size_bytes = spc * 512;
-    uint32_t boot_clusters = (uint32_t)((bootx64_size + cluster_size_bytes - 1) / cluster_size_bytes);
-    if (boot_clusters == 0) boot_clusters = 1;
+    uint32_t next_cluster = 20; /* Clusters 2..19 reserved for directories and static config files */
 
-    uint32_t kernel_clusters = (uint32_t)((kernel_size + cluster_size_bytes - 1) / cluster_size_bytes);
-    if (kernel_clusters == 0) kernel_clusters = 1;
+    for (int p = 0; p < num_payloads; p++) {
+        payloads[p].clusters = (uint32_t)((payloads[p].size + cluster_size_bytes - 1) / cluster_size_bytes);
+        if (payloads[p].clusters == 0) payloads[p].clusters = 1;
+        payloads[p].start_cluster = next_cluster;
+        next_cluster += payloads[p].clusters;
+    }
 
-    uint32_t autoinit_clusters = (uint32_t)((autoinit_size + cluster_size_bytes - 1) / cluster_size_bytes);
-    if (autoinit_clusters == 0) autoinit_clusters = 1;
-
-    uint32_t xshss_clusters = (uint32_t)((xshss_size + cluster_size_bytes - 1) / cluster_size_bytes);
-    if (xshss_clusters == 0) xshss_clusters = 1;
-
-    uint32_t boot_start_cluster = 14;
-    uint32_t kernel_start_cluster = boot_start_cluster + boot_clusters;
-    uint32_t autoinit_start_cluster = kernel_start_cluster + kernel_clusters;
-    uint32_t xshss_start_cluster = autoinit_start_cluster + autoinit_clusters;
-    uint32_t total_allocated_clusters = 12 + boot_clusters + kernel_clusters + autoinit_clusters + xshss_clusters; /* Clusters 2..13 system structures */
-
+    uint32_t total_allocated_clusters = next_cluster - 2;
     uint32_t free_clusters = (total_clusters > total_allocated_clusters) ? (total_clusters - total_allocated_clusters) : 0;
-    uint32_t next_free_cluster = xshss_start_cluster + xshss_clusters;
+    uint32_t next_free_cluster = next_cluster;
 
     /* 7. Write FAT32 Boot Sector */
     if (progress_cb) progress_cb("formatting partition as FAT32 filesystem...", 1);
@@ -338,22 +361,21 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
                 entries[i] = 0x0FFFFFF8; /* Media descriptor */
             } else if (c == 1) {
                 entries[i] = 0xFFFFFFFF; /* Clean shutdown status */
-            } else if (c >= 2 && c <= 13) {
-                entries[i] = 0x0FFFFFFF; /* EOF for system directories and startup/config files */
-            } else if (c >= boot_start_cluster && c < boot_start_cluster + boot_clusters) {
-                uint32_t offset = c - boot_start_cluster;
-                entries[i] = (offset + 1 == boot_clusters) ? 0x0FFFFFFF : (c + 1);
-            } else if (c >= kernel_start_cluster && c < kernel_start_cluster + kernel_clusters) {
-                uint32_t offset = c - kernel_start_cluster;
-                entries[i] = (offset + 1 == kernel_clusters) ? 0x0FFFFFFF : (c + 1);
-            } else if (c >= autoinit_start_cluster && c < autoinit_start_cluster + autoinit_clusters) {
-                uint32_t offset = c - autoinit_start_cluster;
-                entries[i] = (offset + 1 == autoinit_clusters) ? 0x0FFFFFFF : (c + 1);
-            } else if (c >= xshss_start_cluster && c < xshss_start_cluster + xshss_clusters) {
-                uint32_t offset = c - xshss_start_cluster;
-                entries[i] = (offset + 1 == xshss_clusters) ? 0x0FFFFFFF : (c + 1);
+            } else if (c >= 2 && c <= 19) {
+                entries[i] = 0x0FFFFFFF; /* EOF for system directories and static config files */
             } else {
-                entries[i] = 0x00000000; /* Free cluster */
+                int matched = 0;
+                for (int p = 0; p < num_payloads; p++) {
+                    if (c >= payloads[p].start_cluster && c < payloads[p].start_cluster + payloads[p].clusters) {
+                        uint32_t offset = c - payloads[p].start_cluster;
+                        entries[i] = (offset + 1 == payloads[p].clusters) ? 0x0FFFFFFF : (c + 1);
+                        matched = 1;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    entries[i] = 0x00000000; /* Free cluster */
+                }
             }
         }
 
@@ -382,14 +404,17 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     if (!cluster_buf) return -1;
 
     /* 10. Deploying System Directories & Configuration Files */
-    if (progress_cb) progress_cb("creating \\EFI and \\protected system directories...", 1);
+    if (progress_cb) progress_cb("creating filesystem directories and boot configuration...", 1);
 
-    /* Cluster 2: Root Directory contains "\EFI", "STARTUP.NSH", and "\PROTECT" */
+    /* Cluster 2: Root Directory contains "\EFI", "STARTUP.NSH", "\PROTECT", "\HOME", "\TMP", "\SERVICES" */
     memset(cluster_buf, 0, cluster_size_bytes);
     FatDirEntry *entries = (FatDirEntry *)cluster_buf;
     make_dir_entry(&entries[0], "EFI        ", 0x10, 3, 0);
     make_dir_entry(&entries[1], "STARTUP NSH", 0x20, 6, 24);
     make_dir_entry(&entries[2], "PROTECT    ", 0x10, 7, 0);
+    make_dir_entry(&entries[3], "HOME       ", 0x10, 16, 0);
+    make_dir_entry(&entries[4], "TMP        ", 0x10, 17, 0);
+    make_dir_entry(&entries[5], "SERVICES   ", 0x10, 18, 0);
     WRITE_CLUSTER(2, cluster_buf);
 
     /* Cluster 6: \startup.nsh file */
@@ -411,7 +436,7 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     entries = (FatDirEntry *)cluster_buf;
     make_dir_entry(&entries[0], ".          ", 0x10, 4, 0);
     make_dir_entry(&entries[1], "..         ", 0x10, 3, 0);
-    make_dir_entry(&entries[2], "BOOTX64 EFI", 0x20, boot_start_cluster, (uint32_t)bootx64_size);
+    make_dir_entry(&entries[2], "BOOTX64 EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
     WRITE_CLUSTER(4, cluster_buf);
 
     /* Cluster 12: \EFI\pseuDOS\grub.cfg file */
@@ -440,19 +465,19 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     memcpy(cluster_buf, osrelease_content, osrelease_len);
     WRITE_CLUSTER(13, cluster_buf);
 
-    /* Cluster 5: \EFI\pseuDOS contains BOOTX64.EFI, PSEUDOS.EFI, fallback KERNEL.BIN, GRUB.CFG, OS-RELEA */
+    /* Cluster 5: \EFI\pseuDOS contains BOOTX64.EFI, PSEUDOS.EFI, fallback VPKERNEL, GRUB.CFG, OS-RELEA */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
     make_dir_entry(&entries[0], ".          ", 0x10, 5, 0);
     make_dir_entry(&entries[1], "..         ", 0x10, 3, 0);
-    make_dir_entry(&entries[2], "BOOTX64 EFI", 0x20, boot_start_cluster, (uint32_t)bootx64_size);
-    make_dir_entry(&entries[3], "PSEUDOS EFI", 0x20, boot_start_cluster, (uint32_t)bootx64_size);
-    make_dir_entry(&entries[4], "KERNEL  BIN", 0x20, kernel_start_cluster, (uint32_t)kernel_size);
+    make_dir_entry(&entries[2], "BOOTX64 EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
+    make_dir_entry(&entries[3], "PSEUDOS EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
+    make_dir_entry(&entries[4], "VPKERNEL   ", 0x20, payloads[1].start_cluster, (uint32_t)payloads[1].size);
     make_dir_entry(&entries[5], "GRUB    CFG", 0x20, 12, grub_len);
     make_dir_entry(&entries[6], "OS-RELEA   ", 0x20, 13, osrelease_len);
     WRITE_CLUSTER(5, cluster_buf);
 
-    /* Cluster 7: \protected Directory contains "KRNL", "BOOTMGR", and "CRIT" */
+    /* Cluster 7: \protected Directory contains "KRNL", "BOOTMGR", "CRIT", "GUI", "APPS" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
     make_dir_entry(&entries[0], ".          ", 0x10, 7, 0);
@@ -460,31 +485,33 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     make_dir_entry(&entries[2], "KRNL       ", 0x10, 8, 0);
     make_dir_entry(&entries[3], "BOOTMGR    ", 0x10, 9, 0);
     make_dir_entry(&entries[4], "CRIT       ", 0x10, 11, 0);
+    make_dir_entry(&entries[5], "GUI        ", 0x10, 14, 0);
+    make_dir_entry(&entries[6], "APPS       ", 0x10, 15, 0);
     WRITE_CLUSTER(7, cluster_buf);
 
-    /* Cluster 8: \protected\krnl contains "KERNEL.BIN" and "AUTOINIT.BIN" */
+    /* Cluster 8: \protected\krnl contains "VPKERNEL" and "AUTOINIT.EXE" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
     make_dir_entry(&entries[0], ".          ", 0x10, 8, 0);
     make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
-    make_dir_entry(&entries[2], "KERNEL  BIN", 0x20, kernel_start_cluster, (uint32_t)kernel_size);
-    make_dir_entry(&entries[3], "AUTOINITBIN", 0x20, autoinit_start_cluster, (uint32_t)autoinit_size);
+    make_dir_entry(&entries[2], "VPKERNEL   ", 0x20, payloads[1].start_cluster, (uint32_t)payloads[1].size);
+    make_dir_entry(&entries[3], "AUTOINITEXE", 0x20, payloads[2].start_cluster, (uint32_t)payloads[2].size);
     WRITE_CLUSTER(8, cluster_buf);
 
-    /* Cluster 11: \protected\crit contains "XSHSS.BIN" */
+    /* Cluster 11: \protected\crit contains "XSHSS.EXE" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
     make_dir_entry(&entries[0], ".          ", 0x10, 11, 0);
     make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
-    make_dir_entry(&entries[2], "XSHSS   BIN", 0x20, xshss_start_cluster, (uint32_t)xshss_size);
+    make_dir_entry(&entries[2], "XSHSS   EXE", 0x20, payloads[3].start_cluster, (uint32_t)payloads[3].size);
     WRITE_CLUSTER(11, cluster_buf);
 
     /* Cluster 10: \protected\bootmgr\boot.cfg file content */
     const char *cfg_content =
         "# pseuDOS Boot Configuration\r\n"
-        "kernel=\\protected\\krnl\\kernel.bin\r\n"
-        "autoinit=\\protected\\krnl\\autoinit.bin\r\n"
-        "shell=\\protected\\crit\\xshss.bin\r\n"
+        "kernel=\\protected\\krnl\\vpkernel\r\n"
+        "autoinit=\\protected\\krnl\\autoinit.exe\r\n"
+        "shell=\\protected\\gui\\superglue.exe\r\n"
         "cmdline=quiet devpath=hardware\r\n"
         "default_resolution=1280x720\r\n"
         "bootmgr_version=1.1.0\r\n";
@@ -502,64 +529,82 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     make_dir_entry(&entries[2], "BOOT    CFG", 0x20, 10, cfg_len);
     WRITE_CLUSTER(9, cluster_buf);
 
-    /* 11. Deploying BOOTX64.EFI */
-    if (progress_cb) progress_cb("copying \\EFI\\BOOT\\BOOTX64.EFI boot manager...", 1);
-    for (uint32_t i = 0; i < boot_clusters; i++) {
-        memset(cluster_buf, 0, cluster_size_bytes);
-        size_t offset = (size_t)i * cluster_size_bytes;
-        size_t to_copy = (bootx64_size > offset) ? (bootx64_size - offset) : 0;
-        if (to_copy > cluster_size_bytes) to_copy = cluster_size_bytes;
-        if (to_copy > 0) {
-            memcpy(cluster_buf, bootx64_data + offset, to_copy);
-        }
-        WRITE_CLUSTER(boot_start_cluster + i, cluster_buf);
-    }
+    /* Cluster 14: \protected\gui contains superglue, ntfs, lack, ninds, splash, gshss */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    entries = (FatDirEntry *)cluster_buf;
+    make_dir_entry(&entries[0], ".          ", 0x10, 14, 0);
+    make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
+    make_dir_entry(&entries[2], "SUPERGLUEXE", 0x20, payloads[4].start_cluster, (uint32_t)payloads[4].size);
+    make_dir_entry(&entries[3], "NTFS    EXE", 0x20, payloads[5].start_cluster, (uint32_t)payloads[5].size);
+    make_dir_entry(&entries[4], "LACK    EXE", 0x20, payloads[6].start_cluster, (uint32_t)payloads[6].size);
+    make_dir_entry(&entries[5], "NINDS   EXE", 0x20, payloads[7].start_cluster, (uint32_t)payloads[7].size);
+    make_dir_entry(&entries[6], "SPLASH  EXE", 0x20, payloads[8].start_cluster, (uint32_t)payloads[8].size);
+    make_dir_entry(&entries[7], "GSHSS   EXE", 0x20, payloads[9].start_cluster, (uint32_t)payloads[9].size);
+    WRITE_CLUSTER(14, cluster_buf);
 
-    /* 12. Deploying kernel.bin */
-    if (progress_cb) progress_cb("copying \\protected\\krnl\\kernel.bin bare-metal payload...", 1);
-    for (uint32_t i = 0; i < kernel_clusters; i++) {
-        memset(cluster_buf, 0, cluster_size_bytes);
-        size_t offset = (size_t)i * cluster_size_bytes;
-        size_t to_copy = (kernel_size > offset) ? (kernel_size - offset) : 0;
-        if (to_copy > cluster_size_bytes) to_copy = cluster_size_bytes;
-        if (to_copy > 0) {
-            memcpy(cluster_buf, kernel_data + offset, to_copy);
-        }
-        WRITE_CLUSTER(kernel_start_cluster + i, cluster_buf);
-    }
+    /* Cluster 15: \protected\apps contains shell, sysmon, calc, notepad, paint, clock */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    entries = (FatDirEntry *)cluster_buf;
+    make_dir_entry(&entries[0], ".          ", 0x10, 15, 0);
+    make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
+    make_dir_entry(&entries[2], "SHELL   EXE", 0x20, payloads[10].start_cluster, (uint32_t)payloads[10].size);
+    make_dir_entry(&entries[3], "SYSMON  EXE", 0x20, payloads[11].start_cluster, (uint32_t)payloads[11].size);
+    make_dir_entry(&entries[4], "CALC    EXE", 0x20, payloads[12].start_cluster, (uint32_t)payloads[12].size);
+    make_dir_entry(&entries[5], "NOTEPAD EXE", 0x20, payloads[13].start_cluster, (uint32_t)payloads[13].size);
+    make_dir_entry(&entries[6], "PAINT   EXE", 0x20, payloads[14].start_cluster, (uint32_t)payloads[14].size);
+    make_dir_entry(&entries[7], "CLOCK   EXE", 0x20, payloads[15].start_cluster, (uint32_t)payloads[15].size);
+    WRITE_CLUSTER(15, cluster_buf);
 
-    /* 13. Deploying autoinit.bin */
-    if (progress_cb) progress_cb("copying \\protected\\krnl\\autoinit.bin userland init process...", 1);
-    for (uint32_t i = 0; i < autoinit_clusters; i++) {
-        memset(cluster_buf, 0, cluster_size_bytes);
-        size_t offset = (size_t)i * cluster_size_bytes;
-        size_t to_copy = (autoinit_size > offset) ? (autoinit_size - offset) : 0;
-        if (to_copy > cluster_size_bytes) to_copy = cluster_size_bytes;
-        if (to_copy > 0 && autoinit_data) {
-            memcpy(cluster_buf, autoinit_data + offset, to_copy);
-        }
-        WRITE_CLUSTER(autoinit_start_cluster + i, cluster_buf);
-    }
+    /* Cluster 16: \HOME contains "USER" */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    entries = (FatDirEntry *)cluster_buf;
+    make_dir_entry(&entries[0], ".          ", 0x10, 16, 0);
+    make_dir_entry(&entries[1], "..         ", 0x10, 0, 0);
+    make_dir_entry(&entries[2], "USER       ", 0x10, 19, 0);
+    WRITE_CLUSTER(16, cluster_buf);
 
-    /* 14. Deploying xshss.bin */
-    if (progress_cb) progress_cb("copying \\protected\\crit\\xshss.bin shell subsystem...", 1);
-    for (uint32_t i = 0; i < xshss_clusters; i++) {
-        memset(cluster_buf, 0, cluster_size_bytes);
-        size_t offset = (size_t)i * cluster_size_bytes;
-        size_t to_copy = (xshss_size > offset) ? (xshss_size - offset) : 0;
-        if (to_copy > cluster_size_bytes) to_copy = cluster_size_bytes;
-        if (to_copy > 0 && xshss_data) {
-            memcpy(cluster_buf, xshss_data + offset, to_copy);
+    /* Cluster 17: \TMP (empty directory) */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    entries = (FatDirEntry *)cluster_buf;
+    make_dir_entry(&entries[0], ".          ", 0x10, 17, 0);
+    make_dir_entry(&entries[1], "..         ", 0x10, 0, 0);
+    WRITE_CLUSTER(17, cluster_buf);
+
+    /* Cluster 18: \SERVICES (empty directory) */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    entries = (FatDirEntry *)cluster_buf;
+    make_dir_entry(&entries[0], ".          ", 0x10, 18, 0);
+    make_dir_entry(&entries[1], "..         ", 0x10, 0, 0);
+    WRITE_CLUSTER(18, cluster_buf);
+
+    /* Cluster 19: \HOME\USER (empty directory) */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    entries = (FatDirEntry *)cluster_buf;
+    make_dir_entry(&entries[0], ".          ", 0x10, 19, 0);
+    make_dir_entry(&entries[1], "..         ", 0x10, 16, 0);
+    WRITE_CLUSTER(19, cluster_buf);
+
+    /* 11. Deploying all Payloads (Boot manager, Kernel, Init, Shell, GUI stack, Apps) */
+    for (int p = 0; p < num_payloads; p++) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "copying %s...", payloads[p].desc);
+        if (progress_cb) progress_cb(msg, 1);
+
+        for (uint32_t i = 0; i < payloads[p].clusters; i++) {
+            memset(cluster_buf, 0, cluster_size_bytes);
+            size_t offset = (size_t)i * cluster_size_bytes;
+            size_t to_copy = (payloads[p].size > offset) ? (payloads[p].size - offset) : 0;
+            if (to_copy > cluster_size_bytes) to_copy = cluster_size_bytes;
+            if (to_copy > 0 && payloads[p].data) {
+                memcpy(cluster_buf, payloads[p].data + offset, to_copy);
+            }
+            WRITE_CLUSTER(payloads[p].start_cluster + i, cluster_buf);
         }
-        WRITE_CLUSTER(xshss_start_cluster + i, cluster_buf);
     }
 
     kfree(cluster_buf);
 
-    /* 15. Deploying System Configuration */
-    if (progress_cb) progress_cb("installing boot configuration and system files...", 1);
-
-    /* 16. Synchronizing Storage Cache */
+    /* 12. Synchronizing Storage Cache */
     if (progress_cb) progress_cb("synchronizing disk cache and finalizing installation...", 1);
     if (dev->flush) {
         dev->flush(dev);

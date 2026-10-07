@@ -16,6 +16,8 @@ static volatile uint8_t g_queue_tail = 0;
 
 static int g_shift_pressed = 0;
 static int g_caps_lock = 0;
+static int g_alt_pressed = 0;
+static int g_ctrl_pressed = 0;
 
 static const char g_scancode_table_normal[128] = {
     0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -82,6 +84,8 @@ void keyboard_init(void) {
     g_queue_tail = 0;
     g_shift_pressed = 0;
     g_caps_lock = 0;
+    g_alt_pressed = 0;
+    g_ctrl_pressed = 0;
 
     /* Flush PS/2 controller buffer with bounded timeout */
     int timeout = 1000;
@@ -116,7 +120,7 @@ void keyboard_init(void) {
     }
 }
 
-static char g_char_buf[4];
+static char g_char_buf[8];
 static int g_char_buf_len = 0;
 static int g_char_buf_pos = 0;
 static int g_extended_scancode = 0;
@@ -129,14 +133,40 @@ static char translate_scancode(uint8_t scancode) {
 
     if (g_extended_scancode) {
         g_extended_scancode = 0;
-        if (scancode & 0x80) return 0; /* Extended key release */
+        if (scancode & 0x80) {
+            uint8_t ext_rel = scancode & 0x7F;
+            if (ext_rel == 0x38) g_alt_pressed = 0;
+            if (ext_rel == 0x1D) g_ctrl_pressed = 0;
+            return 0;
+        }
+        if (scancode == 0x38) {
+            g_alt_pressed = 1;
+            return 0;
+        }
+        if (scancode == 0x1D) {
+            g_ctrl_pressed = 1;
+            return 0;
+        }
+        if (scancode == 0x5B || scancode == 0x5C || scancode == 0x5D) { /* Left Win, Right Win, Menu */
+            return (char)KEY_WIN;
+        }
         if (scancode == 0x48) { /* Up Arrow */
-            g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = 'A';
-            g_char_buf_len = 3; g_char_buf_pos = 1;
+            if (g_shift_pressed) {
+                g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = '5'; g_char_buf[3] = '~';
+                g_char_buf_len = 4; g_char_buf_pos = 1;
+            } else {
+                g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = 'A';
+                g_char_buf_len = 3; g_char_buf_pos = 1;
+            }
             return 27;
         } else if (scancode == 0x50) { /* Down Arrow */
-            g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = 'B';
-            g_char_buf_len = 3; g_char_buf_pos = 1;
+            if (g_shift_pressed) {
+                g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = '6'; g_char_buf[3] = '~';
+                g_char_buf_len = 4; g_char_buf_pos = 1;
+            } else {
+                g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = 'B';
+                g_char_buf_len = 3; g_char_buf_pos = 1;
+            }
             return 27;
         } else if (scancode == 0x4D) { /* Right Arrow */
             g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = 'C';
@@ -145,6 +175,14 @@ static char translate_scancode(uint8_t scancode) {
         } else if (scancode == 0x4B) { /* Left Arrow */
             g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = 'D';
             g_char_buf_len = 3; g_char_buf_pos = 1;
+            return 27;
+        } else if (scancode == 0x49) { /* Page Up */
+            g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = '5'; g_char_buf[3] = '~';
+            g_char_buf_len = 4; g_char_buf_pos = 1;
+            return 27;
+        } else if (scancode == 0x51) { /* Page Down */
+            g_char_buf[0] = 27; g_char_buf[1] = '['; g_char_buf[2] = '6'; g_char_buf[3] = '~';
+            g_char_buf_len = 4; g_char_buf_pos = 1;
             return 27;
         }
         return 0;
@@ -155,6 +193,10 @@ static char translate_scancode(uint8_t scancode) {
         uint8_t released = scancode & 0x7F;
         if (released == 0x2A || released == 0x36) {
             g_shift_pressed = 0;
+        } else if (released == 0x38) {
+            g_alt_pressed = 0;
+        } else if (released == 0x1D) {
+            g_ctrl_pressed = 0;
         }
         return 0;
     }
@@ -164,9 +206,38 @@ static char translate_scancode(uint8_t scancode) {
         g_shift_pressed = 1;
         return 0;
     }
+    if (scancode == 0x38) {
+        g_alt_pressed = 1;
+        return 0;
+    }
+    if (scancode == 0x1D) {
+        g_ctrl_pressed = 1;
+        return 0;
+    }
     if (scancode == 0x3A) {
         g_caps_lock = !g_caps_lock;
         return 0;
+    }
+
+    /* Hotkey: Alt+F3 -> Switch to TTY3 (Console) */
+    if (scancode == 0x3D) {
+        if (g_alt_pressed) {
+            tty_switch(3);
+            return 0;
+        }
+    }
+
+    /* Hotkey: Alt+F1 -> Switch to TTY1 (GUI Desktop) */
+    if (scancode == 0x3B) {
+        if (g_alt_pressed) {
+            tty_switch(1);
+            return 0;
+        }
+    }
+
+    /* Hotkey: Ctrl+Esc -> Windows key */
+    if (scancode == 0x01 && g_ctrl_pressed) {
+        return (char)KEY_WIN;
     }
 
     if (scancode >= 128) return 0;
@@ -193,10 +264,28 @@ int keyboard_has_char(void) {
     if (g_char_buf_pos < g_char_buf_len) return 1;
     if (uart_is_present() && (inb(SERIAL_LSR) & 0x01)) return 1;
     if (g_queue_head != g_queue_tail) return 1;
-    if (!(get_rflags() & 0x200)) {
-        uint8_t status = inb(PS2_STATUS_PORT);
-        if ((status & 0x01) && !(status & 0x20)) return 1;
+    return 0;
+}
+
+char keyboard_getchar_nonblock(void) {
+    if (g_char_buf_pos < g_char_buf_len) {
+        return g_char_buf[g_char_buf_pos++];
     }
+
+    if (uart_is_present() && (inb(SERIAL_LSR) & 0x01)) {
+        char c = (char)inb(SERIAL_DATA);
+        if (c == '\r') return '\n';
+        if (c == 0x7F) return '\b';
+        return c;
+    }
+
+    while (g_queue_head != g_queue_tail) {
+        uint8_t scancode = g_key_queue[g_queue_tail];
+        g_queue_tail = (g_queue_tail + 1) & 0xFF;
+        char c = translate_scancode(scancode);
+        if (c != 0) return c;
+    }
+
     return 0;
 }
 

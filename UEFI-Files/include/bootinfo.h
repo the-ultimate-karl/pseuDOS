@@ -58,4 +58,7 @@ typedef struct {
 
 #define BOOTINFO_MAGIC 0x50534555 /* "PSEU" */
 
+extern BootInfo *g_boot_info_global;
+
 #endif /* BOOTINFO_H */
+

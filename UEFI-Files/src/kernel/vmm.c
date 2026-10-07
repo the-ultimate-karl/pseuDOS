@@ -214,6 +214,15 @@ uint64_t *vmm_get_kernel_pml4(void) {
 }
 
 void vmm_init(const BootInfo *boot_info) {
+    /* 0. Program IA32_PAT MSR (0x277) to enable Write-Combining (WC = 0x01) on PAT Entry 1 (PWT=1) */
+    uint32_t pat_lo, pat_hi;
+    __asm__ volatile ("rdmsr" : "=a"(pat_lo), "=d"(pat_hi) : "c"(0x277));
+    uint64_t pat = ((uint64_t)pat_hi << 32) | pat_lo;
+    pat = (pat & ~0x000000000000FF00ULL) | 0x0000000000000100ULL;
+    pat_lo = (uint32_t)(pat & 0xFFFFFFFF);
+    pat_hi = (uint32_t)(pat >> 32);
+    __asm__ volatile ("wrmsr" : : "c"(0x277), "a"(pat_lo), "d"(pat_hi));
+
     /* 1. Allocate Master Kernel PML4 */
     uint64_t pml4_phys = pmm_alloc_page();
     if (!pml4_phys) {

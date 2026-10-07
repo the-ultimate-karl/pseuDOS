@@ -6,8 +6,9 @@
 #include "klog.h"
 #include "drivers.h"
 #include "pit.h"
+#include "fs.h"
 
-#define IPC_RX_BUF_SIZE 8192
+#define IPC_RX_BUF_SIZE 16384
 #define MAX_PENDING_CONNS 16
 
 /* Standard socket states */
@@ -109,6 +110,12 @@ int sys_bind(int sockfd, const sockaddr_un_t *addr, size_t addrlen) {
     strncpy(sock->bind_path, addr->sun_path, UNIX_PATH_MAX - 1);
     sock->bind_path[UNIX_PATH_MAX - 1] = '\0';
     sock->state = SOCK_STATE_BOUND;
+
+    /* Ensure socket node is visible in VFS hierarchy */
+    if (!vfs_find_node(sock->bind_path)) {
+        vfs_create_file(sock->bind_path);
+    }
+
     return 0;
 }
 
@@ -154,7 +161,9 @@ int sys_accept(int sockfd, sockaddr_un_t *addr, size_t *addrlen) {
         if (addrlen) *addrlen = sizeof(sockaddr_un_t);
     }
 
-    return idx_to_fd(conn_idx);
+    int res_fd = idx_to_fd(conn_idx);
+    klog_info("IPC accept: srv fd=%d accepted new conn fd=%d (peer_idx=%d)", sockfd, res_fd, conn_sock->peer_idx);
+    return res_fd;
 }
 
 int sys_connect(int sockfd, const sockaddr_un_t *addr, size_t addrlen) {
@@ -212,6 +221,8 @@ int sys_connect(int sockfd, const sockaddr_un_t *addr, size_t addrlen) {
     srv_sock->pending_head = (srv_sock->pending_head + 1) % MAX_PENDING_CONNS;
     srv_sock->pending_count++;
 
+    klog_info("IPC connect: client fd=%d connected to %s (srv_idx=%d, conn_fd=%d)",
+              sockfd, addr->sun_path, srv_idx, idx_to_fd(conn_idx));
     return 0;
 }
 
@@ -235,8 +246,12 @@ int64_t sys_send(int sockfd, const void *buf, size_t len, int flags) {
     const uint8_t *src = (const uint8_t *)buf;
 
     while (sent < len) {
+        size_t remaining = len - sent;
+        size_t needed = (remaining > IPC_RX_BUF_SIZE) ? IPC_RX_BUF_SIZE : remaining;
         size_t free_space = IPC_RX_BUF_SIZE - peer->rx_count;
-        if (free_space == 0) {
+
+        /* If we cannot fit the complete packet (or buffer capacity for huge transfers), wait */
+        if (free_space < needed) {
             if (flags & MSG_DONTWAIT) {
                 if (sent > 0) return (int64_t)sent;
                 return -EAGAIN;
@@ -249,9 +264,7 @@ int64_t sys_send(int sockfd, const void *buf, size_t len, int flags) {
             continue;
         }
 
-        size_t to_write = len - sent;
-        if (to_write > free_space) to_write = free_space;
-
+        size_t to_write = (remaining > free_space) ? free_space : remaining;
         for (size_t i = 0; i < to_write; i++) {
             peer->rx_buf[peer->rx_head] = src[sent++];
             peer->rx_head = (peer->rx_head + 1) % IPC_RX_BUF_SIZE;
@@ -273,21 +286,31 @@ int64_t sys_recv(int sockfd, void *buf, size_t len, int flags) {
         return -EBADF;
     }
 
-    uint8_t *dst = (uint8_t *)buf;
-
-    while (sock->rx_count == 0) {
-        if (sock->state == SOCK_STATE_DISCONNECTED) {
-            return 0; /* EOF */
-        }
-        if (flags & MSG_DONTWAIT) {
+    /* For non-blocking read, if there isn't enough data yet, don't return a partial message */
+    if (flags & MSG_DONTWAIT) {
+        if (sock->rx_count == 0) {
+            if (sock->state == SOCK_STATE_DISCONNECTED) return 0; /* EOF */
             return -EAGAIN;
         }
-        scheduler_yield();
+        /* If still connected, ensure caller gets a full requested message if len <= IPC_RX_BUF_SIZE */
+        if (sock->rx_count < len && sock->state == SOCK_STATE_CONNECTED) {
+            return -EAGAIN;
+        }
+    } else {
+        /* Blocking read: wait until the full requested length is available or EOF */
+        while (sock->rx_count < len) {
+            if (sock->state == SOCK_STATE_DISCONNECTED) {
+                if (sock->rx_count == 0) return 0; /* EOF */
+                break; /* Read remaining bytes on disconnect */
+            }
+            scheduler_yield();
+        }
     }
 
     size_t to_read = len;
     if (to_read > sock->rx_count) to_read = sock->rx_count;
 
+    uint8_t *dst = (uint8_t *)buf;
     for (size_t i = 0; i < to_read; i++) {
         dst[i] = sock->rx_buf[sock->rx_tail];
         sock->rx_tail = (sock->rx_tail + 1) % IPC_RX_BUF_SIZE;
@@ -306,7 +329,7 @@ int sys_close_socket(int sockfd) {
     /* Disconnect peer */
     if (sock->peer_idx >= 0 && sock->peer_idx < MAX_SOCKETS) {
         ipc_socket_t *peer = &g_sockets[sock->peer_idx];
-        if (peer->in_use) {
+        if (peer->in_use && peer->peer_idx == idx) {
             peer->state = SOCK_STATE_DISCONNECTED;
             peer->peer_idx = -1;
         }
@@ -340,6 +363,21 @@ void ipc_close_process_sockets(uint32_t pid) {
             sys_close_socket(idx_to_fd(i));
         }
     }
+}
+
+int ipc_unbind_path(const char *path) {
+    if (!path || path[0] == '\0') return 0;
+    int count = 0;
+    for (int i = 0; i < MAX_SOCKETS; i++) {
+        if (g_sockets[i].in_use && g_sockets[i].bind_path[0] != '\0') {
+            if (strcmp(g_sockets[i].bind_path, path) == 0) {
+                klog_warn("IPC socket bound to '%s' (fd=%d) destroyed", path, idx_to_fd(i));
+                sys_close_socket(idx_to_fd(i));
+                count++;
+            }
+        }
+    }
+    return count;
 }
 
 int sys_poll(pollfd_t *fds, size_t nfds, int timeout_ms) {

@@ -14,5 +14,6 @@ void scheduler_tick(interrupt_frame_t *frame, registers_t *regs);
 void scheduler_schedule(interrupt_frame_t *frame, registers_t *regs);
 void scheduler_yield(void);
 int scheduler_is_enabled(void);
+void scheduler_disable(void);
 
 #endif /* SCHEDULER_H */

@@ -136,5 +136,18 @@ const uint8_t *payload_get_bootloader(size_t *out_size);
 const uint8_t *payload_get_kernel(size_t *out_size);
 const uint8_t *payload_get_autoinit(size_t *out_size);
 const uint8_t *payload_get_xshss(size_t *out_size);
+const uint8_t *payload_get_superglue(size_t *out_size);
+const uint8_t *payload_get_ntfs(size_t *out_size);
+const uint8_t *payload_get_lack(size_t *out_size);
+const uint8_t *payload_get_ninds(size_t *out_size);
+const uint8_t *payload_get_splash(size_t *out_size);
+const uint8_t *payload_get_gshss(size_t *out_size);
+const uint8_t *payload_get_shell(size_t *out_size);
+const uint8_t *payload_get_sysmon(size_t *out_size);
+const uint8_t *payload_get_calc(size_t *out_size);
+const uint8_t *payload_get_notepad(size_t *out_size);
+const uint8_t *payload_get_paint(size_t *out_size);
+const uint8_t *payload_get_clock(size_t *out_size);
+const uint8_t *payload_get_filemgr(size_t *out_size);
 
 #endif /* STORAGE_H */

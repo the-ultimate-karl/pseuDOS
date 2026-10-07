@@ -256,6 +256,7 @@ Write-Host " Log File: $LogFile" -ForegroundColor Yellow
 Write-Host "============================================================" -ForegroundColor Cyan
 
 $QemuCommon = @(
+    "-accel", "tcg,thread=multi",
     "-m", "512M",
     "-smp", "2",
     "-cpu", "max",

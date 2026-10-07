@@ -14,8 +14,27 @@
 #include "mice.h"
 #include "ipc.h"
 #include "shm.h"
+#include "storage.h"
+#include "pmm.h"
 
-extern const BootInfo *g_boot_info_global;
+static char *g_syscall_flash_log = NULL;
+static size_t g_syscall_flash_pos = 0;
+static size_t g_syscall_flash_cap = 0;
+
+static void flash_install_progress(const char *step_name, int is_ok) {
+    if (console_get_fb_output()) {
+        console_printf("flash: %s [%s]\n", step_name, is_ok ? "ok" : "failed");
+    }
+    if (g_syscall_flash_log && g_syscall_flash_pos + 128 < g_syscall_flash_cap) {
+        const char *p = "flash: ";
+        while (*p && g_syscall_flash_pos < g_syscall_flash_cap - 1) g_syscall_flash_log[g_syscall_flash_pos++] = *p++;
+        p = step_name;
+        while (*p && g_syscall_flash_pos < g_syscall_flash_cap - 1) g_syscall_flash_log[g_syscall_flash_pos++] = *p++;
+        p = is_ok ? " [ok]\n" : " [failed]\n";
+        while (*p && g_syscall_flash_pos < g_syscall_flash_cap - 1) g_syscall_flash_log[g_syscall_flash_pos++] = *p++;
+        g_syscall_flash_log[g_syscall_flash_pos] = '\0';
+    }
+}
 
 /* MSR Register Constants */
 #define MSR_EFER    0xC0000080
@@ -34,8 +53,8 @@ static volatile uint64_t g_shutdown_target_tick = 0;
 void syscall_check_scheduled_shutdown(void) {
     if (g_shutdown_target_tick > 0 && pit_get_ticks() >= g_shutdown_target_tick) {
         g_shutdown_target_tick = 0;
-        console_puts("\n[system] scheduled shutdown reached, powering off via ACPI...\n");
-        acpi_shutdown();
+        console_puts("\n[system] scheduled shutdown reached, starting shutdown sequence...\n");
+        system_shutdown_sequence(0);
     }
 }
 
@@ -84,6 +103,32 @@ static inline int validate_user_str(const char *str, size_t max_len, process_pri
     return 0;
 }
 
+static int64_t run_captured_void(void (*func)(void), char *user_buf, size_t cap, process_privilege_t priv) {
+    if (user_buf && cap > 0) {
+        if (!validate_user_buffer(user_buf, cap, priv)) return -EFAULT;
+        console_set_capture_buffer(user_buf, cap);
+        func();
+        size_t len = console_get_capture_length();
+        console_set_capture_buffer(NULL, 0);
+        return (int64_t)len;
+    }
+    func();
+    return 0;
+}
+
+static int64_t run_captured_str(void (*func)(const char *), const char *arg, char *user_buf, size_t cap, process_privilege_t priv) {
+    if (user_buf && cap > 0) {
+        if (!validate_user_buffer(user_buf, cap, priv)) return -EFAULT;
+        console_set_capture_buffer(user_buf, cap);
+        func(arg ? arg : "");
+        size_t len = console_get_capture_length();
+        console_set_capture_buffer(NULL, 0);
+        return (int64_t)len;
+    }
+    func(arg ? arg : "");
+    return 0;
+}
+
 int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a5;
     process_t *curr = process_get_current();
@@ -102,9 +147,27 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
         case SYS_EXEC: {
             const char *path = (const char *)a1;
             if (!validate_user_str(path, 256, curr->privilege_level)) return -EFAULT;
+            if (strstr(path, "autoinit") != NULL) {
+                if (process_has_active_init()) {
+                    kernel_panic("unexpected second instance of init process detected!", NULL);
+                }
+            }
             process_privilege_t priv = (curr->privilege_level == PRIV_KERNEL && a2 == 1) ? PRIV_KERNEL : PRIV_USER;
             process_t *proc = pe_spawn_process(NULL, path, priv);
-            if (!proc) return -ENOENT;
+            if (!proc) {
+                int err = pe_get_last_error();
+                return (err < 0) ? (int64_t)err : -ENOENT;
+            }
+            if (a2 != 0 && a2 != 1) {
+                const char *arg = (const char *)a2;
+                if (validate_user_str(arg, 256, curr->privilege_level)) {
+                    strncpy(proc->cmdline, arg, sizeof(proc->cmdline) - 1);
+                    proc->cmdline[sizeof(proc->cmdline) - 1] = '\0';
+                }
+            }
+            if (a3 != 0) {
+                proc->tty = (int)a3;
+            }
             return (int64_t)proc->pid;
         }
 
@@ -124,6 +187,9 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
 
         case SYS_KILL: {
             uint32_t target_pid = (uint32_t)a1;
+            if (target_pid < 3) {
+                kernel_panic("Attempted to kill critical processes!", NULL);
+            }
             if (target_pid != curr->pid && curr->privilege_level != PRIV_KERNEL) {
                 return -EPERM;
             }
@@ -175,9 +241,23 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             int fd = (int)a1;
             char *buf = (char *)a2;
             size_t count = (size_t)a3;
+            int flags = (int)a4;
             if (!validate_user_buffer(buf, count, curr->privilege_level)) return -EFAULT;
 
             if (fd == 0) {
+                if (count == 0) return 0;
+                if (curr->tty != 0 && curr->tty != tty_get_active() && !console_get_fb_output()) {
+                    if (flags & MSG_DONTWAIT) return -EAGAIN;
+                    while (curr->tty != tty_get_active() && !console_get_fb_output()) {
+                        pit_sleep_ms(20);
+                    }
+                }
+                if (flags & MSG_DONTWAIT) {
+                    char c = keyboard_getchar_nonblock();
+                    if (c == 0) return -EAGAIN;
+                    buf[0] = c;
+                    return 1;
+                }
                 size_t read_bytes = 0;
                 while (read_bytes < count) {
                     char c = keyboard_getchar();
@@ -187,7 +267,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
                 return (int64_t)read_bytes;
             }
             if (fd >= SOCKET_FD_BASE) {
-                return sys_recv(fd, buf, count, 0);
+                return sys_recv(fd, buf, count, flags);
             }
             return -EBADF;
         }
@@ -250,18 +330,23 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
         }
 
         case SYS_TIME: {
+            if (a1 == 0) {
+                rtc_datetime_t dt;
+                if (rtc_get_datetime(&dt) == 0) {
+                    return (int64_t)((uint64_t)dt.hours * 3600 + (uint64_t)dt.minutes * 60 + (uint64_t)dt.seconds);
+                }
+                return 0;
+            }
             rtc_datetime_t *out = (rtc_datetime_t *)a1;
             if (!validate_user_buffer(out, sizeof(rtc_datetime_t), curr->privilege_level)) return -EFAULT;
             return (int64_t)rtc_get_datetime(out);
         }
 
         case SYS_DMESG:
-            klog_dmesg();
-            return 0;
+            return run_captured_void(klog_dmesg, (char *)a1, (size_t)a2, curr->privilege_level);
 
         case SYS_PS:
-            process_dump_list();
-            return 0;
+            return run_captured_void(process_dump_list, (char *)a1, (size_t)a2, curr->privilege_level);
 
         case SYS_READDIR: {
             const char *path = (const char *)a1;
@@ -271,43 +356,56 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
         }
 
         case SYS_REBOOT:
-            acpi_reboot();
+            system_shutdown_sequence(1);
             return 0;
 
         case SYS_SHUTDOWN: {
             uint64_t delay_sec = (uint64_t)a1;
+            char *user_buf = (char *)a2;
+            size_t cap = (size_t)a3;
+            if (user_buf && cap > 0) {
+                if (!validate_user_buffer(user_buf, cap, curr->privilege_level)) return -EFAULT;
+                console_set_capture_buffer(user_buf, cap);
+            }
+            int64_t ret = 0;
             if (delay_sec == (uint64_t)-1) {
                 if (g_shutdown_target_tick == 0) {
                     console_puts("shutdown: no shutdown is currently scheduled\n");
-                    return -1;
+                    ret = -1;
+                } else {
+                    g_shutdown_target_tick = 0;
+                    console_puts("shutdown cancelled.\n");
+                    ret = 0;
                 }
+            } else if (delay_sec == 0) {
                 g_shutdown_target_tick = 0;
-                console_puts("shutdown cancelled.\n");
-                return 0;
-            }
-
-            if (delay_sec == 0) {
-                g_shutdown_target_tick = 0;
-                acpi_shutdown();
-                return 0;
-            }
-
-            g_shutdown_target_tick = pit_get_ticks() + (delay_sec * 100);
-            rtc_datetime_t dt;
-            if (rtc_get_datetime(&dt) == 0) {
-                uint8_t min = dt.minutes + (uint8_t)(delay_sec / 60);
-                uint8_t hr = dt.hours;
-                if (min >= 60) {
-                    hr = (hr + (min / 60)) % 24;
-                    min %= 60;
+                if (user_buf && cap > 0) {
+                    console_set_capture_buffer(NULL, 0);
                 }
-                console_printf("shutdown scheduled for %02u:%02u:%02u (in %llu minute), use 'shutdown -c' to cancel.\n",
-                               hr, min, dt.seconds, (unsigned long long)(delay_sec / 60));
+                system_shutdown_sequence(0);
+                return 0;
             } else {
-                console_printf("shutdown scheduled for in %llu seconds, use 'shutdown -c' to cancel.\n",
-                               (unsigned long long)delay_sec);
+                g_shutdown_target_tick = pit_get_ticks() + (delay_sec * 100);
+                rtc_datetime_t dt;
+                if (rtc_get_datetime(&dt) == 0) {
+                    uint8_t min = dt.minutes + (uint8_t)(delay_sec / 60);
+                    uint8_t hr = dt.hours;
+                    if (min >= 60) {
+                        hr = (hr + (min / 60)) % 24;
+                        min %= 60;
+                    }
+                    console_printf("shutdown scheduled for %02u:%02u:%02u (in %llu minute), use 'shutdown -c' to cancel.\n",
+                                   hr, min, dt.seconds, (unsigned long long)(delay_sec / 60));
+                } else {
+                    console_printf("shutdown scheduled for in %llu seconds, use 'shutdown -c' to cancel.\n",
+                                   (unsigned long long)delay_sec);
+                }
+                ret = 0;
             }
-            return 0;
+            if (user_buf && cap > 0) {
+                console_set_capture_buffer(NULL, 0);
+            }
+            return ret;
         }
 
         case SYS_STAT: {
@@ -366,45 +464,102 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             if (curr->privilege_level != PRIV_KERNEL) {
                 return -EPERM;
             }
-            cmd_flash("");
-            return 0;
+            uint64_t op = a1;
+            if (op == 0) {
+                /* Legacy fallback: run interactive cmd_flash directly */
+                int prev_tty = tty_get_active();
+                if (prev_tty != 3) {
+                    tty_switch(3);
+                }
+                __asm__ volatile ("sti");
+                cmd_flash("");
+                __asm__ volatile ("cli");
+                if (prev_tty != 3) {
+                    tty_switch(prev_tty);
+                }
+                return 0;
+            }
+            if (op == FLASH_OP_GET_COUNT) {
+                return (int64_t)storage_get_device_count();
+            }
+            if (op == FLASH_OP_GET_DEVICE) {
+                uint32_t idx = (uint32_t)a2;
+                flash_dev_info_t *out = (flash_dev_info_t *)a3;
+                if (!out) return -EINVAL;
+                StorageDevice *dev = storage_get_device(idx);
+                if (!dev) return -ENODEV;
+                flash_dev_info_t kinfo;
+                memset(&kinfo, 0, sizeof(kinfo));
+                strncpy(kinfo.name, dev->name, sizeof(kinfo.name) - 1);
+                strncpy(kinfo.type_str, dev->type_str, sizeof(kinfo.type_str) - 1);
+                strncpy(kinfo.bus_speed, dev->bus_speed, sizeof(kinfo.bus_speed) - 1);
+                strncpy(kinfo.size_str, dev->size_str, sizeof(kinfo.size_str) - 1);
+                strncpy(kinfo.devpath, dev->devpath, sizeof(kinfo.devpath) - 1);
+                kinfo.type = (uint32_t)dev->type;
+                kinfo.usb_version = dev->usb_version;
+                kinfo.raw_index = idx;
+                kinfo.total_sectors = dev->total_sectors;
+                memcpy(out, &kinfo, sizeof(flash_dev_info_t));
+                return 0;
+            }
+            if (op == FLASH_OP_INSTALL) {
+                uint32_t idx = (uint32_t)a2;
+                StorageDevice *dev = storage_get_device(idx);
+                if (!dev) return -ENODEV;
+                char *log_buf = (char *)a3;
+                size_t log_cap = (size_t)a4;
+                g_syscall_flash_log = log_buf;
+                g_syscall_flash_pos = 0;
+                g_syscall_flash_cap = log_cap;
+                if (g_syscall_flash_log && g_syscall_flash_cap > 0) {
+                    g_syscall_flash_log[0] = '\0';
+                }
+                int res = gpt_fat32_format_and_install(dev, flash_install_progress);
+                g_syscall_flash_log = NULL;
+                return (res == 0) ? 0 : -EIO;
+            }
+            return -EINVAL;
         }
 
         case SYS_FS:
-            cmd_fs((const char *)a1);
-            return 0;
+            return run_captured_str(cmd_fs, (const char *)a1, (char *)a2, (size_t)a3, curr->privilege_level);
 
         case SYS_CPU:
-            cpu_print_info();
-            return 0;
+            return run_captured_void(cpu_print_info, (char *)a1, (size_t)a2, curr->privilege_level);
 
-        case SYS_MEM:
-            cmd_mem();
-            return 0;
+        case SYS_MEM: {
+            if (a2 == 0) {
+                uint64_t *out = (uint64_t *)a1;
+                if (!validate_user_buffer(out, 4 * sizeof(uint64_t), curr->privilege_level)) return -EFAULT;
+                uint64_t total_bytes = (uint64_t)pmm_get_total_pages() * 4096ULL;
+                uint64_t free_bytes = (uint64_t)pmm_get_free_pages() * 4096ULL;
+                uint64_t used_bytes = (total_bytes > free_bytes) ? (total_bytes - free_bytes) : 0;
+                out[0] = total_bytes;
+                out[1] = used_bytes;
+                out[2] = free_bytes;
+                out[3] = (uint64_t)heap_get_used();
+                return 0;
+            }
+            return run_captured_void(cmd_mem, (char *)a1, (size_t)a2, curr->privilege_level);
+        }
 
         case SYS_PCI:
-            pci_scan_bus();
-            return 0;
+            return run_captured_void(pci_scan_bus, (char *)a1, (size_t)a2, curr->privilege_level);
 
         case SYS_DEVPATH:
-            cmd_devpath((const char *)a1);
-            return 0;
+            return run_captured_str(cmd_devpath, (const char *)a1, (char *)a2, (size_t)a3, curr->privilege_level);
 
         case SYS_ATTACHED_DRIVES:
-            cmd_attached_drives((const char *)a1);
-            return 0;
+            return run_captured_str(cmd_attached_drives, (const char *)a1, (char *)a2, (size_t)a3, curr->privilege_level);
 
         case SYS_SWITCH_TARGET:
-            cmd_switch_target((const char *)a1);
-            return 0;
+            return run_captured_str(cmd_switch_target, (const char *)a1, (char *)a2, (size_t)a3, curr->privilege_level);
 
         case SYS_SCREENRES:
-            cmd_screenres((const char *)a1);
-            return 0;
+            return run_captured_str(cmd_screenres, (const char *)a1, (char *)a2, (size_t)a3, curr->privilege_level);
 
         case SYS_PROCTEST:
-            cmd_proctest();
-            return 0;
+            return run_captured_void(cmd_proctest, (char *)a1, (size_t)a2, curr->privilege_level);
 
         case SYS_HALT:
             if (curr->privilege_level != PRIV_KERNEL) {
@@ -435,6 +590,17 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             if (!validate_user_str(path, 256, curr->privilege_level) ||
                 !validate_user_buffer(buf, size, curr->privilege_level)) return -EFAULT;
             return (int64_t)vfs_listdir_names(path, buf, size);
+        }
+
+        case SYS_GET_ARGS: {
+            char *buf = (char *)a1;
+            size_t size = (size_t)a2;
+            if (!validate_user_buffer(buf, size, curr->privilege_level) || size == 0) return -EFAULT;
+            size_t len = strlen(curr->cmdline);
+            if (len >= size) len = size - 1;
+            memcpy(buf, curr->cmdline, len);
+            buf[len] = '\0';
+            return (int64_t)len;
         }
 
         case SYS_GET_MOUSE_EVENT: {
@@ -494,12 +660,49 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
         case SYS_SHM_CLOSE:
             return (int64_t)sys_shm_close((int)a1);
 
+        case SYS_TTY_GET:
+            return (int64_t)tty_get_active();
+
+        case SYS_TTY_SET:
+            curr->tty = (int)a1;
+            return 0;
+
+        case SYS_MOUNT: {
+            const char *src = (const char *)a1;
+            const char *tgt = (const char *)a2;
+            const char *fstype = (const char *)a3;
+            char *log_buf = (char *)a4;
+            size_t log_sz = (size_t)a5;
+            if (src && !validate_user_str(src, 128, curr->privilege_level)) return -EFAULT;
+            if (tgt && !validate_user_str(tgt, 128, curr->privilege_level)) return -EFAULT;
+            if (fstype && !validate_user_str(fstype, 32, curr->privilege_level)) return -EFAULT;
+            if (log_buf && !validate_user_buffer(log_buf, log_sz, curr->privilege_level)) return -EFAULT;
+            if (!src && !tgt) {
+                return (int64_t)vfs_list_mounts(log_buf, log_sz);
+            }
+            if (src && strcmp(src, "-a") == 0) {
+                return (int64_t)vfs_auto_mount_all(log_buf, log_sz);
+            }
+            return (int64_t)vfs_mount_device(src, tgt, fstype, log_buf, log_sz);
+        }
+
+        case SYS_UMOUNT: {
+            const char *tgt = (const char *)a1;
+            char *log_buf = (char *)a2;
+            size_t log_sz = (size_t)a3;
+            if (!validate_user_str(tgt, 128, curr->privilege_level)) return -EFAULT;
+            if (log_buf && !validate_user_buffer(log_buf, log_sz, curr->privilege_level)) return -EFAULT;
+            return (int64_t)vfs_umount_target(tgt, log_buf, log_sz);
+        }
+
         case SYS_PANIC: {
-            if (curr->privilege_level != PRIV_KERNEL) {
+            const char *reason = (const char *)a1;
+            int is_init_panic = (reason && validate_user_str(reason, 256, curr->privilege_level) &&
+                                 strstr(reason, "unexpected second instance") != NULL);
+            if (curr->privilege_level != PRIV_KERNEL && !is_init_panic) {
                 return -EPERM;
             }
-            const char *reason = (const char *)a1;
-            if (reason && !validate_user_str(reason, 256, curr->privilege_level)) {
+            if (!reason || !validate_user_str(reason, 256, curr->privilege_level)) {
                 reason = "privileged requested kernel panic";
             }
             panic_context_t pctx;

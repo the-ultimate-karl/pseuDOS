@@ -201,8 +201,18 @@ void mice_handle_irq(void) {
         uint8_t prev_btns = g_buttons;
         g_buttons = btns;
 
-        g_mouse_x += dx;
-        g_mouse_y -= dy;
+        int32_t ax = dx;
+        int32_t ay = dy;
+        int abs_x = ax < 0 ? -ax : ax;
+        int abs_y = ay < 0 ? -ay : ay;
+        int mult_x = (abs_x > 5) ? 4 : ((abs_x > 2) ? 3 : 2);
+        int mult_y = (abs_y > 5) ? 4 : ((abs_y > 2) ? 3 : 2);
+
+        ax *= mult_x;
+        ay *= mult_y;
+
+        g_mouse_x += ax;
+        g_mouse_y -= ay;
 
         if (g_mouse_x < 0) g_mouse_x = 0;
         if (g_mouse_x > (int32_t)g_max_x) g_mouse_x = (int32_t)g_max_x;

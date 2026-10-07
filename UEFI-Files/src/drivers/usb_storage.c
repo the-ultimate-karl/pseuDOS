@@ -446,6 +446,34 @@ static int usb_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t cou
     return 0;
 }
 
+/* SCSI SYNCHRONIZE CACHE (10) Command (0x35) */
+static int usb_flush_cache_impl(StorageDevice *dev) {
+    if (!dev || !dev->driver_priv) return -1;
+    XhciDriver *d = (XhciDriver *)dev->driver_priv;
+
+    uint8_t cdb[10];
+    memset(cdb, 0, sizeof(cdb));
+    cdb[0] = 0x35; /* SYNCHRONIZE CACHE (10) */
+    return xhci_bot_exec(d, cdb, 10, NULL, 0, 0);
+}
+
+/* SCSI START STOP UNIT Command (0x1B) */
+static void usb_shutdown_impl(StorageDevice *dev) {
+    if (!dev || !dev->driver_priv) return;
+    XhciDriver *d = (XhciDriver *)dev->driver_priv;
+
+    /* 1. Flush volatile caches */
+    usb_flush_cache_impl(dev);
+
+    /* 2. Issue START STOP UNIT: START=0 to spin down / park */
+    uint8_t cdb[6];
+    memset(cdb, 0, sizeof(cdb));
+    cdb[0] = 0x1B; /* START STOP UNIT */
+    cdb[1] = 0x00; /* Immediate */
+    cdb[4] = 0x00; /* START=0 (stop unit) */
+    xhci_bot_exec(d, cdb, 6, NULL, 0, 0);
+}
+
 static void probe_usb_controller(uint8_t bus, uint8_t slot, uint8_t func, uint8_t prog_if) {
     /* Enable Bus Master (bit 2) and Memory Space (bit 1) */
     uint32_t cmd_reg = pci_read32(bus, slot, func, 0x04);
@@ -762,6 +790,8 @@ static void probe_usb_controller(uint8_t bus, uint8_t slot, uint8_t func, uint8_
             dev.driver_priv = d;
             dev.read_sectors = usb_read_sectors_impl;
             dev.write_sectors = usb_write_sectors_impl;
+            dev.flush = usb_flush_cache_impl;
+            dev.shutdown = usb_shutdown_impl;
 
             storage_format_size(dev.total_sectors * dev.sector_size, dev.size_str, sizeof(dev.size_str));
             snprintf(dev.devpath, sizeof(dev.devpath), "PciRoot(0x0)/Pci(0x%X,0x%X)/USB(0x%X,0x0)", slot, func, p);

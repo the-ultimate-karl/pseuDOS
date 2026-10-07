@@ -7,10 +7,23 @@ import tempfile
 import argparse
 import shutil
 
-def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_kb=2880):
+def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_kb=8192):
+    with open(efi_binary_path, "rb") as f:
+        efi_data = f.read()
+
+    kernel_data = None
+    if kernel_binary_path and os.path.exists(kernel_binary_path):
+        with open(kernel_binary_path, "rb") as f:
+            kernel_data = f.read()
+
+    needed_bytes = len(efi_data) + (len(kernel_data) if kernel_data else 0) + 1024 * 1024
+    needed_kb = (needed_bytes + 1023) // 1024
+    if size_kb < needed_kb:
+        size_kb = max(8192, ((needed_kb + 2047) // 2048) * 2048)
+
     sector_size = 512
     total_sectors = (size_kb * 1024) // sector_size
-    sec_per_clus = 2
+    sec_per_clus = 8
     rsvd_sec = 1
     num_fats = 2
     root_entries = 224
@@ -18,7 +31,7 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
     
     total_clusters = (total_sectors - rsvd_sec - root_sectors) // sec_per_clus
     fat_bytes = (total_clusters * 3 + 1) // 2
-    sec_per_fat = (fat_bytes + sector_size - 1) // sector_size
+    sec_per_fat = (fat_bytes + sector_size - 1) // sector_size + 1
     
     image = bytearray(total_sectors * sector_size)
     
@@ -43,6 +56,7 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
     
     def set_fat12(entry, val):
         offset = (entry * 3) // 2
+        if offset + 1 >= len(fat): return
         if entry % 2 == 0:
             fat[offset] = val & 0xFF
             fat[offset + 1] = (fat[offset + 1] & 0xF0) | ((val >> 8) & 0x0F)
@@ -75,13 +89,6 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
         struct.pack_into("<I", e, 28, size)
         return e
 
-    with open(efi_binary_path, "rb") as f:
-        efi_data = f.read()
-
-    kernel_data = None
-    if kernel_binary_path and os.path.exists(kernel_binary_path):
-        with open(kernel_binary_path, "rb") as f:
-            kernel_data = f.read()
 
     efi_clus = alloc(1)
     boot_clus = alloc(1)
@@ -127,7 +134,7 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
         d3 = bytearray(sec_per_clus * sector_size)
         d3[0:32] = mkentry(".          ", 0x10, pseudos_clus, 0)
         d3[32:64] = mkentry("..         ", 0x10, efi_clus, 0)
-        d3[64:96] = mkentry("KERNEL  BIN", 0x20, k_start, len(kernel_data))
+        d3[64:96] = mkentry("VPKERNEL   ", 0x20, k_start, len(kernel_data))
         d3[96:128] = mkentry("BOOTX64 EFI", 0x20, c_start, len(efi_data))
         d3[128:160] = mkentry("PSEUDOS EFI", 0x20, c_start, len(efi_data))
 
@@ -136,7 +143,7 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
         write_clus(grubcfg_clus, grub_bytes)
         d3[160:192] = mkentry("GRUB    CFG", 0x20, grubcfg_clus, len(grub_bytes))
 
-        osrelease_bytes = b"NAME=\"pseuDOS\"\r\nID=pseudos\r\nVERSION=\"0.6.0\"\r\nPRETTY_NAME=\"pseuDOS v0.6.0\"\r\nHOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\r\n"
+        osrelease_bytes = b"NAME=\"pseuDOS\"\r\nID=pseudos\r\nVERSION=\"0.7.0\"\r\nPRETTY_NAME=\"pseuDOS v0.7.0\"\r\nHOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\r\n"
         write_clus(osrelease_clus, osrelease_bytes)
         d3[192:224] = mkentry("OS-RELEA   ", 0x20, osrelease_clus, len(osrelease_bytes))
 
@@ -150,15 +157,15 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
         dp[96:128] = mkentry("BOOTMGR    ", 0x10, bootmgr_clus, 0)
         write_clus(protect_clus, dp)
 
-        # KRNL dir with primary KERNEL.BIN
+        # KRNL dir with primary VPKERNEL
         dk = bytearray(sec_per_clus * sector_size)
         dk[0:32] = mkentry(".          ", 0x10, krnl_clus, 0)
         dk[32:64] = mkentry("..         ", 0x10, protect_clus, 0)
-        dk[64:96] = mkentry("KERNEL  BIN", 0x20, k_start, len(kernel_data))
+        dk[64:96] = mkentry("VPKERNEL   ", 0x20, k_start, len(kernel_data))
         write_clus(krnl_clus, dk)
 
         # BOOTMGR dir with BOOT.CFG
-        cfg_bytes = b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\kernel.bin\r\nautoinit=\\protected\\krnl\\autoinit.bin\r\nshell=\\protected\\crit\\xshss.bin\r\ncmdline=quiet devpath=hardware\r\ndefault_resolution=1280x720\r\n"
+        cfg_bytes = b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\vpkernel\r\nautoinit=\\protected\\krnl\\autoinit.exe\r\nshell=\\protected\\gui\\superglue.exe\r\ncmdline=quiet devpath=hardware\r\ndefault_resolution=1280x720\r\n"
         write_clus(bootcfg_clus, cfg_bytes)
 
         db = bytearray(sec_per_clus * sector_size)

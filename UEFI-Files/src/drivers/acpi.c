@@ -4,8 +4,6 @@
 #include "bootinfo.h"
 #include "lib.h"
 
-extern const BootInfo *g_boot_info_global;
-
 typedef struct {
     char     signature[8];    /* "RSD PTR " */
     uint8_t  checksum;

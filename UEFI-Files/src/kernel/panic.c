@@ -144,6 +144,7 @@ void kernel_panic(const char *reason, const panic_context_t *ctx) {
     scheduler_stop();
 
     /* 2. Switch console to Classic BSOD color scheme (white on dark blue) */
+    console_set_fb_output(1);
     console_set_colors(0xFFFFFF, 0x000084);
     console_clear();
 

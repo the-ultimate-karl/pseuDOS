@@ -24,12 +24,13 @@ static int strcmp(const char *s1, const char *s2) {
 
 static __attribute__((unused)) int strncmp(const char *s1, const char *s2, size_t n) {
     if (!s1 || !s2 || n == 0) return 0;
-    while (n-- && *s1 && *s2) {
-        if (*s1 != *s2) return *(const unsigned char *)s1 - *(const unsigned char *)s2;
+    while (n && *s1 && (*s1 == *s2)) {
         s1++;
         s2++;
+        n--;
     }
-    return 0;
+    if (n == 0) return 0;
+    return *(const unsigned char *)s1 - *(const unsigned char *)s2;
 }
 
 static char *strcpy(char *dest, const char *src) {
@@ -53,16 +54,22 @@ static __attribute__((unused)) char *strncpy(char *dest, const char *src, size_t
     return dest;
 }
 
-static __attribute__((unused)) void *memcpy(void *dest, const void *src, size_t n) {
-    char *d = (char *)dest;
-    const char *s = (const char *)src;
+void *memcpy(void *dest, const void *src, size_t n) {
+    uint8_t *d = (uint8_t *)dest;
+    const uint8_t *s = (const uint8_t *)src;
+    while (n >= 8) {
+        *(uint64_t *)d = *(const uint64_t *)s;
+        d += 8;
+        s += 8;
+        n -= 8;
+    }
     while (n--) *d++ = *s++;
     return dest;
 }
 
-static __attribute__((unused)) void *memset(void *s, int c, size_t n) {
-    unsigned char *p = (unsigned char *)s;
-    while (n--) *p++ = (unsigned char)c;
+void *memset(void *s, int c, size_t n) {
+    uint8_t *p = (uint8_t *)s;
+    while (n--) *p++ = (uint8_t)c;
     return s;
 }
 
@@ -772,18 +779,6 @@ static void cmd_ls(const char *arg) {
         }
     }
 
-    if (!long_mode) {
-        if (target_path[0] != '\0') {
-            char path[256];
-            resolve_path(target_path, path, sizeof(path));
-            syscall(SYS_READDIR, (uint64_t)(uintptr_t)path, 0, 0, 0, 0);
-        } else {
-            syscall(SYS_READDIR, 0, 0, 0, 0, 0);
-        }
-        return;
-    }
-
-    /* Long listing mode (-l) */
     char path[256];
     resolve_path(target_path[0] != '\0' ? target_path : NULL, path, sizeof(path));
 
@@ -794,6 +789,26 @@ static void cmd_ls(const char *arg) {
         puts("ls: cannot access '");
         puts(target_path[0] != '\0' ? target_path : path);
         puts("': no such file or directory\n");
+        return;
+    }
+
+    if (!long_mode) {
+        size_t pos = 0;
+        int col_count = 0;
+        while (pos < (size_t)nbytes) {
+            const char *name = &names[pos];
+            size_t nlen = strlen(name);
+            if (nlen == 0) break;
+            puts(name);
+            puts("  ");
+            col_count++;
+            if (col_count >= 5) {
+                puts("\n");
+                col_count = 0;
+            }
+            pos += nlen + 1;
+        }
+        if (col_count != 0) puts("\n");
         return;
     }
 
@@ -1296,8 +1311,14 @@ static void cmd_write(const char *arg) {
     }
 }
 
+static char g_sys_cmd_buf[16384];
+
 static void cmd_ps(void) {
-    syscall(SYS_PS, 0, 0, 0, 0, 0);
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_PS, (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        puts(g_sys_cmd_buf);
+    }
 }
 
 static void cmd_kill(const char *arg) {
@@ -1609,40 +1630,237 @@ static void cmd_grub(void) {
     puts("=================================================================\n");
 }
 
+static void cmd_flash(void) {
+    int64_t priv = syscall(SYS_GET_PRIVILEGE, 0, 0, 0, 0, 0);
+    if (priv != 1) {
+        puts("flash: permission denied: installation requires 'sudo' or KERNEL mode\n");
+        return;
+    }
+
+    puts("flash: searching for attached internal mass storage devices... ");
+    int64_t count = syscall(SYS_FLASH, FLASH_OP_GET_COUNT, 0, 0, 0, 0);
+    if (count <= 0) {
+        puts("none found\nflash: error: no mass storage devices detected on system!\n");
+        return;
+    }
+
+    flash_dev_info_t matching[32];
+    uint32_t match_count = 0;
+    int is_external_view = 0;
+
+    /* Check internal drives first */
+    for (int i = 0; i < count && match_count < 32; i++) {
+        flash_dev_info_t info;
+        if (syscall(SYS_FLASH, FLASH_OP_GET_DEVICE, (uint64_t)i, (uint64_t)(uintptr_t)&info, 0, 0) == 0) {
+            if (info.type == 0 || info.type == 1) { /* SATA or NVME */
+                matching[match_count++] = info;
+            }
+        }
+    }
+
+    if (match_count > 0) {
+        puts("done\n");
+        puts("flash: identifying mass storage devices... done\n");
+        puts("flash: displaying options for internal mass storage devices\n\n");
+    } else {
+        puts("none found\n");
+        puts("flash: querying universal serial bus (usb) for any connected mass storage devices... ");
+
+        for (int i = 0; i < count && match_count < 32; i++) {
+            flash_dev_info_t info;
+            if (syscall(SYS_FLASH, FLASH_OP_GET_DEVICE, (uint64_t)i, (uint64_t)(uintptr_t)&info, 0, 0) == 0) {
+                if (info.type == 2) { /* USB */
+                    matching[match_count++] = info;
+                }
+            }
+        }
+
+        if (match_count > 0) {
+            puts("done\n");
+            puts("flash: identifying mass storage devices... done\n");
+            puts("flash: displaying options for external mass storage devices\n\n");
+            is_external_view = 1;
+        } else {
+            puts("none found\n");
+            puts("flash: error: no mass storage devices detected on system!\n");
+            return;
+        }
+    }
+
+    puts("                                [pseuDOS Installation]\n");
+    puts("==========================================================================\n");
+    puts("choose the mass storage device you want to install pseuDOS on:\n\n");
+    puts("[NO]    |    [DEVICE_NAME]                      |    [SIZE]\n");
+    puts("--------+---------------------------------------+------------\n");
+
+    for (uint32_t i = 0; i < match_count; i++) {
+        print_num((uint64_t)(i + 1));
+        if (i + 1 < 10) puts("       |    ");
+        else puts("      |    ");
+
+        puts(matching[i].name);
+        size_t nlen = strlen(matching[i].name);
+        for (size_t s = nlen; s < 35; s++) putc(' ');
+        puts("|    ");
+        puts(matching[i].size_str);
+        puts("\n");
+    }
+    puts("\n");
+
+    flash_dev_info_t selected_dev;
+    char line_buf[128];
+
+    while (1) {
+        readline(line_buf, sizeof(line_buf), "flash > ");
+        char *input = trim(line_buf);
+
+        if (input[0] == '\0') {
+            continue;
+        }
+
+        if (strcmp(input, "cancel") == 0 || strcmp(input, "stop") == 0) {
+            puts("flash: cancelling installation...\n");
+            return;
+        }
+
+        int sel_num = atoi(input);
+        if (sel_num < 1 || sel_num > (int)match_count) {
+            puts("flash: error: unknown command\n");
+            continue;
+        }
+
+        selected_dev = matching[sel_num - 1];
+        break;
+    }
+
+    /* USB 3.1 Gen 1 minimum speed verification */
+    if (is_external_view || selected_dev.type == 2) {
+        if (selected_dev.usb_version < 0x0310) {
+            puts("ATTENTION! you are attempting to install pseuDOS to an external universal serial bus drive that does not meet the minimum requirement of USB 3.1 Gen 1. it is highly recommended to use a faster drive to make sure installation does not crawl, and to ensure boot times are at max.\n");
+            puts("are you sure you want to do this?\n(y/N) ");
+            readline(line_buf, sizeof(line_buf), "");
+            char *ans = trim(line_buf);
+            if (ans[0] != 'y' && ans[0] != 'Y') {
+                puts("flash: cancelling installation...\n");
+                return;
+            }
+        }
+    }
+
+    /* Safety Confirmation Warning */
+    puts("WARNING!!! ensure you have selected the proper target, as this command will\n");
+    puts("erase EVERYTHING on the selected drive!!\n");
+    puts("are you sure you want to erase and format ");
+    puts(selected_dev.name);
+    puts("?\n(y/N) ");
+    readline(line_buf, sizeof(line_buf), "");
+    char *ans = trim(line_buf);
+    if (ans[0] != 'y' && ans[0] != 'Y') {
+        puts("flash: cancelling installation...\n");
+        return;
+    }
+
+    puts("\n");
+    static char log_buf[4096];
+    log_buf[0] = '\0';
+    int64_t res = syscall(SYS_FLASH, FLASH_OP_INSTALL, (uint64_t)selected_dev.raw_index, (uint64_t)(uintptr_t)log_buf, sizeof(log_buf), 0);
+    if (log_buf[0] != '\0') {
+        puts(log_buf);
+    }
+    if (res != 0) {
+        puts("flash: fatal error: installation failed due to hardware disk write error!\n");
+        return;
+    }
+
+    puts("\nflash: successfully installed pseuDOS to ");
+    puts(selected_dev.name);
+    puts(" (devpath: ");
+    puts(selected_dev.devpath);
+    puts(")\n");
+    puts("flash: please remove the installation media and press ENTER\n");
+
+    /* Strict wait for ENTER key only */
+    while (1) {
+        char c = getchar();
+        if (c == '\r' || c == '\n') {
+            break;
+        }
+    }
+
+    puts("rebooting system into newly installed pseuDOS...\n");
+    syscall(SYS_REBOOT, 0, 0, 0, 0, 0);
+}
+
 static void cmd_fs(const char *arg) {
-    syscall(SYS_FS, (uint64_t)(uintptr_t)(arg ? arg : ""), 0, 0, 0, 0);
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_FS, (uint64_t)(uintptr_t)(arg ? arg : ""), (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        puts(g_sys_cmd_buf);
+    }
 }
 
 static void cmd_cpu(void) {
-    syscall(SYS_CPU, 0, 0, 0, 0, 0);
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_CPU, (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        puts(g_sys_cmd_buf);
+    }
 }
 
 static void cmd_mem(void) {
-    syscall(SYS_MEM, 0, 0, 0, 0, 0);
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_MEM, (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        puts(g_sys_cmd_buf);
+    }
 }
 
 static void cmd_pci(void) {
-    syscall(SYS_PCI, 0, 0, 0, 0, 0);
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_PCI, (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        puts(g_sys_cmd_buf);
+    }
 }
 
 static void cmd_devpath(const char *arg) {
-    syscall(SYS_DEVPATH, (uint64_t)(uintptr_t)(arg ? arg : ""), 0, 0, 0, 0);
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_DEVPATH, (uint64_t)(uintptr_t)(arg ? arg : ""), (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        puts(g_sys_cmd_buf);
+    }
 }
 
 static void cmd_attached_drives(const char *arg) {
-    syscall(SYS_ATTACHED_DRIVES, (uint64_t)(uintptr_t)(arg ? arg : ""), 0, 0, 0, 0);
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_ATTACHED_DRIVES, (uint64_t)(uintptr_t)(arg ? arg : ""), (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        puts(g_sys_cmd_buf);
+    }
 }
 
 static void cmd_switch_target(const char *arg) {
-    syscall(SYS_SWITCH_TARGET, (uint64_t)(uintptr_t)(arg ? arg : ""), 0, 0, 0, 0);
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_SWITCH_TARGET, (uint64_t)(uintptr_t)(arg ? arg : ""), (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        puts(g_sys_cmd_buf);
+    }
 }
 
 static void cmd_screenres(const char *arg) {
-    syscall(SYS_SCREENRES, (uint64_t)(uintptr_t)(arg ? arg : ""), 0, 0, 0, 0);
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_SCREENRES, (uint64_t)(uintptr_t)(arg ? arg : ""), (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        puts(g_sys_cmd_buf);
+    }
 }
 
 static void cmd_proctest(void) {
-    syscall(SYS_PROCTEST, 0, 0, 0, 0, 0);
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_PROCTEST, (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        puts(g_sys_cmd_buf);
+    }
 }
 
 static void cmd_halt(void) {
@@ -1755,7 +1973,11 @@ static void execute_command_internal(char *cmd_line) {
     } else if (strcmp(cmd, "kill") == 0) {
         cmd_kill(arg);
     } else if (strcmp(cmd, "dmesg") == 0) {
-        syscall(SYS_DMESG, 0, 0, 0, 0, 0);
+        g_sys_cmd_buf[0] = '\0';
+        int64_t res = syscall(SYS_DMESG, (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0, 0);
+        if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+            puts(g_sys_cmd_buf);
+        }
     } else if (strcmp(cmd, "fs") == 0 || strcmp(cmd, "mount") == 0 || strcmp(cmd, "df") == 0) {
         cmd_fs(arg);
     } else if (strcmp(cmd, "cpu") == 0) {
@@ -1787,10 +2009,7 @@ static void execute_command_internal(char *cmd_line) {
     } else if (strcmp(cmd, "grub") == 0) {
         cmd_grub();
     } else if (strcmp(cmd, "flash") == 0) {
-        int64_t res = syscall(SYS_FLASH, 0, 0, 0, 0, 0);
-        if (res == -EPERM) {
-            puts("flash: permission denied: installation requires 'sudo' or KERNEL mode\n");
-        }
+        cmd_flash();
     } else if (strcmp(cmd, "panic") == 0) {
         if (arg && (strcmp(arg, "pagefault") == 0 || strcmp(arg, "pf") == 0)) {
             volatile uint64_t *bad_ptr = (volatile uint64_t *)0x00000080DEAD0000ULL;
@@ -1835,10 +2054,13 @@ static void execute_command_internal(char *cmd_line) {
         if (arg && strcmp(arg, "now") == 0) {
             puts("powering off system immediately...\n");
             syscall(SYS_SHUTDOWN, 0, 0, 0, 0, 0);
-        } else if (arg && strcmp(arg, "-c") == 0) {
-            syscall(SYS_SHUTDOWN, (uint64_t)-1, 0, 0, 0, 0);
         } else {
-            syscall(SYS_SHUTDOWN, 60, 0, 0, 0, 0);
+            uint64_t delay = (arg && strcmp(arg, "-c") == 0) ? (uint64_t)-1 : 60;
+            g_sys_cmd_buf[0] = '\0';
+            syscall(SYS_SHUTDOWN, delay, (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0);
+            if (g_sys_cmd_buf[0] != '\0') {
+                puts(g_sys_cmd_buf);
+            }
         }
     } else if (strcmp(cmd, "exit") == 0) {
         int64_t priv = syscall(SYS_GET_PRIVILEGE, 0, 0, 0, 0, 0);
@@ -1860,7 +2082,12 @@ static void execute_command_internal(char *cmd_line) {
 void xshss_main(void) {
     env_init();
 
-    puts("[  xhss  ] started\n");
+    int64_t my_tty = syscall(SYS_TTY_GET, 0, 0, 0, 0, 0);
+    if (my_tty == 3) {
+        puts("[  xhss  ] started (tty3)\n");
+    } else {
+        puts("[  xhss  ] started (console)\n");
+    }
     puts("shell started\n");
     puts("type 'help' for a list of commands.\n\n");
 

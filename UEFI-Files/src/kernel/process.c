@@ -10,6 +10,7 @@
 #include "panic.h"
 #include "ipc.h"
 #include "shm.h"
+#include "pit.h"
 
 extern uint64_t g_current_kernel_rsp;
 
@@ -118,8 +119,27 @@ void process_free_resources(process_t *p) {
     p->state = PROCESS_STATE_UNUSED;
 }
 
+int process_has_active_init(void) {
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        process_t *p = &g_process_table[i];
+        if (p->state != PROCESS_STATE_UNUSED && p->state != PROCESS_STATE_KILLED) {
+            if (p->pid == 1) return 1;
+            if (p->name[0] && strstr(p->name, "autoinit") != NULL) return 1;
+        }
+    }
+    return 0;
+}
+
 process_t *process_create(const char *name, void (*entry)(void), process_privilege_t priv) {
     if (!entry) return NULL;
+
+    /* Detect unexpected second instance of init process (autoinit) */
+    if (name && strstr(name, "autoinit") != NULL) {
+        if (process_has_active_init()) {
+            klog_err("CRITICAL: Detected second instance of init process '%s'!", name);
+            kernel_panic("unexpected second instance of init process detected!", NULL);
+        }
+    }
 
     /* 1. Prefer truly unused slots */
     int slot = -1;
@@ -165,7 +185,9 @@ process_t *process_create(const char *name, void (*entry)(void), process_privile
     p->cr3 = user_pml4 ? (uint64_t)(uintptr_t)user_pml4 : (uint64_t)(uintptr_t)vmm_get_kernel_pml4();
     p->time_slice = DEFAULT_TIME_SLICE;
     p->total_ticks = 0;
+    p->tty = (g_current_process && g_current_process->tty != 0) ? g_current_process->tty : 1;
     strncpy(p->cwd, g_current_process ? g_current_process->cwd : "/", sizeof(p->cwd) - 1);
+    p->cmdline[0] = '\0';
 
     /* Allocate dedicated 16KB kernel stack */
     p->kernel_stack_base = kcalloc(1, PROCESS_STACK_SIZE);
@@ -191,12 +213,8 @@ process_t *process_create(const char *name, void (*entry)(void), process_privile
 }
 
 int process_kill(uint32_t pid) {
-    if (pid == 0) {
-        console_puts("kill: cannot kill kernel idle process (PID 0)\n");
-        return -1;
-    }
-    if (pid == 1) {
-        kernel_panic("Attempted to kill init! (PID 1)", NULL);
+    if (pid < 3) {
+        kernel_panic("Attempted to kill critical processes!", NULL);
     }
 
     process_t *p = process_get_by_pid(pid);
@@ -205,13 +223,15 @@ int process_kill(uint32_t pid) {
         return -1;
     }
 
-    if (p->pid == 1) {
-        kernel_panic("Attempted to kill init! (PID 1)", NULL);
+    if (p->pid < 3) {
+        kernel_panic("Attempted to kill critical processes!", NULL);
     }
 
     p->state = PROCESS_STATE_KILLED;
     p->exit_code = -9;
     klog_info("Killed process PID %u '%s'", pid, p->name);
+    ipc_close_process_sockets(p->pid);
+    shm_cleanup_process(p->pid);
 
     if (p == g_current_process) {
         scheduler_yield();
@@ -222,21 +242,18 @@ int process_kill(uint32_t pid) {
 void process_exit(int exit_code) {
     process_t *p = process_get_current();
     if (!p || p->pid == 0) {
-        /* Idle process cannot exit */
-        while (1) {
-            __asm__ volatile ("hlt");
-        }
+        kernel_panic("Attempted to kill critical processes!", NULL);
     }
 
-    if (p->pid == 1) {
-        char panic_msg[64];
-        snprintf(panic_msg, sizeof(panic_msg), "init (PID 1) exited with code %d", exit_code);
-        kernel_panic(panic_msg, NULL);
+    if (p->pid < 3) {
+        kernel_panic("Attempted to kill critical processes!", NULL);
     }
 
     p->exit_code = exit_code;
     p->state = PROCESS_STATE_KILLED;
     klog_info("Process PID %u '%s' exited with code %d", p->pid, p->name, exit_code);
+    ipc_close_process_sockets(p->pid);
+    shm_cleanup_process(p->pid);
     scheduler_yield();
 
     /* Should not be reached */
@@ -266,5 +283,84 @@ void process_dump_list(void) {
             console_puts("USER        ");
         }
         console_printf("%u          %s\n", (uint32_t)p->total_ticks, p->name);
+    }
+}
+
+void system_shutdown_sequence(int is_reboot) {
+    klog_info("System shutdown sequence initiated (is_reboot=%d)", is_reboot);
+
+    /* 1. Stop multitasking preemption so no userland process can interrupt or write to fb */
+    scheduler_disable();
+
+    /* 2. Determine screen dimensions and clear to classic Windows teal */
+    uint32_t width = fb_get_width();
+    uint32_t height = fb_get_height();
+    if (width == 0) width = 1280;
+    if (height == 0) height = 720;
+
+    uint32_t color_bg = 0x00008080; /* Classic Desktop Teal */
+    uint32_t color_fg = 0x00FFFFFF; /* White */
+
+    fb_clear(color_bg);
+
+    /* 3. Draw centered Line 1: "shutting down system..." or "restarting system..." */
+    const char *line1 = is_reboot ? "restarting system..." : "shutting down system...";
+    int len1 = (int)strlen(line1);
+    int x1 = ((int)width - (len1 * 16)) / 2;
+    int y1 = ((int)height / 2) - 28;
+    fb_draw_string_scaled((uint32_t)x1, (uint32_t)y1, line1, color_fg, color_bg, 2);
+
+    int y2 = ((int)height / 2) + 16;
+
+    /* 4. Kill user applications and active services in reverse order of creation */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = MAX_PROCESSES - 1; i >= 1; i--) {
+            process_t *p = &g_process_table[i];
+            if (p->state == PROCESS_STATE_UNUSED || p->state == PROCESS_STATE_KILLED) {
+                continue;
+            }
+            if (pass == 0 && p->pid <= 5) continue;
+            if (pass == 1 && p->pid > 5) continue;
+
+            /* Draw centered Line 2: "Killing process: <p->name>" */
+            char line2[64];
+            snprintf(line2, sizeof(line2), "Killing process: %s", p->name);
+            int len2 = (int)strlen(line2);
+            int x2 = ((int)width - (len2 * 16)) / 2;
+
+            /* Clear line 2 area and draw updated message */
+            fb_fill_rect(0, (uint32_t)(y2 - 6), width, 44, color_bg);
+            fb_draw_string_scaled((uint32_t)x2, (uint32_t)y2, line2, color_fg, color_bg, 2);
+
+            klog_info("Shutdown: terminating PID %u '%s'", p->pid, p->name);
+
+            /* Perform process termination */
+            if (p->pid < 3 || p == g_current_process) {
+                p->state = PROCESS_STATE_KILLED;
+                p->exit_code = 0;
+                ipc_close_process_sockets(p->pid);
+                shm_cleanup_process(p->pid);
+            } else {
+                process_kill(p->pid);
+            }
+
+            /* Verbose delay so each process closing is visible */
+            pit_sleep_ms(250);
+        }
+    }
+
+    /* 5. Final status */
+    fb_fill_rect(0, (uint32_t)(y2 - 6), width, 44, color_bg);
+    const char *fin_msg = is_reboot ? "Restarting..." : "Power off.";
+    int fin_len = (int)strlen(fin_msg);
+    int fin_x = ((int)width - (fin_len * 16)) / 2;
+    fb_draw_string_scaled((uint32_t)fin_x, (uint32_t)y2, fin_msg, color_fg, color_bg, 2);
+    pit_sleep_ms(400);
+
+    /* 6. Hardware poweroff / reset */
+    if (is_reboot) {
+        acpi_reboot();
+    } else {
+        acpi_shutdown();
     }
 }

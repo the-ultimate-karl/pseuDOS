@@ -44,5 +44,6 @@ int64_t sys_recv(int sockfd, void *buf, size_t len, int flags);
 int sys_close_socket(int sockfd);
 int sys_poll(pollfd_t *fds, size_t nfds, int timeout_ms);
 void ipc_close_process_sockets(uint32_t pid);
+int ipc_unbind_path(const char *path);
 
 #endif /* IPC_H */

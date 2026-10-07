@@ -2,6 +2,7 @@
 #include "drivers.h"
 #include "io.h"
 #include "lib.h"
+#include "vmm.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
@@ -206,12 +207,16 @@ static int nvme_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t cou
     if (!dev || !dev->driver_priv || !buf || count == 0) return -1;
     NvmeDriver *d = (NvmeDriver *)dev->driver_priv;
 
+    uint32_t sec_sz = dev->sector_size > 0 ? dev->sector_size : 512;
+    uint32_t max_chunk = 4096 / sec_sz;
+    if (max_chunk == 0) max_chunk = 1;
+
     uint32_t sectors_left = count;
     uint64_t cur_lba = lba;
     uint8_t *dst = (uint8_t *)buf;
 
     while (sectors_left > 0) {
-        uint32_t chunk = sectors_left > 8 ? 8 : sectors_left;
+        uint32_t chunk = sectors_left > max_chunk ? max_chunk : sectors_left;
 
         NvmeCmd cmd;
         memset(&cmd, 0, sizeof(NvmeCmd));
@@ -226,11 +231,11 @@ static int nvme_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t cou
             return -1;
         }
 
-        memcpy(dst, g_nvme_io_buf, chunk * 512);
+        memcpy(dst, g_nvme_io_buf, chunk * sec_sz);
 
         sectors_left -= chunk;
         cur_lba += chunk;
-        dst += chunk * 512;
+        dst += chunk * sec_sz;
     }
 
     return 0;
@@ -240,13 +245,17 @@ static int nvme_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t co
     if (!dev || !dev->driver_priv || !buf || count == 0) return -1;
     NvmeDriver *d = (NvmeDriver *)dev->driver_priv;
 
+    uint32_t sec_sz = dev->sector_size > 0 ? dev->sector_size : 512;
+    uint32_t max_chunk = 4096 / sec_sz;
+    if (max_chunk == 0) max_chunk = 1;
+
     uint32_t sectors_left = count;
     uint64_t cur_lba = lba;
     const uint8_t *src = (const uint8_t *)buf;
 
     while (sectors_left > 0) {
-        uint32_t chunk = sectors_left > 8 ? 8 : sectors_left;
-        memcpy(g_nvme_io_buf, src, chunk * 512);
+        uint32_t chunk = sectors_left > max_chunk ? max_chunk : sectors_left;
+        memcpy(g_nvme_io_buf, src, chunk * sec_sz);
 
         NvmeCmd cmd;
         memset(&cmd, 0, sizeof(NvmeCmd));
@@ -263,7 +272,7 @@ static int nvme_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t co
 
         sectors_left -= chunk;
         cur_lba += chunk;
-        src += chunk * 512;
+        src += chunk * sec_sz;
     }
 
     return 0;
@@ -280,9 +289,26 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     uint32_t cmd_reg = nvme_pci_read32(bus, slot, func, 0x04);
     nvme_pci_write16(bus, slot, func, 0x04, (uint16_t)(cmd_reg | 0x06));
 
+    /* Determine BAR0 size via PCI configuration space */
+    uint32_t orig_bar0_low = nvme_pci_read32(bus, slot, func, 0x10);
+    pci_write_config_32(bus, slot, func, 0x10, 0xFFFFFFFF);
+    uint32_t mask_low = nvme_pci_read32(bus, slot, func, 0x10) & 0xFFFFFFF0;
+    pci_write_config_32(bus, slot, func, 0x10, orig_bar0_low);
+
+    uint64_t bar_size = ~(mask_low) + 1;
+    if (bar_size == 0 || bar_size > 0x10000000) bar_size = 0x10000; /* Default 64KB */
+
+    /* Map BAR0 physical pages into kernel higher-half virtual address space */
+    uint64_t bar0_virt = KERNEL_VIRTUAL_BASE + bar0_phys;
+    uint64_t bar0_page_phys = bar0_phys & ~0xFFFULL;
+    uint64_t bar0_page_virt = bar0_virt & ~0xFFFULL;
+    size_t num_pages = (size_t)((bar_size + 4095) / 4096);
+    if (num_pages < 16) num_pages = 16;
+    vmm_map_pages(vmm_get_kernel_pml4(), bar0_page_virt, bar0_page_phys, num_pages, PTE_WRITABLE | PTE_PCD | PTE_PWT);
+
     NvmeDriver *driver = (NvmeDriver *)kmalloc(sizeof(NvmeDriver));
     memset(driver, 0, sizeof(NvmeDriver));
-    driver->bar0 = (uintptr_t)bar0_phys;
+    driver->bar0 = (uintptr_t)bar0_virt;
     driver->acq_phase = 1;
     driver->iocq_phase = 1;
 
@@ -292,8 +318,10 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
 
     /* Disable controller before config */
     *nvme_reg(driver, NVME_REG_CC) = 0;
-    int timeout = 50000;
-    while ((*nvme_reg(driver, NVME_REG_CSTS) & 1) && --timeout > 0);
+    int timeout = 1000000;
+    while ((*nvme_reg(driver, NVME_REG_CSTS) & 1) && --timeout > 0) {
+        __asm__ volatile ("pause" ::: "memory");
+    }
 
     /* Use 4096-byte aligned static queues */
     driver->asq = g_asq;
@@ -312,8 +340,10 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     /* Enable controller: CC.EN = 1, IOSQES = 6 (64B), IOCQES = 4 (16B) */
     *nvme_reg(driver, NVME_REG_CC) = (1 << 0) | (6 << 16) | (4 << 20);
 
-    timeout = 50000;
-    while (!(*nvme_reg(driver, NVME_REG_CSTS) & 1) && --timeout > 0);
+    timeout = 1000000;
+    while (!(*nvme_reg(driver, NVME_REG_CSTS) & 1) && --timeout > 0) {
+        __asm__ volatile ("pause" ::: "memory");
+    }
 
     /* Query Identify Controller */
     memset(g_ident_buf, 0, sizeof(g_ident_buf));

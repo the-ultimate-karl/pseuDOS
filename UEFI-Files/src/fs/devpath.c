@@ -3,7 +3,7 @@
 
 BootLocationInfo g_boot_location = {
     .base_hardware_path = "",
-    .partition_boot_file = "\\protected\\krnl\\kernel.bin",
+    .partition_boot_file = "\\protected\\krnl\\vpkernel",
     .mode = DEVPATH_MODE_SOFTWARE
 };
 

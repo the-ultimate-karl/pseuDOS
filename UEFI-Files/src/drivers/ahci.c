@@ -164,8 +164,13 @@ static int ahci_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t cou
     HbaCmdTable *cmd_table = driver->cmd_tables;
     memset(cmd_table, 0, sizeof(HbaCmdTable));
 
-    cmd_table->prdt_entry[0].dba = (uint32_t)(uintptr_t)buf;
-    cmd_table->prdt_entry[0].dbau = (uint32_t)(((uint64_t)(uintptr_t)buf) >> 32);
+    uint64_t phys_buf = (uint64_t)(uintptr_t)buf;
+    if (phys_buf >= 0xFFFF800000000000ULL) {
+        phys_buf -= 0xFFFF800000000000ULL;
+    }
+
+    cmd_table->prdt_entry[0].dba = (uint32_t)phys_buf;
+    cmd_table->prdt_entry[0].dbau = (uint32_t)(phys_buf >> 32);
     cmd_table->prdt_entry[0].dbc = (count * 512) - 1;
     cmd_table->prdt_entry[0].i = 1;
 
@@ -226,8 +231,13 @@ static int ahci_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t co
     HbaCmdTable *cmd_table = driver->cmd_tables;
     memset(cmd_table, 0, sizeof(HbaCmdTable));
 
-    cmd_table->prdt_entry[0].dba = (uint32_t)(uintptr_t)buf;
-    cmd_table->prdt_entry[0].dbau = (uint32_t)(((uint64_t)(uintptr_t)buf) >> 32);
+    uint64_t phys_buf = (uint64_t)(uintptr_t)buf;
+    if (phys_buf >= 0xFFFF800000000000ULL) {
+        phys_buf -= 0xFFFF800000000000ULL;
+    }
+
+    cmd_table->prdt_entry[0].dba = (uint32_t)phys_buf;
+    cmd_table->prdt_entry[0].dbau = (uint32_t)(phys_buf >> 32);
     cmd_table->prdt_entry[0].dbc = (count * 512) - 1;
     cmd_table->prdt_entry[0].i = 1;
 

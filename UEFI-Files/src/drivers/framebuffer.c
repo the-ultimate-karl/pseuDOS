@@ -3,6 +3,7 @@
 #include "font.h"
 #include "io.h"
 #include "lib.h"
+#include "shm.h"
 
 #define VBE_DISPI_IOPORT_INDEX 0x01CE
 #define VBE_DISPI_IOPORT_DATA  0x01CF
@@ -93,6 +94,16 @@ uint32_t fb_get_height(void) {
     return g_fb_initialized ? g_fb.height : 0;
 }
 
+uint64_t fb_get_physical_base(void) {
+    return g_fb_initialized ? g_fb.physical_base : 0;
+}
+
+uint64_t fb_get_buffer_size(void) {
+    if (!g_fb_initialized) return 0;
+    if (g_fb.buffer_size != 0) return g_fb.buffer_size;
+    return (uint64_t)g_fb.pixels_per_scanline * g_fb.height * 4;
+}
+
 uint32_t fb_get_last_good_width(void) {
     return g_last_good_width;
 }
@@ -166,6 +177,18 @@ int fb_set_resolution(uint32_t width, uint32_t height) {
     g_fb.width = width;
     g_fb.height = height;
     g_fb.pixels_per_scanline = new_stride;
+    g_fb.buffer_size = (uint64_t)new_stride * height * 4;
+
+    if (g_boot_info_global) {
+        g_boot_info_global->fb.width = width;
+        g_boot_info_global->fb.height = height;
+        g_boot_info_global->fb.pixels_per_scanline = new_stride;
+        g_boot_info_global->fb.buffer_size = g_fb.buffer_size;
+        g_boot_info_global->fb.physical_base = g_fb.physical_base;
+    }
+
+    shm_update_framebuffer(g_fb.physical_base, (size_t)g_fb.buffer_size);
+    mice_set_bounds(width, height);
 
     /* Recalibrate text console matrix, redraw preserved history */
     console_rebuild_layout();
@@ -175,6 +198,7 @@ int fb_set_resolution(uint32_t width, uint32_t height) {
     g_last_good_height = height;
 
     return 0;
+
 }
 
 static inline uint32_t color_to_raw(uint32_t rgb) {
@@ -244,6 +268,49 @@ void fb_draw_char(uint32_t x, uint32_t y, char c, uint32_t fg_color, uint32_t bg
                 fb[offset + col] = raw_bg;
             }
         }
+    }
+}
+
+void fb_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t fg_color, uint32_t bg_color) {
+    if (!str || !g_fb_initialized) return;
+    while (*str) {
+        fb_draw_char(x, y, *str, fg_color, bg_color);
+        x += FONT_WIDTH;
+        str++;
+    }
+}
+
+void fb_draw_string_scaled(uint32_t x, uint32_t y, const char *str, uint32_t fg_color, uint32_t bg_color, int scale) {
+    if (!str || !g_fb_initialized || scale <= 0) return;
+    uint32_t raw_fg = color_to_raw(fg_color);
+    uint32_t raw_bg = color_to_raw(bg_color);
+    volatile uint32_t *fb = (volatile uint32_t *)g_fb.physical_base;
+
+    while (*str) {
+        unsigned char uc = (unsigned char)*str;
+        uint8_t glyph_idx = (uc >= 32 && uc <= 127) ? (uint8_t)(uc - 32) : (uint8_t)('?' - 32);
+        const uint8_t *glyph = g_font_8x16[glyph_idx];
+
+        for (int r = 0; r < FONT_HEIGHT; r++) {
+            uint8_t line = glyph[r];
+            for (int s_r = 0; s_r < scale; s_r++) {
+                uint32_t py = y + r * scale + s_r;
+                if (py >= g_fb.height) continue;
+                uint32_t row_offset = py * g_fb.pixels_per_scanline;
+
+                for (int col = 0; col < FONT_WIDTH; col++) {
+                    uint32_t raw_col = ((line >> (7 - col)) & 1) ? raw_fg : raw_bg;
+                    for (int s_c = 0; s_c < scale; s_c++) {
+                        uint32_t px = x + col * scale + s_c;
+                        if (px < g_fb.width) {
+                            fb[row_offset + px] = raw_col;
+                        }
+                    }
+                }
+            }
+        }
+        x += FONT_WIDTH * scale;
+        str++;
     }
 }
 

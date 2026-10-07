@@ -52,7 +52,9 @@ typedef struct process {
     int exit_code;
     uint64_t time_slice;
     uint64_t total_ticks;
+    int tty;
     char cwd[256];
+    char cmdline[256];
 } process_t;
 
 /* Core Process API */
@@ -67,5 +69,7 @@ int process_kill(uint32_t pid);
 void process_exit(int exit_code);
 void process_dump_list(void);
 void process_free_resources(process_t *proc);
+int process_has_active_init(void);
+void system_shutdown_sequence(int is_reboot);
 
 #endif /* PROCESS_H */

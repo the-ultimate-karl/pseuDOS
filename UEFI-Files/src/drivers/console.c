@@ -22,6 +22,63 @@ static uint32_t g_max_cols = 80;
 static uint32_t g_max_rows = 25;
 
 static int g_uart_present = 0;
+static int g_fb_output_enabled = 1;
+
+static int g_active_tty = 1;
+
+static char *g_console_capture_buf = NULL;
+static size_t g_console_capture_cap = 0;
+static size_t g_console_capture_len = 0;
+
+void console_set_capture_buffer(char *buf, size_t cap) {
+    g_console_capture_buf = buf;
+    g_console_capture_cap = cap;
+    g_console_capture_len = 0;
+    if (buf && cap > 0) {
+        buf[0] = '\0';
+    }
+}
+
+size_t console_get_capture_length(void) {
+    return g_console_capture_len;
+}
+
+void console_set_fb_output(int enable) {
+    g_fb_output_enabled = enable;
+}
+
+int console_get_fb_output(void) {
+    return g_fb_output_enabled;
+}
+
+int tty_get_active(void) {
+    return g_active_tty;
+}
+
+void console_redraw(void) {
+    fb_clear(g_bg_color);
+    for (uint32_t r = 0; r < g_max_rows; r++) {
+        for (uint32_t c = 0; c < g_max_cols; c++) {
+            char ch = g_text_buffer[r][c];
+            if (ch > 32 && ch <= 126) {
+                fb_draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ch, g_fg_color, g_bg_color);
+            }
+            g_rendered_buffer[r][c] = (ch == 0) ? ' ' : ch;
+        }
+    }
+}
+
+void tty_switch(int target_tty) {
+    if (target_tty == g_active_tty) return;
+    if (target_tty == 3) {
+        g_active_tty = 3;
+        console_set_fb_output(1);
+        console_redraw();
+    } else if (target_tty == 1) {
+        g_active_tty = 1;
+        console_set_fb_output(0);
+    }
+}
 
 int uart_is_present(void) {
     return g_uart_present;
@@ -77,7 +134,9 @@ static void console_scroll(void) {
             char ch = g_text_buffer[r][c];
             if (ch == 0) ch = ' ';
             if (ch != g_rendered_buffer[r][c]) {
-                fb_draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ch, g_fg_color, g_bg_color);
+                if (g_fb_output_enabled) {
+                    fb_draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ch, g_fg_color, g_bg_color);
+                }
                 g_rendered_buffer[r][c] = ch;
             }
         }
@@ -106,12 +165,16 @@ void console_init(void) {
     memset(g_text_buffer, 0, sizeof(g_text_buffer));
     memset(g_rendered_buffer, ' ', sizeof(g_rendered_buffer));
 
-    fb_clear(g_bg_color);
+    if (g_fb_output_enabled) {
+        fb_clear(g_bg_color);
+    }
     uart_puts("\033[2J\033[H");
 }
 
 void console_clear(void) {
-    fb_clear(g_bg_color);
+    if (g_fb_output_enabled) {
+        fb_clear(g_bg_color);
+    }
     g_cursor_x = 0;
     g_cursor_y = 0;
     memset(g_text_buffer, 0, sizeof(g_text_buffer));
@@ -140,7 +203,9 @@ void console_rebuild_layout(void) {
     if (g_max_rows > CONSOLE_BUF_MAX_ROWS) g_max_rows = CONSOLE_BUF_MAX_ROWS;
 
     /* Wipe the physical video RAM to prevent shearing */
-    fb_clear(g_bg_color);
+    if (g_fb_output_enabled) {
+        fb_clear(g_bg_color);
+    }
     memset(g_rendered_buffer, ' ', sizeof(g_rendered_buffer));
 
     /* Redraw all preserved text history onto the newly sized display */
@@ -151,7 +216,9 @@ void console_rebuild_layout(void) {
         for (uint32_t c = 0; c < g_max_cols; c++) {
             char ch = g_text_buffer[r][c];
             if (ch >= 32 && ch <= 126) {
-                fb_draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ch, g_fg_color, g_bg_color);
+                if (g_fb_output_enabled) {
+                    fb_draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ch, g_fg_color, g_bg_color);
+                }
                 g_rendered_buffer[r][c] = ch;
             }
         }
@@ -159,6 +226,14 @@ void console_rebuild_layout(void) {
 }
 
 void console_putc(char c) {
+    if (g_console_capture_buf) {
+        if (g_console_capture_len + 1 < g_console_capture_cap) {
+            g_console_capture_buf[g_console_capture_len++] = c;
+            g_console_capture_buf[g_console_capture_len] = '\0';
+        }
+        return;
+    }
+
     if (c == '\r') {
         g_cursor_x = 0;
         uart_putc('\r');
@@ -181,7 +256,9 @@ void console_putc(char c) {
             g_cursor_x--;
             g_text_buffer[g_cursor_y][g_cursor_x] = 0;
             g_rendered_buffer[g_cursor_y][g_cursor_x] = ' ';
-            fb_draw_char(g_cursor_x * FONT_WIDTH, g_cursor_y * FONT_HEIGHT, ' ', g_fg_color, g_bg_color);
+            if (g_fb_output_enabled) {
+                fb_draw_char(g_cursor_x * FONT_WIDTH, g_cursor_y * FONT_HEIGHT, ' ', g_fg_color, g_bg_color);
+            }
             uart_putc('\b');
             uart_putc(' ');
             uart_putc('\b');
@@ -202,7 +279,9 @@ void console_putc(char c) {
         g_rendered_buffer[g_cursor_y][g_cursor_x] = c;
     }
 
-    fb_draw_char(g_cursor_x * FONT_WIDTH, g_cursor_y * FONT_HEIGHT, c, g_fg_color, g_bg_color);
+    if (g_fb_output_enabled) {
+        fb_draw_char(g_cursor_x * FONT_WIDTH, g_cursor_y * FONT_HEIGHT, c, g_fg_color, g_bg_color);
+    }
     uart_putc(c);
 
     g_cursor_x++;

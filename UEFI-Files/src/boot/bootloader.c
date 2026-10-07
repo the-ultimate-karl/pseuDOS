@@ -193,15 +193,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
     boot_msg(SystemTable, "[ok]\n");
 
-    /* Search for optimal GOP video mode: 720p for VM, 1080p for bare-metal */
+    /* Search for optimal GOP video mode: 1080p, 720p, 800p (1280x800), 1024x768 */
     int in_vm = is_running_in_vm();
     UINT32 best_mode = gop->Mode->Mode;
-    UINT32 target_mode = 0xFFFFFFFF;
-    UINT32 target_w = in_vm ? 1280 : 1920;
-    UINT32 target_h = in_vm ? 720 : 1080;
-
     UINT32 target_1080p_mode = 0xFFFFFFFF;
     UINT32 target_720p_mode = 0xFFFFFFFF;
+    UINT32 target_800p_mode = 0xFFFFFFFF;
     UINT32 target_1024_mode = 0xFFFFFFFF;
 
     for (UINT32 m = 0; m < gop->Mode->MaxMode; m++) {
@@ -209,35 +206,34 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
         status = gop->QueryMode(gop, m, &size_of_info, &info);
         if (!EFI_ERROR(status) && info) {
-            if (info->HorizontalResolution == target_w && info->VerticalResolution == target_h) {
-                target_mode = m;
-            }
             if (info->HorizontalResolution == 1920 && info->VerticalResolution == 1080) {
                 target_1080p_mode = m;
             } else if (info->HorizontalResolution == 1280 && info->VerticalResolution == 720) {
                 target_720p_mode = m;
+            } else if (info->HorizontalResolution == 1280 && info->VerticalResolution == 800) {
+                target_800p_mode = m;
             } else if (info->HorizontalResolution == 1024 && info->VerticalResolution == 768) {
                 target_1024_mode = m;
             }
         }
     }
 
-    if (target_mode != 0xFFFFFFFF) {
-        best_mode = target_mode;
-    } else if (in_vm && target_720p_mode != 0xFFFFFFFF) {
-        best_mode = target_720p_mode;
-    } else if (!in_vm && target_1080p_mode != 0xFFFFFFFF) {
-        best_mode = target_1080p_mode;
-    } else if (target_720p_mode != 0xFFFFFFFF) {
-        best_mode = target_720p_mode;
-    } else if (target_1024_mode != 0xFFFFFFFF) {
-        best_mode = target_1024_mode;
+    if (!in_vm) {
+        if (target_1080p_mode != 0xFFFFFFFF) best_mode = target_1080p_mode;
+        else if (target_720p_mode != 0xFFFFFFFF) best_mode = target_720p_mode;
+        else if (target_800p_mode != 0xFFFFFFFF) best_mode = target_800p_mode;
+        else if (target_1024_mode != 0xFFFFFFFF) best_mode = target_1024_mode;
+    } else {
+        if (target_720p_mode != 0xFFFFFFFF) best_mode = target_720p_mode;
+        else if (target_1080p_mode != 0xFFFFFFFF) best_mode = target_1080p_mode;
+        else if (target_800p_mode != 0xFFFFFFFF) best_mode = target_800p_mode;
+        else if (target_1024_mode != 0xFFFFFFFF) best_mode = target_1024_mode;
     }
 
     if (in_vm) {
-        boot_msg(SystemTable, "[bootmgfw] hypervisor detected: setting 1280x720 GOP video mode... ");
+        boot_msg(SystemTable, "[bootmgfw] hypervisor detected: configuring optimal GOP video mode... ");
     } else {
-        boot_msg(SystemTable, "[bootmgfw] bare metal detected: setting 1920x1080 GOP video mode... ");
+        boot_msg(SystemTable, "[bootmgfw] bare metal detected: configuring optimal 1080p GOP video mode... ");
     }
     status = gop->SetMode(gop, best_mode);
     if (!EFI_ERROR(status)) {
@@ -277,10 +273,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_info.fb.pixels_per_scanline = gop->Mode->Info->PixelsPerScanLine;
     boot_info.fb.pixel_format = (gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor) ? FB_FORMAT_BGR : FB_FORMAT_RGB;
 
-    /* 6. Pre-allocate 16 MB Kernel Heap */
-    boot_msg(SystemTable, "[bootmgfw] pre-allocating 16 MB kernel heap pages... ");
+    /* 6. Pre-allocate 128 MB Kernel Heap */
+    boot_msg(SystemTable, "[bootmgfw] pre-allocating 128 MB kernel heap pages... ");
     EFI_PHYSICAL_ADDRESS heap_buffer = 0;
-    UINTN heap_pages = 4096; /* 16 MB */
+    UINTN heap_pages = 32768; /* 128 MB */
     status = SystemTable->BootServices->AllocatePages(
         AllocateAnyPages,
         EfiLoaderData,
@@ -290,7 +286,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     if (EFI_ERROR(status) || heap_buffer == 0) {
         boot_msg(SystemTable, "[failed]\n");
-        error_boot(SystemTable, ERR_MEMORY_MAP_EXHAUSTED, "failed to allocate 16 MB kernel heap memory");
+        error_boot(SystemTable, ERR_MEMORY_MAP_EXHAUSTED, "failed to allocate 128 MB kernel heap memory");
     }
     boot_info.mem.heap_physical_start = heap_buffer;
     boot_info.mem.heap_size_bytes = heap_pages * 4096;
@@ -417,9 +413,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     /* 10. Look for Kernel Image */
     boot_msg(SystemTable, "[bootmgfw] looking for kernel image...\n");
-    const CHAR16 kernel_path_win1[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', 'e', 'd', '\\', 'k', 'r', 'n', 'l', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'b', 'i', 'n', 0 };
-    const CHAR16 kernel_path_win2[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', '\\', 'k', 'r', 'n', 'l', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'b', 'i', 'n', 0 };
-    const CHAR16 kernel_path_legacy[] = { '\\', 'E', 'F', 'I', '\\', 'p', 's', 'e', 'u', 'D', 'O', 'S', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'b', 'i', 'n', 0 };
+    const CHAR16 kernel_path_win1[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', 'e', 'd', '\\', 'k', 'r', 'n', 'l', '\\', 'v', 'p', 'k', 'e', 'r', 'n', 'e', 'l', 0 };
+    const CHAR16 kernel_path_win2[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', '\\', 'k', 'r', 'n', 'l', '\\', 'v', 'p', 'k', 'e', 'r', 'n', 'e', 'l', 0 };
+    const CHAR16 kernel_path_legacy[] = { '\\', 'E', 'F', 'I', '\\', 'p', 's', 'e', 'u', 'D', 'O', 'S', '\\', 'v', 'p', 'k', 'e', 'r', 'n', 'e', 'l', 0 };
+    const CHAR16 kernel_path_bin[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', 'e', 'd', '\\', 'k', 'r', 'n', 'l', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'b', 'i', 'n', 0 };
     EFI_FILE_PROTOCOL *kernel_file = NULL;
 
     if (cfg_kernel_path[0] != '\0') {
@@ -441,15 +438,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
 
         if (!EFI_ERROR(status) && kernel_file) {
-            strcpy(boot_info.boot_file_path, "\\protected\\krnl\\kernel.bin");
-            boot_msg(SystemTable, "[bootmgfw] found kernel at \\protected\\krnl\\kernel.bin [ok]\n");
+            strcpy(boot_info.boot_file_path, "\\protected\\krnl\\vpkernel");
+            boot_msg(SystemTable, "[bootmgfw] found kernel at \\protected\\krnl\\vpkernel [ok]\n");
         } else {
             status = root_dir->Open(root_dir, &kernel_file, (CHAR16 *)kernel_path_legacy, EFI_FILE_MODE_READ, 0);
             if (!EFI_ERROR(status) && kernel_file) {
-                strcpy(boot_info.boot_file_path, "\\EFI\\pseuDOS\\kernel.bin");
-                boot_msg(SystemTable, "[bootmgfw] found kernel at \\EFI\\pseuDOS\\kernel.bin (fallback) [ok]\n");
+                strcpy(boot_info.boot_file_path, "\\EFI\\pseuDOS\\vpkernel");
+                boot_msg(SystemTable, "[bootmgfw] found kernel at \\EFI\\pseuDOS\\vpkernel (fallback) [ok]\n");
             } else {
-                error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "kernel image not found (checked boot.cfg, \\protected\\krnl and \\EFI\\pseuDOS)");
+                status = root_dir->Open(root_dir, &kernel_file, (CHAR16 *)kernel_path_bin, EFI_FILE_MODE_READ, 0);
+                if (!EFI_ERROR(status) && kernel_file) {
+                    strcpy(boot_info.boot_file_path, "\\protected\\krnl\\kernel.bin");
+                    boot_msg(SystemTable, "[bootmgfw] found kernel at \\protected\\krnl\\kernel.bin (legacy) [ok]\n");
+                } else {
+                    error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "kernel image not found (checked boot.cfg, \\protected\\krnl and \\EFI\\pseuDOS)");
+                }
             }
         }
     }

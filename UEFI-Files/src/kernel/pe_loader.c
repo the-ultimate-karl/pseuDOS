@@ -4,6 +4,7 @@
 #include "klog.h"
 #include "vmm.h"
 #include "syscall.h"
+#include "panic.h"
 
 int pe_load_binary(const uint8_t *raw_file, size_t raw_size, void **out_image_base, uint64_t *out_entry_point, size_t *out_image_size) {
     if (!raw_file || raw_size < 0x40 || !out_image_base || !out_entry_point) {
@@ -121,8 +122,17 @@ int pe_load_binary(const uint8_t *raw_file, size_t raw_size, void **out_image_ba
     return 0;
 }
 
+static int g_pe_last_error = 0;
+
+int pe_get_last_error(void) {
+    return g_pe_last_error;
+}
+
 process_t *pe_spawn_process(const char *name, const char *path, process_privilege_t priv) {
-    if (!path) return NULL;
+    if (!path) {
+        g_pe_last_error = -EINVAL;
+        return NULL;
+    }
 
     char norm_path[256];
     size_t j = 0;
@@ -138,6 +148,7 @@ process_t *pe_spawn_process(const char *name, const char *path, process_privileg
     vfs_node_t *node = vfs_find_node(norm_path);
     if (!node || node->type != VFS_NODE_FILE || !node->content || node->size == 0) {
         klog_warn("PE spawn: file '%s' not found or empty in VFS", norm_path);
+        g_pe_last_error = -ENOENT;
         return NULL;
     }
 
@@ -148,6 +159,7 @@ process_t *pe_spawn_process(const char *name, const char *path, process_privileg
     int res = pe_load_binary((const uint8_t *)node->content, node->size, &image_base, &entry_point, &image_size);
     if (res != 0 || entry_point == 0) {
         klog_err("PE spawn: failed to load PE binary from '%s' (err=%d)", norm_path, res);
+        g_pe_last_error = (res != 0) ? res : -ENOEXEC;
         return NULL;
     }
 
@@ -158,10 +170,21 @@ process_t *pe_spawn_process(const char *name, const char *path, process_privileg
         else proc_name = norm_path;
     }
 
+    /* Check for duplicate autoinit instance */
+    if ((strstr(norm_path, "autoinit") != NULL) ||
+        (proc_name && strstr(proc_name, "autoinit") != NULL)) {
+        if (process_has_active_init()) {
+            klog_err("CRITICAL: Detected second instance of autoinit process! (path='%s', proc='%s')",
+                     norm_path, proc_name ? proc_name : "");
+            kernel_panic("unexpected second instance of init process detected!", NULL);
+        }
+    }
+
     process_t *proc = process_create(proc_name, (void (*)(void))(uintptr_t)entry_point, priv);
     if (!proc) {
         klog_err("PE spawn: failed to create process for '%s'", proc_name);
         kfree(image_base);
+        g_pe_last_error = -ENOMEM;
         return NULL;
     }
 
@@ -169,5 +192,6 @@ process_t *pe_spawn_process(const char *name, const char *path, process_privileg
     proc->image_size = image_size;
 
     klog_info("PE spawn: launched PID %u '%s' from %s", proc->pid, proc->name, norm_path);
+    g_pe_last_error = 0;
     return proc;
 }

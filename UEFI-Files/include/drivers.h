@@ -9,6 +9,8 @@
 void fb_init(const FramebufferInfo *fb_info);
 uint32_t fb_get_width(void);
 uint32_t fb_get_height(void);
+uint64_t fb_get_physical_base(void);
+uint64_t fb_get_buffer_size(void);
 uint32_t fb_get_last_good_width(void);
 uint32_t fb_get_last_good_height(void);
 int fb_set_resolution(uint32_t width, uint32_t height);
@@ -17,6 +19,8 @@ void fb_clear(uint32_t color);
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color);
 void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
 void fb_draw_char(uint32_t x, uint32_t y, char c, uint32_t fg_color, uint32_t bg_color);
+void fb_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t fg_color, uint32_t bg_color);
+void fb_draw_string_scaled(uint32_t x, uint32_t y, const char *str, uint32_t fg_color, uint32_t bg_color, int scale);
 void fb_scroll_up(uint32_t pixels, uint32_t bg_color);
 
 /* Text Console Output */
@@ -27,11 +31,20 @@ void console_rebuild_layout(void);
 void console_putc(char c);
 void console_puts(const char *str);
 void console_printf(const char *fmt, ...);
+void console_set_fb_output(int enable);
+int console_get_fb_output(void);
+void console_redraw(void);
+int tty_get_active(void);
+void tty_switch(int target_tty);
 int uart_is_present(void);
+void console_set_capture_buffer(char *buf, size_t cap);
+size_t console_get_capture_length(void);
 
 /* Keyboard Input Driver */
+#define KEY_WIN 0x90
 void keyboard_init(void);
 char keyboard_getchar(void);
+char keyboard_getchar_nonblock(void);
 int keyboard_has_char(void);
 void keyboard_readline(char *buffer, size_t max_len, const char *prompt);
 void keyboard_isr_handler(void);

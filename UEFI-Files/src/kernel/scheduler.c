@@ -35,6 +35,10 @@ void scheduler_stop(void) {
     pic_mask_irq(0);
 }
 
+void scheduler_disable(void) {
+    g_scheduler_enabled = 0;
+}
+
 void scheduler_tick(interrupt_frame_t *frame, registers_t *regs) {
     pit_tick();
 

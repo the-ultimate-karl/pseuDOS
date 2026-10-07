@@ -19,7 +19,7 @@
 #include "ipc.h"
 #include "shm.h"
 
-const BootInfo *g_boot_info_global = NULL;
+BootInfo *g_boot_info_global = NULL;
 
 void kernel_main(BootInfo *boot_info) {
     if (!boot_info || boot_info->magic != BOOTINFO_MAGIC) {
