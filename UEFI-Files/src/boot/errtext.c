@@ -220,7 +220,9 @@ static const char *get_error_diagnostic(BootErrorCode code) {
         case ERR_KERNEL_MOUNT_FAILED:
             return "bootmgfw unable to mount boot device filesystem";
         case ERR_KERNEL_NOT_FOUND:
-            return "bootmgfw failed to find kernel binary (\\KERNEL.BIN or EFI\\BOOT\\KERNEL.ELF)";
+            return "bootmgfw failed to find kernel binary";
+        case ERR_BOOTCFG_NOT_FOUND:
+            return "bootmgfw failed to find or parse boot configuration (boot.cfg)";
         case ERR_KERNEL_INTEGRITY:
             return "bootmgfw cannot verify integrity of the kernel";
         case ERR_MEMORY_MAP_EXHAUSTED:
@@ -246,6 +248,7 @@ static const char *get_error_diagnostic(BootErrorCode code) {
 static const char *get_default_detail(BootErrorCode code) {
     switch (code) {
         case ERR_KERNEL_NOT_FOUND:
+        case ERR_BOOTCFG_NOT_FOUND:
             return "No such file or directory";
         case ERR_KERNEL_INTEGRITY:
             return "might be corrupted";
@@ -298,8 +301,12 @@ void error_boot(EFI_SYSTEM_TABLE *SystemTable, BootErrorCode code, const char *d
 
     /* Info diagnostic section */
     if (code == ERR_KERNEL_NOT_FOUND) {
-        print_padded_line(SystemTable, left_padding, "Info: bootmgfw failed to find kernel binary (\\KERNEL.BIN or EFI\\BOOT\\KERNEL.ELF):");
-        print_padded_line(SystemTable, left_padding, "No such file or directory");
+        print_padded_line(SystemTable, left_padding, "Info: bootmgfw failed to find kernel binary specified in boot.cfg:");
+        print_padded_line(SystemTable, left_padding, (details && details[0]) ? details : "No such file or directory");
+        print_both(SystemTable, "\n");
+    } else if (code == ERR_BOOTCFG_NOT_FOUND) {
+        print_padded_line(SystemTable, left_padding, "Info: bootmgfw failed to locate boot configuration (\\protected\\bootmgr\\boot.cfg):");
+        print_padded_line(SystemTable, left_padding, (details && details[0]) ? details : "No such file or directory");
         print_both(SystemTable, "\n");
     } else {
         if (left_padding > 0) print_spaces(SystemTable, left_padding);

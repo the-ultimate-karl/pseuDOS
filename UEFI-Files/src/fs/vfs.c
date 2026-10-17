@@ -6,6 +6,7 @@
 #include "default_media.h"
 #include "wallpapers_payload.h"
 #include "ipc.h"
+#include "klog.h"
 
 static vfs_node_t *g_vfs_root = NULL;
 static vfs_node_t *g_vfs_cwd = NULL;
@@ -110,9 +111,21 @@ static void normalize_path(const char *path, char *out_buf, size_t max_len) {
         strncpy(out_buf, "/", max_len - 1);
     } else {
         out_buf[0] = '\0';
+        size_t out_len = 0;
         for (int i = 0; i < seg_count; i++) {
-            strcat(out_buf, "/");
-            strcat(out_buf, segments[i]);
+            if (out_len + 1 < max_len) {
+                out_buf[out_len++] = '/';
+                out_buf[out_len] = '\0';
+            }
+            size_t seg_l = strlen(segments[i]);
+            if (out_len + seg_l >= max_len) {
+                seg_l = (max_len > out_len + 1) ? (max_len - out_len - 1) : 0;
+            }
+            if (seg_l > 0) {
+                memcpy(out_buf + out_len, segments[i], seg_l);
+                out_len += seg_l;
+                out_buf[out_len] = '\0';
+            }
         }
     }
     out_buf[max_len - 1] = '\0';
@@ -178,6 +191,13 @@ vfs_node_t *vfs_find_node(const char *path) {
     return curr;
 }
 
+static int g_vfs_sync_enabled = 1;
+
+static inline int vfs_should_sync_fat32(const char *path) {
+    if (!g_vfs_sync_enabled || !path) return 0;
+    return fat32_has_mount_for_path(path);
+}
+
 vfs_node_t *vfs_mkdir(const char *path) {
     if (!path) return NULL;
 
@@ -209,7 +229,7 @@ vfs_node_t *vfs_mkdir(const char *path) {
     }
 
     vfs_node_t *node = create_node(dir_name, VFS_NODE_DIRECTORY, parent);
-    if (node && fat32_is_mounted()) {
+    if (node && vfs_should_sync_fat32(norm_path)) {
         fat32_sync_mkdir(norm_path);
     }
     return node;
@@ -246,7 +266,7 @@ vfs_node_t *vfs_create_file(const char *path) {
     }
 
     vfs_node_t *node = create_node(file_name, VFS_NODE_FILE, parent);
-    if (node && fat32_is_mounted()) {
+    if (node && vfs_should_sync_fat32(norm_path)) {
         fat32_sync_create_file(norm_path);
     }
     return node;
@@ -328,10 +348,8 @@ int vfs_write_file_bytes(const char *path, const void *data, size_t size, int ap
         node->content[node->size] = '\0';
     }
 
-    if (fat32_is_mounted() && bytes) {
-        char norm_sync[256];
-        normalize_path(path, norm_sync, sizeof(norm_sync));
-        fat32_sync_write_file_bytes(norm_sync, bytes, size, append);
+    if (vfs_should_sync_fat32(norm_path)) {
+        fat32_sync_write_file_bytes(norm_path, node->content, node->size, 0);
     }
 
     rtc_datetime_t dt;
@@ -420,6 +438,21 @@ int vfs_read_file_offset(const char *path, char *buffer, size_t max_len, size_t 
     vfs_node_t *node = vfs_find_node(path);
     if (!node || node->type != VFS_NODE_FILE) return -1;
 
+    if (node->size > 0 && !node->content && fat32_has_mount_for_path(norm_path)) {
+        node->capacity = (node->size + 1 + 255) & ~255;
+        node->content = (char *)kmalloc(node->capacity);
+        if (node->content) {
+            int rd = fat32_sync_read_file_bytes(norm_path, node->content, node->size);
+            if (rd >= 0) {
+                node->content[rd] = '\0';
+            } else {
+                kfree(node->content);
+                node->content = NULL;
+                node->capacity = 0;
+            }
+        }
+    }
+
     if (offset >= node->size) {
         buffer[0] = '\0';
         return 0; /* EOF */
@@ -453,6 +486,21 @@ int vfs_read_file(const char *path, char *buffer, size_t max_len) {
 
     vfs_node_t *node = vfs_find_node(path);
     if (!node || node->type != VFS_NODE_FILE) return -1;
+
+    if (node->size > 0 && !node->content && fat32_has_mount_for_path(norm_path)) {
+        node->capacity = (node->size + 1 + 255) & ~255;
+        node->content = (char *)kmalloc(node->capacity);
+        if (node->content) {
+            int rd = fat32_sync_read_file_bytes(norm_path, node->content, node->size);
+            if (rd >= 0) {
+                node->content[rd] = '\0';
+            } else {
+                kfree(node->content);
+                node->content = NULL;
+                node->capacity = 0;
+            }
+        }
+    }
 
     size_t to_read = node->size < max_len - 1 ? node->size : max_len - 1;
     if (to_read > 0 && node->content) {
@@ -532,7 +580,7 @@ int vfs_remove_node_ex(const char *path, int recursive, int force) {
     int is_dir = (node->type == VFS_NODE_DIRECTORY);
 
     /* 1. Synchronize deletion with physical persistent disk FIRST */
-    if (fat32_is_mounted()) {
+    if (vfs_should_sync_fat32(norm_path)) {
         int sync_res = fat32_sync_delete_node(norm_path, is_dir);
         if (sync_res == -1) {
             return -5; /* Hardware disk I/O synchronization error */
@@ -676,6 +724,82 @@ int vfs_listdir_names(const char *path, char *buf, size_t buf_size) {
     return (int)total_bytes;
 }
 
+static void vfs_mkdir_p(const char *path) {
+    if (!path || path[0] != '/') return;
+    char temp[256];
+    size_t len = strlen(path);
+    if (len >= sizeof(temp)) len = sizeof(temp) - 1;
+    memcpy(temp, path, len);
+    temp[len] = '\0';
+
+    for (size_t i = 1; i < len; i++) {
+        if (temp[i] == '/') {
+            temp[i] = '\0';
+            if (!vfs_find_node(temp)) {
+                vfs_mkdir(temp);
+            }
+            temp[i] = '/';
+        }
+    }
+    if (!vfs_find_node(temp)) {
+        vfs_mkdir(temp);
+    }
+}
+
+int vfs_unpack_initramfs(const uint8_t *data, size_t size) {
+    if (!data || size < 8) return -1;
+    if (data[0] != 'P' || data[1] != 'R' || data[2] != 'A' || data[3] != 'M') {
+        klog_warn("vfs: initramfs missing PRAM header magic");
+        return -1;
+    }
+
+    uint32_t count = *(const uint32_t *)(data + 4);
+    const uint8_t *headers = data + 8;
+    const uint8_t *payload_ptr = headers + (size_t)count * 136;
+
+    if (payload_ptr > data + size) {
+        klog_warn("vfs: initramfs header truncated");
+        return -1;
+    }
+
+    int prev_sync = g_vfs_sync_enabled;
+    g_vfs_sync_enabled = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *hdr = headers + i * 136;
+        char path[128];
+        memcpy(path, hdr, 128);
+        path[127] = '\0';
+        uint64_t fsize = *(const uint64_t *)(hdr + 128);
+
+        if (payload_ptr + fsize > data + size) {
+            klog_warn("vfs: initramfs file '%s' data exceeds archive boundary", path);
+            break;
+        }
+
+        /* Ensure parent directory exists recursively */
+        char parent_path[128];
+        strncpy(parent_path, path, sizeof(parent_path) - 1);
+        parent_path[sizeof(parent_path) - 1] = '\0';
+        char *last_slash = strrchr(parent_path, '/');
+        if (last_slash && last_slash != parent_path) {
+            *last_slash = '\0';
+            vfs_mkdir_p(parent_path);
+        }
+
+        /* Only unpack if file does not already exist or has zero content */
+        vfs_node_t *existing = vfs_find_node(path);
+        if (!existing || existing->size == 0 || !existing->content) {
+            vfs_write_file_bytes(path, payload_ptr, (size_t)fsize, 0);
+        }
+        payload_ptr += fsize;
+    }
+
+    g_vfs_sync_enabled = prev_sync;
+    klog_info("vfs: successfully unpacked %u files from initramfs archive", count);
+    return 0;
+}
+
 void vfs_ensure_system_payloads(void);
 
 int vfs_init_initramfs(void) {
@@ -694,18 +818,6 @@ int vfs_init_initramfs(void) {
     vfs_mkdir("/EFI/BOOT");
     vfs_mkdir("/EFI/pseuDOS");
 
-    size_t boot_size = 0;
-    payload_get_bootloader(&boot_size);
-    vfs_node_t *boot_efi = vfs_create_file("/EFI/BOOT/BOOTX64.EFI");
-    if (boot_efi) boot_efi->size = boot_size;
-
-    /* Deploy BOOTX64.EFI and pseudos.efi to /EFI/pseuDOS for GRUB / os-prober */
-    vfs_node_t *pseudos_boot = vfs_create_file("/EFI/pseuDOS/BOOTX64.EFI");
-    if (pseudos_boot) pseudos_boot->size = boot_size;
-
-    vfs_node_t *pseudos_efi = vfs_create_file("/EFI/pseuDOS/pseudos.efi");
-    if (pseudos_efi) pseudos_efi->size = boot_size;
-
     /* GRUB 2 configuration snippet */
     vfs_write_file("/EFI/pseuDOS/grub.cfg",
         "# GRUB 2 configuration snippet for pseuDOS\n"
@@ -722,12 +834,18 @@ int vfs_init_initramfs(void) {
     vfs_write_file("/EFI/pseuDOS/os-release",
         "NAME=\"pseuDOS\"\n"
         "ID=pseudos\n"
-        "VERSION=\"0.6.0\"\n"
-        "PRETTY_NAME=\"pseuDOS v0.6.0 (x86_64 UEFI)\"\n"
+        "VERSION=\"0.7.1\"\n"
+        "PRETTY_NAME=\"pseuDOS v0.7.1 (x86_64 UEFI)\"\n"
         "HOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\n", 0);
 
-    /* 3. Ensure all system directories and userland payloads exist */
+    /* 3. Ensure all system directories exist */
     vfs_ensure_system_payloads();
+
+    /* 4. Check if bootloader passed an in-memory initramfs archive */
+    if (g_boot_info_global && g_boot_info_global->initramfs_base && g_boot_info_global->initramfs_size) {
+        vfs_unpack_initramfs((const uint8_t *)(uintptr_t)g_boot_info_global->initramfs_base,
+                             (size_t)g_boot_info_global->initramfs_size);
+    }
 
     return 0;
 }
@@ -780,8 +898,9 @@ void vfs_ensure_system_payloads(void) {
             "# pseuDOS Boot Configuration\n"
             "# Architecture: x86_64 UEFI\n"
             "kernel=\\protected\\krnl\\vpkernel\n"
+            "initramfs=\\protected\\krnl\\initramfs.img\n"
             "autoinit=\\protected\\krnl\\autoinit.exe\n"
-            "shell=\\protected\\gui\\superglue.exe\n"
+            "shell=\\protected\\gui\\gman.exe\n"
             "cmdline=quiet devpath=hardware\n"
             "default_resolution=1280x720\n"
             "bootmgr_version=1.1.0\n", 0);
@@ -804,17 +923,22 @@ void vfs_ensure_system_payloads(void) {
     /* 4. Deploy userland and GUI payloads */
     #define ENSURE_PAYLOAD(path, getter_func) do { \
         vfs_node_t *fn = vfs_find_node(path); \
-        if (!fn || fn->size == 0) { \
+        if (!fn || fn->size == 0 || !fn->content) { \
             size_t psz = 0; \
             const uint8_t *pdt = getter_func(&psz); \
             if (pdt && psz > 0) { \
+                int existed_on_disk = (fn && fn->size == psz); \
+                int sv_sync = g_vfs_sync_enabled; \
+                if (existed_on_disk) g_vfs_sync_enabled = 0; \
                 vfs_write_file_bytes(path, pdt, psz, 0); \
+                g_vfs_sync_enabled = sv_sync; \
             } \
         } \
     } while(0)
 
     ENSURE_PAYLOAD("/protected/krnl/autoinit.exe", payload_get_autoinit);
     ENSURE_PAYLOAD("/protected/crit/xshss.exe", payload_get_xshss);
+    ENSURE_PAYLOAD("/protected/gui/gman.exe", payload_get_gman);
     ENSURE_PAYLOAD("/protected/gui/superglue.exe", payload_get_superglue);
     ENSURE_PAYLOAD("/protected/gui/ntfs.exe", payload_get_ntfs);
     ENSURE_PAYLOAD("/protected/gui/lack.exe", payload_get_lack);
@@ -828,51 +952,16 @@ void vfs_ensure_system_payloads(void) {
     ENSURE_PAYLOAD("/protected/apps/paint.exe", payload_get_paint);
     ENSURE_PAYLOAD("/protected/apps/clock.exe", payload_get_clock);
     ENSURE_PAYLOAD("/protected/apps/filemgr.exe", payload_get_filemgr);
+    ENSURE_PAYLOAD("/protected/apps/view.exe", payload_get_view);
 
-    #undef ENSURE_PAYLOAD
-
-    /* 5. Deploy sample media files into /home/user */
-    extern const uint8_t g_media_image2_png[];
-    extern const uint64_t g_media_image2_png_size;
-
-    if (!vfs_find_node("/home/user/image1.jpg")) {
-        vfs_write_file_bytes("/home/user/image1.jpg", g_media_image1_jpg, g_media_image1_jpg_size, 0);
-    }
-    if (!vfs_find_node("/home/user/image2.png")) {
-        vfs_write_file_bytes("/home/user/image2.png", g_media_image2_png, (size_t)g_media_image2_png_size, 0);
-    }
-    if (!vfs_find_node("/home/user/sample.png")) {
-        vfs_write_file_bytes("/home/user/sample.png", g_media_sample_png, g_media_sample_png_size, 0);
-    }
-    if (!vfs_find_node("/home/user/sample.bmp")) {
-        vfs_write_file_bytes("/home/user/sample.bmp", g_media_sample_bmp, g_media_sample_bmp_size, 0);
-    }
-
-    /* 6. Deploy bundled wallpapers into /home/user/Wallpapers/ */
-    vfs_mkdir("/home/user/Wallpapers");
-    vfs_mkdir("/protected/wallpapers");
-
-    for (int w = 0; w < NUM_BUNDLED_WALLPAPERS; w++) {
-        char wall_path[128];
-        snprintf(wall_path, sizeof(wall_path), "/home/user/Wallpapers/%s", g_bundled_wallpapers[w].filename);
-        uint64_t wsize = get_bundled_wallpaper_size(w);
-        if (!vfs_find_node(wall_path) && wsize > 0) {
-            vfs_write_file_bytes(wall_path, g_bundled_wallpapers[w].data, (size_t)wsize, 0);
-        }
-    }
-
-    /* Indestructible master copy in protected system directory */
-    if (!vfs_find_node("/protected/wallpapers/fallback.png")) {
-        vfs_write_file_bytes("/protected/wallpapers/fallback.png", g_wall_fallback_png, (size_t)g_wall_fallback_png_size, 0);
-        vfs_node_t *fnode = vfs_find_node("/protected/wallpapers/fallback.png");
-        if (fnode) fnode->is_protected = 1;
-    }
-
-    /* Default wallpaper setting */
+    /* 5. Set default wallpaper configuration if missing */
+    int prev_sync = g_vfs_sync_enabled;
+    g_vfs_sync_enabled = 0;
     if (!vfs_find_node("/home/user/wallpaper.cfg")) {
         const char *def_cfg = "/home/user/Wallpapers/Under Construction.png\n";
         vfs_write_file_bytes("/home/user/wallpaper.cfg", (const uint8_t *)def_cfg, strlen(def_cfg), 0);
     }
+    g_vfs_sync_enabled = prev_sync;
 }
 
 static void vfs_init_mounts(StorageDevice *boot_dev, int boot_drive_idx);
@@ -885,9 +974,40 @@ int vfs_mount_boot_media(const BootInfo *boot_info) {
     g_vfs_cwd = g_vfs_root;
     strcpy(g_cwd_path, "/");
 
-    /* 2. Check if boot device is a physical persistent block device */
+    /* 2. Check if booting Live ISO media (cmdline boot=live or El Torito CDROM/RamDisk device path) */
+    int is_live_boot = 0;
+    if (boot_info && boot_info->cmdline[0] != '\0') {
+        if (strstr(boot_info->cmdline, "boot=live") || strstr(boot_info->cmdline, "live=1")) {
+            is_live_boot = 1;
+        }
+    }
+    if (boot_info && boot_info->hardware_devpath[0] != '\0') {
+        const char *p = boot_info->hardware_devpath;
+        if (strstr(p, "CDROM") || strstr(p, "CdRom") || strstr(p, "cdrom") ||
+            strstr(p, "CD-ROM") || strstr(p, "Cd-Rom") || strstr(p, "cd-rom") ||
+            strstr(p, "CD(") || strstr(p, "RamDisk") || strstr(p, "ramdisk") ||
+            strstr(p, "VirtualDisk") || strstr(p, "MemoryMapped")) {
+            is_live_boot = 1;
+        }
+    } else if (!boot_info || boot_info->hardware_devpath[0] == '\0') {
+        is_live_boot = 1;
+    }
+
+    if (is_live_boot) {
+        klog_info("vfs: booting live ISO media, initializing root ramfs");
+        int ret = vfs_init_initramfs();
+        vfs_init_mounts(NULL, -1);
+        vfs_refresh_mounts_dir();
+        return ret;
+    }
+
+    /* 3. Persistent boot: locate and mount physical FAT32 block device */
     int boot_drive_idx = 0;
     StorageDevice *boot_dev = storage_get_boot_device(boot_info ? boot_info->hardware_devpath : NULL, &boot_drive_idx);
+
+    if (boot_dev) {
+        klog_info("vfs: detected boot device '%s' (type=%d, path=%s)", boot_dev->name, boot_dev->type, boot_dev->devpath);
+    }
 
     if (boot_dev && (boot_dev->type == STORAGE_TYPE_INTERNAL_SATA ||
                      boot_dev->type == STORAGE_TYPE_INTERNAL_NVME ||
@@ -895,19 +1015,26 @@ int vfs_mount_boot_media(const BootInfo *boot_info) {
         /* Mount physical FAT32 partition */
         extern int fat32_mount_disk(StorageDevice *dev);
         if (fat32_mount_disk(boot_dev) == 0) {
+            klog_info("vfs: successfully mounted persistent boot disk on /");
             /* Successfully mounted persistent disk - ensure all system payloads are available */
             vfs_ensure_system_payloads();
+            if (boot_info && boot_info->initramfs_base && boot_info->initramfs_size) {
+                vfs_unpack_initramfs((const uint8_t *)(uintptr_t)boot_info->initramfs_base,
+                                     (size_t)boot_info->initramfs_size);
+            }
             vfs_init_mounts(boot_dev, boot_drive_idx);
             vfs_refresh_mounts_dir();
             return 0;
+        } else {
+            klog_err("vfs: FATAL: failed to mount root filesystem on persistent boot device '%s'", boot_dev->name);
+            return -1;
         }
     }
 
-    /* Fallback to volatile in-memory ramfs (e.g. CD-ROM or unformatted drive) */
-    int ret = vfs_init_initramfs();
-    vfs_init_mounts(NULL, -1);
-    vfs_refresh_mounts_dir();
-    return ret;
+    /* Persistent boot was requested, but the device was not found or is unmountable */
+    klog_err("vfs: FATAL: persistent boot device '%s' could not be opened or mounted",
+             (boot_info && boot_info->hardware_devpath[0]) ? boot_info->hardware_devpath : "unknown");
+    return -1;
 }
 
 static void vfs_crawl_stats(vfs_node_t *node, uint32_t *nodes, uint32_t *dirs, uint32_t *files, uint64_t *bytes) {
@@ -1114,12 +1241,26 @@ void vfs_refresh_mounts_dir(void) {
         StorageFsInfo info;
         int has_fs = (storage_inspect_fs(dev, &info) == 0 && info.has_filesystem);
 
+        if (g_mounts[0].active && (g_mounts[0].drive_index == (int)(i + 1) || g_mounts[0].drive_index == (int)i)) {
+            /* Drive is already mounted as root (/) */
+            char root_marker[80];
+            snprintf(root_marker, sizeof(root_marker), "%s/.root", mount_dir);
+            vfs_write_file(root_marker, "Root filesystem mounted on /\n", 0);
+            continue;
+        }
+
         if (!has_fs) {
             /* Create marker file indicating RAW / Unformatted */
             char raw_marker[80];
             snprintf(raw_marker, sizeof(raw_marker), "%s/.raw", mount_dir);
             vfs_write_file(raw_marker, "RAW / Unformatted\n", 0);
         } else {
+            /* Remove stale .raw marker if drive was just formatted */
+            char raw_marker[80];
+            snprintf(raw_marker, sizeof(raw_marker), "%s/.raw", mount_dir);
+            if (vfs_find_node(raw_marker)) {
+                vfs_remove_node_ex(raw_marker, 0, 1);
+            }
             /* Has a recognized filesystem (FAT32) - mount files into /mounts/<dev_tag> */
             extern int fat32_mount_to_path(StorageDevice *dev, const char *mount_path);
             fat32_mount_to_path(dev, mount_dir);
@@ -1258,6 +1399,9 @@ int vfs_umount_target(const char *target, char *out_log, size_t out_cap) {
     char unmounted_path[64];
     strncpy(unmounted_path, g_mounts[found_idx].mount_path, sizeof(unmounted_path) - 1);
     unmounted_path[sizeof(unmounted_path) - 1] = '\0';
+
+    /* Detach FAT32 write-through mount first so VFS cleanup does not delete files on disk */
+    fat32_unmount_path(unmounted_path);
 
     /* Remove files from VFS under that mount path */
     vfs_remove_node_ex(unmounted_path, 1, 1);

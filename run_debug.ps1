@@ -7,6 +7,9 @@ param(
     [switch]$Nvme,
     [Alias("scsi")][switch]$Usb,
     [switch]$Usb2,
+    [switch]$UsbHid,
+    [Alias("nogui")][switch]$Cli,
+    [Alias("append", "args")][string]$CmdLine,
     [switch]$All,
     [Alias("cdrom")][switch]$Iso,
     [Alias("no-iso", "no-cdrom", "disk-boot")][switch]$NoIso,
@@ -70,6 +73,9 @@ $AttachSata = [bool]$Sata
 $AttachNvme = [bool]$Nvme
 $AttachUsb3 = [bool]$Usb
 $AttachUsb2 = [bool]$Usb2
+$AttachUsbHid = [bool]$UsbHid
+$AttachCli = [bool]$Cli
+$UserCmdLine = if ($CmdLine) { $CmdLine } else { "" }
 $IsNoIso = [bool]$NoIso
 if ($Iso) {
     $IsNoIso = $false
@@ -78,6 +84,7 @@ if ($All) {
     $AttachSata = $true
     $AttachNvme = $true
     $AttachUsb3 = $true
+    $AttachUsb2 = $true
 }
 $ResolvedBootFrom = if ($BootFrom) { $BootFrom.ToLower() } else { "" }
 
@@ -98,6 +105,12 @@ while ($i -lt $rawArgs.Count) {
         "^--?(terminal|nographic)$|^-t$" {
             $Mode = "nographic"
         }
+        "^--?(cli|nogui)$" {
+            $AttachCli = $true
+        }
+        "^--?(cmdline|append)=(.+)$" {
+            $UserCmdLine = $Matches[2]
+        }
         "^--?sata$" {
             $AttachSata = $true
         }
@@ -110,10 +123,14 @@ while ($i -lt $rawArgs.Count) {
         "^--?usb2$" {
             $AttachUsb2 = $true
         }
+        "^--?usb-?hid$" {
+            $AttachUsbHid = $true
+        }
         "^--?all$" {
             $AttachSata = $true
             $AttachNvme = $true
             $AttachUsb3 = $true
+            $AttachUsb2 = $true
         }
         "^--?(iso|cdrom)$" {
             $IsNoIso = $false
@@ -142,7 +159,7 @@ while ($i -lt $rawArgs.Count) {
                     $ResolvedBootFrom = "iso"
                 }
             } else {
-                Write-Error "[ERROR] --boot-from requires an argument: sata, nvme, usb, or iso"
+                Write-Error "[ERROR] --boot-from requires an argument: sata, nvme, usb, usb2, or iso"
                 exit 1
             }
         }
@@ -159,10 +176,11 @@ if ($ResolvedBootFrom) {
         "sata"  { $AttachSata = $true; $IsNoIso = $true }
         "nvme"  { $AttachNvme = $true; $IsNoIso = $true }
         "usb"   { $AttachUsb3 = $true; $IsNoIso = $true }
+        "usb2"  { $AttachUsb2 = $true; $IsNoIso = $true }
         "iso"   { $IsNoIso = $false }
         "cdrom" { $IsNoIso = $false; $ResolvedBootFrom = "iso" }
         default {
-            Write-Error "[ERROR] Invalid option for --boot-from: '$ResolvedBootFrom'. Supported options: sata, nvme, usb, iso"
+            Write-Error "[ERROR] Invalid option for --boot-from: '$ResolvedBootFrom'. Supported options: sata, nvme, usb, usb2, iso"
             exit 1
         }
     }
@@ -173,6 +191,8 @@ if ($IsNoIso -and -not $ResolvedBootFrom) {
         $ResolvedBootFrom = "nvme"
     } elseif ($AttachUsb3 -and -not $AttachSata) {
         $ResolvedBootFrom = "usb"
+    } elseif ($AttachUsb2 -and -not $AttachSata) {
+        $ResolvedBootFrom = "usb2"
     } else {
         $ResolvedBootFrom = "sata"
         $AttachSata = $true
@@ -228,9 +248,19 @@ if ($AttachUsb3) {
 if ($AttachUsb2) {
     $usb2Img = Join-Path $DisksDir "usb2_disk.img"
     Ensure-DiskImage $usb2Img 500
+    $bootProp = ""
+    if ($IsNoIso -and $BootFrom -eq "usb2") { $bootProp = ",bootindex=1" }
     $StorageArgs += "-device", "usb-ehci,id=ehci"
     $StorageArgs += "-drive", "file=$usb2Img,if=none,id=usb2_0,format=raw"
-    $StorageArgs += "-device", "usb-storage,bus=ehci.0,drive=usb2_0"
+    $StorageArgs += "-device", "usb-storage,bus=ehci.0,drive=usb2_0$bootProp"
+}
+
+if ($AttachUsbHid) {
+    if (-not $AttachUsb3) {
+        $StorageArgs += "-device", "qemu-xhci,id=xhci"
+    }
+    $StorageArgs += "-device", "usb-mouse,bus=xhci.0,id=u_mouse"
+    $StorageArgs += "-device", "usb-kbd,bus=xhci.0,id=u_kbd"
 }
 
 $QemuBootArgs = @()
@@ -247,12 +277,36 @@ if ($OvmfBios.EndsWith("edk2-x86_64-code.fd")) {
     $BiosArgs += "-bios", "$OvmfBios"
 }
 
+$EffectiveCmdLine = ""
+if ($UserCmdLine) {
+    $EffectiveCmdLine = $UserCmdLine
+}
+if ($AttachCli) {
+    if ($EffectiveCmdLine) {
+        $EffectiveCmdLine += " ui=cli"
+    } else {
+        $EffectiveCmdLine = "ui=cli"
+    }
+}
+
+if ($EffectiveCmdLine) {
+    $FinalExtraArgs.Add("-fw_cfg")
+    $FinalExtraArgs.Add("name=opt/cmdline,string=$EffectiveCmdLine")
+}
+
 $DebugconLog = [System.IO.Path]::GetTempFileName()
 $StderrLog = [System.IO.Path]::GetTempFileName()
 
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host " Starting pseuDOS (Debug Logging Mode)" -ForegroundColor Cyan
 Write-Host " Log File: $LogFile" -ForegroundColor Yellow
+if ($AttachSata) { Write-Host " Storage: [Attached] 500 MB AHCI SATA Disk" -ForegroundColor Gray }
+if ($AttachNvme) { Write-Host " Storage: [Attached] 500 MB NVMe PCIe SSD" -ForegroundColor Gray }
+if ($AttachUsb3) { Write-Host " Storage: [Attached] 500 MB USB 3.0/3.1 (xHCI) Drive" -ForegroundColor Gray }
+if ($AttachUsb2) { Write-Host " Storage: [Attached] 500 MB USB 2.0 (EHCI) Drive" -ForegroundColor Gray }
+if ($AttachUsbHid) { Write-Host " Input:   [Attached] USB HID Mouse & Keyboard (xHCI)" -ForegroundColor Gray }
+if ($AttachCli) { Write-Host " Launch:  [Active] CLI Mode (ui=cli - superglue bypassed)" -ForegroundColor Yellow }
+elseif ($EffectiveCmdLine) { Write-Host " Cmdline: [Active] $EffectiveCmdLine" -ForegroundColor Yellow }
 Write-Host "============================================================" -ForegroundColor Cyan
 
 $QemuCommon = @(

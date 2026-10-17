@@ -140,7 +140,7 @@ while ($i -lt $rawArgs.Count) {
                     $ResolvedBootFrom = "iso"
                 }
             } else {
-                Write-Error "[ERROR] --boot-from requires an argument: sata, nvme, usb, or iso"
+                Write-Error "[ERROR] --boot-from requires an argument: sata, nvme, usb, usb2, or iso"
                 exit 1
             }
         }
@@ -157,10 +157,11 @@ if ($ResolvedBootFrom) {
         "sata"  { $AttachSata = $true; $IsNoIso = $true }
         "nvme"  { $AttachNvme = $true; $IsNoIso = $true }
         "usb"   { $AttachUsb3 = $true; $IsNoIso = $true }
+        "usb2"  { $AttachUsb2 = $true; $IsNoIso = $true }
         "iso"   { $IsNoIso = $false }
         "cdrom" { $IsNoIso = $false; $ResolvedBootFrom = "iso" }
         default {
-            Write-Error "[ERROR] Invalid option for --boot-from: '$ResolvedBootFrom'. Supported options: sata, nvme, usb, iso"
+            Write-Error "[ERROR] Invalid option for --boot-from: '$ResolvedBootFrom'. Supported options: sata, nvme, usb, usb2, iso"
             exit 1
         }
     }
@@ -171,6 +172,8 @@ if ($IsNoIso -and -not $ResolvedBootFrom) {
         $ResolvedBootFrom = "nvme"
     } elseif ($AttachUsb3 -and -not $AttachSata) {
         $ResolvedBootFrom = "usb"
+    } elseif ($AttachUsb2 -and -not $AttachSata) {
+        $ResolvedBootFrom = "usb2"
     } else {
         $ResolvedBootFrom = "sata"
         $AttachSata = $true
@@ -226,6 +229,7 @@ if ($IsNoIso) {
         "sata" { $TargetImg = Join-Path $DisksDir "sata_disk.img" }
         "nvme" { $TargetImg = Join-Path $DisksDir "nvme_disk.img" }
         "usb"  { $TargetImg = Join-Path $DisksDir "usb_disk.img" }
+        "usb2" { $TargetImg = Join-Path $DisksDir "usb2_disk.img" }
     }
     if (-not (Test-DiskPartitioned $TargetImg)) {
         Write-Host "============================================================" -ForegroundColor Yellow
@@ -280,9 +284,11 @@ if ($AttachUsb3) {
 if ($AttachUsb2) {
     $usb2Img = Join-Path $DisksDir "usb2_disk.img"
     Ensure-DiskImage $usb2Img 500
+    $bootProp = ""
+    if ($IsNoIso -and $BootFrom -eq "usb2") { $bootProp = ",bootindex=1" }
     $StorageArgs += "-device", "usb-ehci,id=ehci"
     $StorageArgs += "-drive", "file=$usb2Img,if=none,id=usb2_0,format=raw"
-    $StorageArgs += "-device", "usb-storage,bus=ehci.0,drive=usb2_0"
+    $StorageArgs += "-device", "usb-storage,bus=ehci.0,drive=usb2_0$bootProp"
 }
 
 $NumaArgs = @(

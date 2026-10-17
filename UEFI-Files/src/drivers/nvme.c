@@ -3,6 +3,8 @@
 #include "io.h"
 #include "lib.h"
 #include "vmm.h"
+#include "klog.h"
+#include "pit.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
@@ -119,27 +121,53 @@ static int nvme_submit_admin_cmd(NvmeDriver *d, NvmeCmd *cmd) {
     cmd->cid = d->cmd_id++;
     memcpy((void *)&d->asq[d->sq_tail], cmd, sizeof(NvmeCmd));
 
+    __asm__ volatile ("mfence" ::: "memory");
     d->sq_tail = (d->sq_tail + 1) % 64;
     *nvme_doorbell(d, 0, 0) = d->sq_tail;
 
-    int timeout = 5000000;
-    while (((d->acq[d->cq_head].status & 1) != d->acq_phase) && --timeout > 0) {
-        __asm__ volatile ("pause" ::: "memory");
+    int found = 0;
+    uint16_t matched_status = 0;
+    uint64_t start_ticks = pit_get_ticks();
+    uint32_t loop_count = 0;
+
+    while (1) {
+        volatile NvmeCqe *cqe = &d->acq[d->cq_head];
+        if ((cqe->status & 1) == d->acq_phase) {
+            __asm__ volatile ("lfence" ::: "memory");
+            uint16_t cqe_status = cqe->status;
+            uint16_t cqe_cid = cqe->cid;
+
+            d->cq_head++;
+            if (d->cq_head == 64) {
+                d->cq_head = 0;
+                d->acq_phase ^= 1;
+            }
+            __asm__ volatile ("mfence" ::: "memory");
+            *nvme_doorbell(d, 0, 1) = d->cq_head;
+
+            if (cqe_cid == cmd->cid) {
+                matched_status = cqe_status;
+                found = 1;
+                break;
+            }
+        } else {
+            __asm__ volatile ("pause" ::: "memory");
+            loop_count++;
+            if ((loop_count & 0x3FF) == 0) {
+                uint64_t now_ticks = pit_get_ticks();
+                if (start_ticks > 0 && now_ticks >= start_ticks) {
+                    if (now_ticks - start_ticks > 500) { /* 5.0 seconds */
+                        break;
+                    }
+                } else if (loop_count > 50000000) {
+                    break;
+                }
+            }
+        }
     }
 
-    if (timeout <= 0) return -1;
-
-    uint16_t cqe_status = d->acq[d->cq_head].status;
-    d->cq_head++;
-    if (d->cq_head == 64) {
-        d->cq_head = 0;
-        d->acq_phase ^= 1;
-    }
-    *nvme_doorbell(d, 0, 1) = d->cq_head;
-
-    if ((cqe_status >> 1) != 0) {
-        return -1;
-    }
+    if (!found) return -1;
+    if ((matched_status >> 1) != 0) return -1;
     return 0;
 }
 
@@ -147,25 +175,61 @@ static int nvme_submit_io_cmd(NvmeDriver *d, NvmeCmd *cmd) {
     cmd->cid = d->cmd_id++;
     memcpy((void *)&d->iosq[d->io_sq_tail], cmd, sizeof(NvmeCmd));
 
+    __asm__ volatile ("mfence" ::: "memory");
     d->io_sq_tail = (d->io_sq_tail + 1) % 64;
     *nvme_doorbell(d, 1, 0) = d->io_sq_tail;
 
-    int timeout = 5000000;
-    while (((d->iocq[d->io_cq_head].status & 1) != d->iocq_phase) && --timeout > 0) {
-        __asm__ volatile ("pause" ::: "memory");
+    int found = 0;
+    uint16_t matched_status = 0;
+    uint64_t start_ticks = pit_get_ticks();
+    uint32_t loop_count = 0;
+
+    while (1) {
+        volatile NvmeCqe *cqe = &d->iocq[d->io_cq_head];
+        if ((cqe->status & 1) == d->iocq_phase) {
+            __asm__ volatile ("lfence" ::: "memory");
+            uint16_t cqe_status = cqe->status;
+            uint16_t cqe_cid = cqe->cid;
+
+            d->io_cq_head++;
+            if (d->io_cq_head == 64) {
+                d->io_cq_head = 0;
+                d->iocq_phase ^= 1;
+            }
+            __asm__ volatile ("mfence" ::: "memory");
+            *nvme_doorbell(d, 1, 1) = d->io_cq_head;
+
+            if (cqe_cid == cmd->cid) {
+                matched_status = cqe_status;
+                found = 1;
+                break;
+            }
+        } else {
+            __asm__ volatile ("pause" ::: "memory");
+            loop_count++;
+            if ((loop_count & 0x3FF) == 0) {
+                uint64_t now_ticks = pit_get_ticks();
+                if (start_ticks > 0 && now_ticks >= start_ticks) {
+                    if (now_ticks - start_ticks > 500) { /* 5.0 seconds */
+                        break;
+                    }
+                } else if (loop_count > 50000000) {
+                    break;
+                }
+            }
+        }
     }
 
-    if (timeout <= 0) return -1;
-
-    uint16_t cqe_status = d->iocq[d->io_cq_head].status;
-    d->io_cq_head++;
-    if (d->io_cq_head == 64) {
-        d->io_cq_head = 0;
-        d->iocq_phase ^= 1;
+    if (!found) {
+        klog_warn("NVMe I/O TIMEOUT! cid=%u op=0x%02X lba=%u count=%u prp1=0x%llX tail=%u head=%u phase=%u status=0x%04X",
+                  cmd->cid, cmd->opcode, cmd->cdw10, (cmd->cdw12 & 0xFFFF) + 1,
+                  (unsigned long long)cmd->prp1,
+                  d->io_sq_tail, d->io_cq_head, d->iocq_phase, d->iocq[d->io_cq_head].status);
+        return -1;
     }
-    *nvme_doorbell(d, 1, 1) = d->io_cq_head;
 
-    if ((cqe_status >> 1) != 0) {
+    if ((matched_status >> 1) != 0) {
+        klog_warn("NVMe I/O ERROR status=0x%04X cid=%u", matched_status, cmd->cid);
         return -1;
     }
     return 0;
@@ -205,6 +269,11 @@ static void nvme_shutdown_device(StorageDevice *dev) {
 
 static int nvme_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t count, void *buf) {
     if (!dev || !dev->driver_priv || !buf || count == 0) return -1;
+    if (dev->total_sectors > 0 && lba + count > dev->total_sectors) {
+        klog_warn("NVMe read out of bounds: lba=%llu count=%u (total=%llu)",
+                  (unsigned long long)lba, count, (unsigned long long)dev->total_sectors);
+        return -1;
+    }
     NvmeDriver *d = (NvmeDriver *)dev->driver_priv;
 
     uint32_t sec_sz = dev->sector_size > 0 ? dev->sector_size : 512;
@@ -231,6 +300,7 @@ static int nvme_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t cou
             return -1;
         }
 
+        __asm__ volatile ("mfence" ::: "memory");
         memcpy(dst, g_nvme_io_buf, chunk * sec_sz);
 
         sectors_left -= chunk;
@@ -243,6 +313,11 @@ static int nvme_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t cou
 
 static int nvme_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t count, const void *buf) {
     if (!dev || !dev->driver_priv || !buf || count == 0) return -1;
+    if (dev->total_sectors > 0 && lba + count > dev->total_sectors) {
+        klog_warn("NVMe write out of bounds: lba=%llu count=%u (total=%llu)",
+                  (unsigned long long)lba, count, (unsigned long long)dev->total_sectors);
+        return -1;
+    }
     NvmeDriver *d = (NvmeDriver *)dev->driver_priv;
 
     uint32_t sec_sz = dev->sector_size > 0 ? dev->sector_size : 512;
@@ -256,6 +331,7 @@ static int nvme_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t co
     while (sectors_left > 0) {
         uint32_t chunk = sectors_left > max_chunk ? max_chunk : sectors_left;
         memcpy(g_nvme_io_buf, src, chunk * sec_sz);
+        __asm__ volatile ("mfence" ::: "memory");
 
         NvmeCmd cmd;
         memset(&cmd, 0, sizeof(NvmeCmd));
@@ -408,7 +484,11 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     id_cmd.prp1 = (uint64_t)(uintptr_t)driver->iocq;
     id_cmd.cdw10 = (63 << 16) | 1; /* Size 64, QID 1 */
     id_cmd.cdw11 = (1 << 0);       /* Physically contiguous */
-    nvme_submit_admin_cmd(driver, &id_cmd);
+    if (nvme_submit_admin_cmd(driver, &id_cmd) != 0) {
+        klog_err("NVMe: failed to create I/O Completion Queue");
+        kfree(driver);
+        return;
+    }
 
     /* Admin command: Create I/O SQ (QID = 1) */
     memset(&id_cmd, 0, sizeof(NvmeCmd));
@@ -416,7 +496,11 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     id_cmd.prp1 = (uint64_t)(uintptr_t)driver->iosq;
     id_cmd.cdw10 = (63 << 16) | 1; /* Size 64, QID 1 */
     id_cmd.cdw11 = (1 << 16) | (1 << 0); /* CQID 1, Physically contiguous */
-    nvme_submit_admin_cmd(driver, &id_cmd);
+    if (nvme_submit_admin_cmd(driver, &id_cmd) != 0) {
+        klog_err("NVMe: failed to create I/O Submission Queue");
+        kfree(driver);
+        return;
+    }
 
     driver->nsid = 1;
 

@@ -46,12 +46,14 @@ static char *strncpy(char *dest, const char *src, size_t n) {
 
 /* Internal Server State */
 static uint32_t *g_fb_ptr = NULL;
+static int g_fb_shm = -1;
 static uint32_t g_screen_width = 1280;
 static uint32_t g_screen_height = 720;
 static uint32_t g_screen_pitch = 1280;
 
 static int g_compositor_fd = -1;
 static int g_wm_fd = -1;
+static int g_taskbar_fd = -1;
 static int g_compositor_shm_id = -1;
 static uint32_t *g_compositor_canvas = NULL;
 static int g_last_known_tty = 1;
@@ -189,6 +191,9 @@ static void remove_client(int fd) {
     if (fd == g_wm_fd) {
         g_wm_fd = -1;
     }
+    if (fd == g_taskbar_fd) {
+        g_taskbar_fd = -1;
+    }
 
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (g_windows[i].active && g_windows[i].client_fd == fd) {
@@ -198,6 +203,7 @@ static void remove_client(int fd) {
             notify.window_id = g_windows[i].id;
             if (g_wm_fd >= 0) syscall(SYS_SEND, g_wm_fd, (uint64_t)(uintptr_t)&notify, sizeof(notify), 0, 0);
             if (g_compositor_fd >= 0) syscall(SYS_SEND, g_compositor_fd, (uint64_t)(uintptr_t)&notify, sizeof(notify), 0, 0);
+            if (g_taskbar_fd >= 0) syscall(SYS_SEND, g_taskbar_fd, (uint64_t)(uintptr_t)&notify, sizeof(notify), 0, 0);
             if (g_windows[i].shm_id > 0) syscall(SYS_SHM_CLOSE, g_windows[i].shm_id, 0, 0, 0, 0);
             g_windows[i].active = 0;
         }
@@ -211,6 +217,55 @@ static void remove_client(int fd) {
         }
     }
     syscall(SYS_CLOSE, fd, 0, 0, 0, 0);
+}
+
+static void handle_screen_resize(uint32_t nw, uint32_t nh, uint32_t np) {
+    cursor_hide();
+    g_screen_width = nw;
+    g_screen_height = nh;
+    g_screen_pitch = np;
+
+    if (g_cur_x >= (int32_t)nw) g_cur_x = (int32_t)nw - 1;
+    if (g_cur_y >= (int32_t)nh) g_cur_y = (int32_t)nh - 1;
+
+    if (g_fb_ptr) {
+        for (uint32_t y = 0; y < g_screen_height; y++) {
+            uint32_t *row = &g_fb_ptr[y * g_screen_pitch];
+            for (uint32_t x = 0; x < g_screen_width; x++) {
+                row[x] = COLOR_DESKTOP;
+            }
+        }
+    }
+    g_cursor_saved = 0;
+
+    /* Compositor canvas is pre-sized to 2560x1440 and remains valid across resolution changes */
+
+    /* Notify Compositor */
+    ntfs_msg_t smsg;
+    memset(&smsg, 0, sizeof(smsg));
+    smsg.type = NTFS_MSG_SCREEN_RESIZED;
+    smsg.width = nw;
+    smsg.height = nh;
+    smsg.flags = np;
+
+    if (g_compositor_fd >= 0) {
+        syscall(SYS_SEND, g_compositor_fd, (uint64_t)(uintptr_t)&smsg, sizeof(smsg), 0, 0);
+    }
+
+    /* Notify Window Manager */
+    if (g_wm_fd >= 0) {
+        syscall(SYS_SEND, g_wm_fd, (uint64_t)(uintptr_t)&smsg, sizeof(smsg), 0, 0);
+    }
+
+    /* Broadcast to all other connected client applications */
+    for (int i = 0; i < MAX_CLIENT_FDS; i++) {
+        int fd = g_client_fds[i];
+        if (fd >= 0 && fd != g_compositor_fd && fd != g_wm_fd) {
+            syscall(SYS_SEND, fd, (uint64_t)(uintptr_t)&smsg, sizeof(smsg), MSG_DONTWAIT, 0);
+        }
+    }
+
+    cursor_show();
 }
 
 void ntfs_main(void) {
@@ -229,14 +284,14 @@ void ntfs_main(void) {
     }
 
     /* 2. Map physical hardware framebuffer via /dev/fb0 */
-    int fb_shm = (int)syscall(SYS_SHM_CREATE, (uint64_t)(uintptr_t)"/dev/fb0", 0, 0, 0, 0);
-    if (fb_shm < 0) {
+    g_fb_shm = (int)syscall(SYS_SHM_CREATE, (uint64_t)(uintptr_t)"/dev/fb0", 0, 0, 0, 0);
+    if (g_fb_shm < 0) {
         puts("[ntfs] ERROR: unable to acquire /dev/fb0 shared memory\n");
         syscall(SYS_EXIT, 1, 0, 0, 0, 0);
         return;
     }
 
-    g_fb_ptr = (uint32_t *)(uintptr_t)syscall(SYS_SHM_MAP, fb_shm, 0, SHM_READ | SHM_WRITE, 0, 0);
+    g_fb_ptr = (uint32_t *)(uintptr_t)syscall(SYS_SHM_MAP, g_fb_shm, 0, SHM_READ | SHM_WRITE, 0, 0);
     if (!g_fb_ptr) {
         puts("[ntfs] ERROR: failed to map physical framebuffer into address space\n");
         syscall(SYS_EXIT, 1, 0, 0, 0, 0);
@@ -305,6 +360,19 @@ void ntfs_main(void) {
         poll_fds[num_poll].revents = 0;
         int kbd_idx = num_poll;
         num_poll++;
+
+        /* Check if screen resolution changed in hardware */
+        BootInfo bi;
+        if (syscall(SYS_GET_BOOTINFO, (uint64_t)(uintptr_t)&bi, 0, 0, 0, 0) == 0) {
+            if (bi.fb.width > 0 && bi.fb.height > 0) {
+                uint32_t nw = (uint32_t)bi.fb.width;
+                uint32_t nh = (uint32_t)bi.fb.height;
+                uint32_t np = (uint32_t)(bi.fb.pixels_per_scanline > 0 ? bi.fb.pixels_per_scanline : bi.fb.width);
+                if (nw != g_screen_width || nh != g_screen_height || np != g_screen_pitch) {
+                    handle_screen_resize(nw, nh, np);
+                }
+            }
+        }
 
         int ready = (int)syscall(SYS_POLL, (uint64_t)(uintptr_t)poll_fds, num_poll, 1, 0, 0);
 
@@ -396,11 +464,17 @@ void ntfs_main(void) {
                     switch (msg.type) {
                         case NTFS_MSG_REGISTER_ROLE:
                             if (msg.flags == NTFS_ROLE_COMPOSITOR) {
+                                int is_reconnect = (g_compositor_fd == poll_fds[i].fd);
                                 g_compositor_fd = poll_fds[i].fd;
+                                if (g_compositor_canvas && g_compositor_shm_id > 0) {
+                                    syscall(SYS_SHM_UNMAP, (uint64_t)(uintptr_t)g_compositor_canvas, 0, 0, 0, 0);
+                                    g_compositor_canvas = NULL;
+                                }
                                 if (msg.shm_id > 0) {
                                     g_compositor_shm_id = (int)msg.shm_id;
                                     g_compositor_canvas = (uint32_t *)(uintptr_t)syscall(SYS_SHM_MAP, g_compositor_shm_id, 0, SHM_READ, 0, 0);
                                 }
+                                if (!is_reconnect) {
                                 for (int w = 0; w < MAX_WINDOWS; w++) {
                                     if (g_windows[w].active) {
                                         ntfs_msg_t wmsg;
@@ -424,6 +498,7 @@ void ntfs_main(void) {
                                         wmsg.flags = (uint32_t)g_windows[w].z_order;
                                         syscall(SYS_SEND, g_compositor_fd, (uint64_t)(uintptr_t)&wmsg, sizeof(wmsg), 0, 0);
                                     }
+                                }
                                 }
                             } else if (msg.flags == NTFS_ROLE_WM) {
                                 g_wm_fd = poll_fds[i].fd;
@@ -476,8 +551,12 @@ void ntfs_main(void) {
                             if (slot >= 0) {
                                 uint32_t wid = g_next_window_id++;
                                 size_t shm_bytes = (size_t)msg.width * (size_t)msg.height * 4;
-                                if (!(msg.flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR | NTFS_WIN_SPLASH))) {
-                                    size_t max_bytes = (size_t)g_screen_width * (size_t)g_screen_height * 4;
+                                if (msg.flags & NTFS_WIN_BACKGROUND) {
+                                    shm_bytes = 2560ULL * 1440ULL * 4;
+                                } else if (msg.flags & NTFS_WIN_TASKBAR) {
+                                    shm_bytes = 2560ULL * 64ULL * 4;
+                                } else if (!(msg.flags & NTFS_WIN_SPLASH)) {
+                                    size_t max_bytes = 2560ULL * 1440ULL * 4;
                                     if (shm_bytes < max_bytes) {
                                         shm_bytes = max_bytes;
                                     }
@@ -505,8 +584,9 @@ void ntfs_main(void) {
                                 if (msg.flags & NTFS_WIN_BACKGROUND) {
                                     g_windows[slot].x = 0;
                                     g_windows[slot].y = 0;
-                                    g_windows[slot].z_order = -100;
+                                    g_windows[slot].z_order = 1;
                                 } else if (msg.flags & NTFS_WIN_TASKBAR) {
+                                    g_taskbar_fd = poll_fds[i].fd;
                                     g_windows[slot].x = 0;
                                     g_windows[slot].y = (int32_t)g_screen_height - (int32_t)TASKBAR_HEIGHT;
                                     g_windows[slot].z_order = 1000;
@@ -527,13 +607,40 @@ void ntfs_main(void) {
                                 rep.shm_id = (uint32_t)win_shm;
                                 syscall(SYS_SEND, poll_fds[i].fd, (uint64_t)(uintptr_t)&rep, sizeof(rep), 0, 0);
 
-                                /* Forward to WM and Compositor */
+                                /* If taskbar just connected, replay all active application windows to it */
+                                if ((msg.flags & NTFS_WIN_TASKBAR) && g_taskbar_fd >= 0) {
+                                    for (int w = 0; w < MAX_WINDOWS; w++) {
+                                        if (g_windows[w].active && !(g_windows[w].flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR | NTFS_WIN_SPLASH | NTFS_WIN_FRAMELESS))) {
+                                            ntfs_msg_t wmsg;
+                                            memset(&wmsg, 0, sizeof(wmsg));
+                                            wmsg.type = NTFS_MSG_CREATE_WINDOW;
+                                            wmsg.window_id = g_windows[w].id;
+                                            wmsg.width = g_windows[w].width;
+                                            wmsg.height = g_windows[w].height;
+                                            wmsg.flags = g_windows[w].flags;
+                                            strncpy(wmsg.title, g_windows[w].title, sizeof(wmsg.title) - 1);
+                                            syscall(SYS_SEND, g_taskbar_fd, (uint64_t)(uintptr_t)&wmsg, sizeof(wmsg), 0, 0);
+                                        }
+                                    }
+                                    if (g_focused_window_id > 0) {
+                                        ntfs_msg_t fmsg;
+                                        memset(&fmsg, 0, sizeof(fmsg));
+                                        fmsg.type = NTFS_MSG_FOCUS_WINDOW;
+                                        fmsg.window_id = g_focused_window_id;
+                                        syscall(SYS_SEND, g_taskbar_fd, (uint64_t)(uintptr_t)&fmsg, sizeof(fmsg), 0, 0);
+                                    }
+                                }
+
+                                /* Forward to WM, Compositor and Taskbar */
                                 msg.window_id = wid;
                                 msg.shm_id = (uint32_t)win_shm;
                                 msg.x = g_windows[slot].x;
                                 msg.y = g_windows[slot].y;
                                 if (g_wm_fd >= 0) syscall(SYS_SEND, g_wm_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
                                 if (g_compositor_fd >= 0) syscall(SYS_SEND, g_compositor_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
+                                if (g_taskbar_fd >= 0 && !(msg.flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR | NTFS_WIN_SPLASH | NTFS_WIN_FRAMELESS))) {
+                                    syscall(SYS_SEND, g_taskbar_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
+                                }
                             }
                             break;
                         }
@@ -548,6 +655,7 @@ void ntfs_main(void) {
                             }
                             if (g_wm_fd >= 0) syscall(SYS_SEND, g_wm_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
                             if (g_compositor_fd >= 0) syscall(SYS_SEND, g_compositor_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
+                            if (g_taskbar_fd >= 0) syscall(SYS_SEND, g_taskbar_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
                             break;
                         }
 
@@ -582,7 +690,14 @@ void ntfs_main(void) {
                                     g_windows[w].y = msg.y;
                                     if (msg.width > 0) g_windows[w].width = msg.width;
                                     if (msg.height > 0) g_windows[w].height = msg.height;
-                                    if (msg.flags > 0) g_windows[w].z_order = (int)msg.flags;
+                                    if (msg.shm_id > 0) g_windows[w].shm_id = (int)msg.shm_id;
+                                    if (msg.flags & NTFS_WIN_MINIMIZED) {
+                                        g_windows[w].flags |= NTFS_WIN_MINIMIZED;
+                                        g_windows[w].z_order = (int)(msg.flags & ~NTFS_WIN_MINIMIZED);
+                                    } else {
+                                        g_windows[w].flags &= ~NTFS_WIN_MINIMIZED;
+                                        if (msg.flags > 0) g_windows[w].z_order = (int)msg.flags;
+                                    }
                                     break;
                                 }
                             }
@@ -591,6 +706,9 @@ void ntfs_main(void) {
                             }
                             if (g_wm_fd >= 0 && poll_fds[i].fd != g_wm_fd) {
                                 syscall(SYS_SEND, g_wm_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
+                            }
+                            if (g_taskbar_fd >= 0 && poll_fds[i].fd != g_taskbar_fd) {
+                                syscall(SYS_SEND, g_taskbar_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
                             }
                             /* Notify client application if its size changed */
                             if (size_changed && target_client_fd >= 0) {
@@ -611,6 +729,12 @@ void ntfs_main(void) {
                             g_focused_window_id = msg.window_id;
                             if (g_compositor_fd >= 0) {
                                 syscall(SYS_SEND, g_compositor_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
+                            }
+                            if (g_wm_fd >= 0 && poll_fds[i].fd != g_wm_fd) {
+                                syscall(SYS_SEND, g_wm_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
+                            }
+                            if (g_taskbar_fd >= 0 && poll_fds[i].fd != g_taskbar_fd) {
+                                syscall(SYS_SEND, g_taskbar_fd, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
                             }
                             break;
 
@@ -717,7 +841,7 @@ void ntfs_main(void) {
                 int top_hit = -1;
                 int top_z = -999;
                 for (int w = 0; w < MAX_WINDOWS; w++) {
-                    if (g_windows[w].active && !(g_windows[w].flags & NTFS_WIN_BACKGROUND)) {
+                    if (g_windows[w].active && !(g_windows[w].flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_MINIMIZED))) {
                         int wx = g_windows[w].x;
                         int wy = g_windows[w].y;
                         int ww = (int)g_windows[w].width;

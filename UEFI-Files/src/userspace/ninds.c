@@ -37,6 +37,12 @@ typedef struct {
     uint32_t height;
     uint32_t flags;
     int z_order;
+    int is_maximized;
+    int is_minimized;
+    int32_t restore_x;
+    int32_t restore_y;
+    uint32_t restore_w;
+    uint32_t restore_h;
 } ninds_window_t;
 
 static ninds_window_t g_windows[MAX_WINDOWS];
@@ -44,6 +50,7 @@ static uint32_t g_screen_width = 1280;
 static uint32_t g_screen_height = 720;
 static int g_cascade_idx = 0;
 static int g_top_z = 10;
+static uint32_t g_focused_id = 0;
 
 static uint32_t g_drag_win_id = 0;
 static int32_t g_drag_offset_x = 0;
@@ -78,11 +85,14 @@ static void send_set_geometry(int sock, ninds_window_t *win) {
     msg.y = win->y;
     msg.width = win->width;
     msg.height = win->height;
-    msg.flags = (uint32_t)win->z_order;
+    uint32_t flags = (uint32_t)(win->z_order & ~NTFS_WIN_MINIMIZED);
+    if (win->is_minimized) flags |= NTFS_WIN_MINIMIZED;
+    msg.flags = flags;
     syscall(SYS_SEND, sock, (uint64_t)(uintptr_t)&msg, sizeof(msg), 0, 0);
 }
 
 static void send_focus(int sock, uint32_t wid) {
+    g_focused_id = wid;
     ntfs_msg_t msg;
     memset(&msg, 0, sizeof(msg));
     msg.type = NTFS_MSG_FOCUS_WINDOW;
@@ -187,6 +197,8 @@ void ninds_main(void) {
                             g_windows[slot].width = msg.width;
                             g_windows[slot].height = msg.height;
                             g_windows[slot].flags = msg.flags;
+                            g_windows[slot].is_maximized = 0;
+                            g_windows[slot].is_minimized = 0;
 
                             if (msg.flags & NTFS_WIN_SPLASH) {
                                 g_windows[slot].x = 0;
@@ -195,7 +207,7 @@ void ninds_main(void) {
                             } else if (msg.flags & NTFS_WIN_BACKGROUND) {
                                 g_windows[slot].x = 0;
                                 g_windows[slot].y = 0;
-                                g_windows[slot].z_order = -100;
+                                g_windows[slot].z_order = 1;
                             } else if (msg.flags & NTFS_WIN_TASKBAR) {
                                 g_windows[slot].x = 0;
                                 g_windows[slot].y = (int32_t)g_screen_height - (int32_t)TASKBAR_HEIGHT;
@@ -249,7 +261,7 @@ void ninds_main(void) {
                             int best_slot = -1;
                             int best_z = -999;
                             for (int i = 0; i < MAX_WINDOWS; i++) {
-                                if (g_windows[i].active && !(g_windows[i].flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR))) {
+                                if (g_windows[i].active && !g_windows[i].is_minimized && !(g_windows[i].flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR))) {
                                     if (g_windows[i].z_order > best_z) {
                                         best_z = g_windows[i].z_order;
                                         best_slot = i;
@@ -258,6 +270,44 @@ void ninds_main(void) {
                             }
                             if (best_slot >= 0) {
                                 send_focus(sock, g_windows[best_slot].id);
+                            } else {
+                                g_focused_id = 0;
+                                send_focus(sock, 0);
+                            }
+                        }
+                        break;
+                    }
+
+                    case NTFS_MSG_FOCUS_WINDOW: {
+                        for (int i = 0; i < MAX_WINDOWS; i++) {
+                            if (g_windows[i].active && g_windows[i].id == msg.window_id) {
+                                if (msg.flags == 1 && !g_windows[i].is_minimized && g_focused_id == msg.window_id) {
+                                    /* Taskbar requested minimize of active window */
+                                    g_windows[i].is_minimized = 1;
+                                    send_set_geometry(sock, &g_windows[i]);
+                                    int best_slot = -1;
+                                    int best_z = -999;
+                                    for (int j = 0; j < MAX_WINDOWS; j++) {
+                                        if (g_windows[j].active && !g_windows[j].is_minimized &&
+                                            !(g_windows[j].flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR))) {
+                                            if (g_windows[j].z_order > best_z) {
+                                                best_z = g_windows[j].z_order;
+                                                best_slot = j;
+                                            }
+                                        }
+                                    }
+                                    if (best_slot >= 0) {
+                                        send_focus(sock, g_windows[best_slot].id);
+                                    } else {
+                                        g_focused_id = 0;
+                                        send_focus(sock, 0);
+                                    }
+                                } else {
+                                    /* Restore if minimized and bring to front */
+                                    g_windows[i].is_minimized = 0;
+                                    bring_to_front(sock, &g_windows[i]);
+                                }
+                                break;
                             }
                         }
                         break;
@@ -272,6 +322,52 @@ void ninds_main(void) {
                                 if (msg.height > 0) g_windows[i].height = msg.height;
                                 if (msg.flags > 0) g_windows[i].z_order = (int)msg.flags;
                                 break;
+                            }
+                        }
+                        break;
+                    }
+
+                    case NTFS_MSG_SCREEN_RESIZED: {
+                        g_screen_width = msg.width;
+                        g_screen_height = msg.height;
+
+                        for (int i = 0; i < MAX_WINDOWS; i++) {
+                            if (!g_windows[i].active) continue;
+
+                            if (g_windows[i].flags & NTFS_WIN_BACKGROUND) {
+                                g_windows[i].x = 0;
+                                g_windows[i].y = 0;
+                                g_windows[i].width = g_screen_width;
+                                g_windows[i].height = g_screen_height;
+                                send_set_geometry(sock, &g_windows[i]);
+                            } else if (g_windows[i].flags & NTFS_WIN_TASKBAR) {
+                                g_windows[i].x = 0;
+                                g_windows[i].y = (int32_t)g_screen_height - (int32_t)TASKBAR_HEIGHT;
+                                g_windows[i].width = g_screen_width;
+                                g_windows[i].height = TASKBAR_HEIGHT;
+                                send_set_geometry(sock, &g_windows[i]);
+                            } else if (g_windows[i].is_maximized) {
+                                g_windows[i].x = 0;
+                                g_windows[i].y = 0;
+                                g_windows[i].width = g_screen_width;
+                                g_windows[i].height = g_screen_height - TASKBAR_HEIGHT;
+                                send_set_geometry(sock, &g_windows[i]);
+                            } else if (!(g_windows[i].flags & NTFS_WIN_FRAMELESS)) {
+                                /* Clamp normal windows so titlebars remain on screen */
+                                int clamped = 0;
+                                if (g_windows[i].x > (int32_t)g_screen_width - 60) {
+                                    g_windows[i].x = (int32_t)g_screen_width - 80;
+                                    if (g_windows[i].x < 0) g_windows[i].x = 0;
+                                    clamped = 1;
+                                }
+                                if (g_windows[i].y > (int32_t)g_screen_height - 60) {
+                                    g_windows[i].y = (int32_t)g_screen_height - (int32_t)TASKBAR_HEIGHT - 40;
+                                    if (g_windows[i].y < 0) g_windows[i].y = 0;
+                                    clamped = 1;
+                                }
+                                if (clamped) {
+                                    send_set_geometry(sock, &g_windows[i]);
+                                }
                             }
                         }
                         break;
@@ -292,7 +388,8 @@ void ninds_main(void) {
                             int hit_edge = RESIZE_NONE;
 
                             for (int i = 0; i < MAX_WINDOWS; i++) {
-                                if (g_windows[i].active && !(g_windows[i].flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR | NTFS_WIN_SPLASH))) {
+                                if (g_windows[i].active && !g_windows[i].is_minimized &&
+                                    !(g_windows[i].flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR | NTFS_WIN_SPLASH))) {
                                     int wx = g_windows[i].x;
                                     int wy = g_windows[i].y;
                                     int ww = (int)g_windows[i].width;
@@ -335,13 +432,64 @@ void ninds_main(void) {
                                 /* Check close button [X] */
                                 int bx = target->x + (int)target->width - 17;
                                 int by = target->y - TITLEBAR_HEIGHT + 5;
+                                int mx_btn = bx - 16;
+                                int min_btn = bx - 32;
                                 if (mx >= bx && mx < bx + 14 && my >= by && my < by + 14) {
                                     ntfs_msg_t cmsg;
                                     memset(&cmsg, 0, sizeof(cmsg));
                                     cmsg.type = NTFS_MSG_CLOSE_WINDOW;
                                     cmsg.window_id = target->id;
                                     syscall(SYS_SEND, sock, (uint64_t)(uintptr_t)&cmsg, sizeof(cmsg), 0, 0);
-                                } else if (hit_edge != RESIZE_NONE) {
+                                } else if (!(target->flags & NTFS_WIN_FIXED_SIZE) &&
+                                           mx >= min_btn && mx < min_btn + 14 && my >= by && my < by + 14) {
+                                    /* Minimize button clicked -> hide surface via bit 31 flag */
+                                    target->is_minimized = 1;
+                                    send_set_geometry(sock, target);
+
+                                    /* Find next topmost visible window to focus */
+                                    int best_slot = -1;
+                                    int best_z = -999;
+                                    for (int i = 0; i < MAX_WINDOWS; i++) {
+                                        if (g_windows[i].active && !g_windows[i].is_minimized &&
+                                            !(g_windows[i].flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR))) {
+                                            if (g_windows[i].z_order > best_z) {
+                                                best_z = g_windows[i].z_order;
+                                                best_slot = i;
+                                            }
+                                        }
+                                    }
+                                    if (best_slot >= 0) {
+                                        send_focus(sock, g_windows[best_slot].id);
+                                    } else {
+                                        g_focused_id = 0;
+                                        send_focus(sock, 0);
+                                    }
+                                } else if (!(target->flags & NTFS_WIN_FIXED_SIZE) &&
+                                           mx >= mx_btn && mx < mx_btn + 14 && my >= by && my < by + 14) {
+                                    /* Maximize / Restore toggle button clicked */
+                                    if (!target->is_maximized) {
+                                        /* Save restore geometry */
+                                        target->restore_x = target->x;
+                                        target->restore_y = target->y;
+                                        target->restore_w = target->width;
+                                        target->restore_h = target->height;
+
+                                        /* Set maximized geometry to full screen above taskbar */
+                                        target->x = BORDER_WIDTH;
+                                        target->y = TITLEBAR_HEIGHT;
+                                        target->width = g_screen_width - 2 * BORDER_WIDTH;
+                                        target->height = g_screen_height - TASKBAR_HEIGHT - TITLEBAR_HEIGHT - BORDER_WIDTH;
+                                        target->is_maximized = 1;
+                                    } else {
+                                        /* Restore previous geometry */
+                                        target->x = target->restore_x;
+                                        target->y = target->restore_y;
+                                        target->width = target->restore_w;
+                                        target->height = target->restore_h;
+                                        target->is_maximized = 0;
+                                    }
+                                    send_set_geometry(sock, target);
+                                } else if (hit_edge != RESIZE_NONE && !target->is_maximized) {
                                     /* Initiate resize drag */
                                     g_resize_win_id = target->id;
                                     g_resize_edges = hit_edge;
@@ -364,7 +512,7 @@ void ninds_main(void) {
                                     wf_msg.width = g_wireframe_w;
                                     wf_msg.height = g_wireframe_h;
                                     syscall(SYS_SEND, sock, (uint64_t)(uintptr_t)&wf_msg, sizeof(wf_msg), 0, 0);
-                                } else if (my < target->y) {
+                                } else if (my < target->y && !target->is_maximized) {
                                     /* Clicked on titlebar -> initiate drag */
                                     g_drag_win_id = target->id;
                                     g_drag_offset_x = mx - target->x;

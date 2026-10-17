@@ -19,8 +19,8 @@ set -e
 #   --all                   (Attach SATA, NVMe, and USB 3.0 drives simultaneously)
 #
 # Boot Media Options:
-#   --no-iso / --disk-boot      (Boot directly from installed disk without ISO attached)
-#   --boot-from <sata|nvme|usb> (Select boot drive: sata, nvme, or usb; implies --no-iso)
+#   --no-iso / --disk-boot           (Boot directly from installed disk without ISO attached)
+#   --boot-from <sata|nvme|usb|usb2> (Select boot drive: sata, nvme, usb, or usb2; implies --no-iso)
 # ==============================================================================
 
 # Sanitize Snap environment variables that cause GTK/glibc library version mismatches
@@ -119,7 +119,7 @@ while [ $# -gt 0 ]; do
                     BOOT_FROM="iso"
                 fi
             else
-                echo "[ERROR] --boot-from requires an argument: sata, nvme, usb, or iso" >&2
+                echo "[ERROR] --boot-from requires an argument: sata, nvme, usb, usb2, or iso" >&2
                 exit 1
             fi
             ;;
@@ -154,12 +154,16 @@ if [ -n "$BOOT_FROM" ]; then
             ATTACH_USB3=1
             NO_ISO=1
             ;;
+        usb2)
+            ATTACH_USB2=1
+            NO_ISO=1
+            ;;
         iso|cdrom)
             NO_ISO=0
             BOOT_FROM="iso"
             ;;
         *)
-            echo "[ERROR] Invalid option for --boot-from: '$BOOT_FROM'. Supported options: sata, nvme, usb, iso" >&2
+            echo "[ERROR] Invalid option for --boot-from: '$BOOT_FROM'. Supported options: sata, nvme, usb, usb2, iso" >&2
             exit 1
             ;;
     esac
@@ -171,6 +175,8 @@ if [ "$NO_ISO" -eq 1 ] && [ -z "$BOOT_FROM" ]; then
         BOOT_FROM="nvme"
     elif [ "$ATTACH_USB3" -eq 1 ] && [ "$ATTACH_SATA" -eq 0 ]; then
         BOOT_FROM="usb"
+    elif [ "$ATTACH_USB2" -eq 1 ] && [ "$ATTACH_SATA" -eq 0 ]; then
+        BOOT_FROM="usb2"
     else
         BOOT_FROM="sata"
         ATTACH_SATA=1
@@ -215,6 +221,7 @@ if [ "$NO_ISO" -eq 1 ]; then
         sata) TARGET_BOOT_IMG="${DISKS_DIR}/sata_disk.img" ;;
         nvme) TARGET_BOOT_IMG="${DISKS_DIR}/nvme_disk.img" ;;
         usb)  TARGET_BOOT_IMG="${DISKS_DIR}/usb_disk.img" ;;
+        usb2) TARGET_BOOT_IMG="${DISKS_DIR}/usb2_disk.img" ;;
     esac
 
     if ! is_disk_partitioned "$TARGET_BOOT_IMG"; then
@@ -289,10 +296,14 @@ if [ "$ATTACH_USB2" -eq 1 ]; then
     if [ ! -f "$USB2_IMG" ]; then
         truncate -s 500M "$USB2_IMG"
     fi
+    BOOT_PROP=""
+    if [ "$NO_ISO" -eq 1 ] && [ "$BOOT_FROM" = "usb2" ]; then
+        BOOT_PROP=",bootindex=1"
+    fi
     STORAGE_ARGS+=(
         -device "usb-ehci,id=ehci"
         -drive "file=${USB2_IMG},if=none,id=usb2_0,format=raw"
-        -device "usb-storage,bus=ehci.0,drive=usb2_0"
+        -device "usb-storage,bus=ehci.0,drive=usb2_0${BOOT_PROP}"
     )
 fi
 

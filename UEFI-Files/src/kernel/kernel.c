@@ -18,6 +18,7 @@
 #include "pe_loader.h"
 #include "ipc.h"
 #include "shm.h"
+#include "panic.h"
 
 BootInfo *g_boot_info_global = NULL;
 
@@ -39,7 +40,7 @@ void kernel_main(BootInfo *boot_info) {
 
     /* 3. Initialize Kernel Logging Subsystem (klog ring buffer) */
     klog_init();
-    boot_log("OK", "initializing pseuDOS kernel v0.6.0-scheduling");
+    boot_log("OK", "initializing pseuDOS kernel v0.7.1-gui");
 
     /* 4. Initialize Custom 64-bit GDT & Task State Segment (TSS) */
     gdt_init();
@@ -72,7 +73,10 @@ void kernel_main(BootInfo *boot_info) {
     storage_init();
 
     /* 12. Mount Persistent Boot Disk FAT32 Filesystem (or Ramfs on CD-ROM) */
-    vfs_mount_boot_media(boot_info);
+    if (vfs_mount_boot_media(boot_info) != 0) {
+        boot_log("FATAL", "unable to mount root filesystem");
+        kernel_panic("VFS: Unable to mount root fs on boot media", NULL);
+    }
     boot_log("OK", "storage subsystem and root filesystem mounted");
 
     /* 13. Initialize PIT Timer, Syscalls, IPC, and SHM */

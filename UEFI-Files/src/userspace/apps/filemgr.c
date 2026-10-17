@@ -476,28 +476,111 @@ static void draw_icon_32(uint32_t *pixels, int win_w, int win_h, int x, int y, i
     }
 }
 
-/* File Copy Utility (Option 1) */
-static int copy_file(const char *src_path, const char *dst_path) {
-    vfs_stat_t st;
-    if (syscall(SYS_STAT, (uint64_t)(uintptr_t)src_path, (uint64_t)(uintptr_t)&st, 0, 0, 0) != 0) {
-        return -1;
+static int is_subpath(const char *parent, const char *child) {
+    if (!parent || !child) return 0;
+    size_t plen = str_len(parent);
+    while (plen > 1 && parent[plen - 1] == '/') {
+        plen--;
     }
-    if (st.size == 0) {
+    if (plen == 1 && parent[0] == '/') {
+        return (child[0] == '/');
+    }
+    size_t clen = str_len(child);
+    if (clen < plen) return 0;
+    for (size_t i = 0; i < plen; i++) {
+        if (parent[i] != child[i]) return 0;
+    }
+    if (child[plen] == '/' || child[plen] == '\0') {
+        return 1;
+    }
+    return 0;
+}
+
+/* File & Directory Copy Utility */
+#define MAX_COPY_DEPTH 16
+static char s_copy_file_buf[4096];
+static char s_copy_dir_names[MAX_COPY_DEPTH][2048];
+
+static int copy_single_file(const char *src_path, const char *dst_path, uint32_t file_size) {
+    if (file_size == 0) {
         return (int)syscall(SYS_WRITEFILE, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)"", 0, 0, 0);
     }
-    char buf[4096];
     size_t offset = 0;
     int first = 1;
-    while (offset < st.size) {
-        size_t to_read = (st.size - offset < sizeof(buf)) ? (st.size - offset) : sizeof(buf);
-        int64_t rd = syscall(SYS_READFILE, (uint64_t)(uintptr_t)src_path, (uint64_t)(uintptr_t)buf, to_read, offset, 0);
-        if (rd <= 0) break;
-        int wr = (int)syscall(SYS_WRITEFILE, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)buf, (size_t)rd, first ? 0 : 1, 0);
+    while (offset < file_size) {
+        size_t to_read = (file_size - offset < sizeof(s_copy_file_buf)) ? (file_size - offset) : sizeof(s_copy_file_buf);
+        int64_t rd = syscall(SYS_READFILE, (uint64_t)(uintptr_t)src_path, (uint64_t)(uintptr_t)s_copy_file_buf, to_read, offset, 0);
+        if (rd <= 0) return -1;
+        int wr = (int)syscall(SYS_WRITEFILE, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)s_copy_file_buf, (size_t)rd, first ? 0 : 1, 0);
         if (wr != 0) return -1;
         offset += rd;
         first = 0;
     }
     return 0;
+}
+
+static int copy_node_internal(const char *src_path, const char *dst_path, int depth) {
+    if (!src_path || !dst_path || depth >= MAX_COPY_DEPTH) return -1;
+
+    vfs_stat_t st;
+    if (syscall(SYS_STAT, (uint64_t)(uintptr_t)src_path, (uint64_t)(uintptr_t)&st, 0, 0, 0) != 0) {
+        return -1;
+    }
+
+    if (st.type == VFS_TYPE_DIR) {
+        if (is_subpath(src_path, dst_path)) {
+            return -1; /* Prevent infinite recursion into itself */
+        }
+
+        int mk_res = (int)syscall(SYS_MKDIR, (uint64_t)(uintptr_t)dst_path, 0, 0, 0, 0);
+        if (mk_res != 0) {
+            vfs_stat_t dst_st;
+            if (syscall(SYS_STAT, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)&dst_st, 0, 0, 0) != 0 || dst_st.type != VFS_TYPE_DIR) {
+                return -1;
+            }
+        }
+
+        char *names_buf = s_copy_dir_names[depth];
+        int64_t nbytes = syscall(SYS_LISTDIR, (uint64_t)(uintptr_t)src_path, (uint64_t)(uintptr_t)names_buf, sizeof(s_copy_dir_names[0]), 0, 0);
+        if (nbytes > 0) {
+            size_t pos = 0;
+            while (pos < (size_t)nbytes) {
+                const char *name = &names_buf[pos];
+                size_t nlen = str_len(name);
+                if (nlen == 0) break;
+                pos += nlen + 1;
+
+                if (str_eq(name, ".") || str_eq(name, "..")) continue;
+
+                char child_src[PATH_MAX_LEN];
+                char child_dst[PATH_MAX_LEN];
+
+                str_copy(child_src, src_path, sizeof(child_src));
+                if (!str_eq(child_src, "/")) str_cat(child_src, "/", sizeof(child_src));
+                str_cat(child_src, name, sizeof(child_src));
+
+                str_copy(child_dst, dst_path, sizeof(child_dst));
+                if (!str_eq(child_dst, "/")) str_cat(child_dst, "/", sizeof(child_dst));
+                str_cat(child_dst, name, sizeof(child_dst));
+
+                if (copy_node_internal(child_src, child_dst, depth + 1) != 0) {
+                    return -1;
+                }
+            }
+        }
+        return 0;
+    } else {
+        vfs_stat_t dst_st;
+        if (syscall(SYS_STAT, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)&dst_st, 0, 0, 0) == 0 && dst_st.type == VFS_TYPE_DIR) {
+            return -1; /* Cannot overwrite a directory with a file */
+        }
+        return copy_single_file(src_path, dst_path, st.size);
+    }
+}
+
+/* File / Directory Copy Utility */
+static int copy_file(const char *src_path, const char *dst_path) {
+    return copy_node_internal(src_path, dst_path, 0);
 }
 
 /* Directory Enumeration and Sorting */
@@ -702,12 +785,16 @@ static void execute_or_open(file_item_t *item) {
         }
     } else if (str_ends_with(item->name, ".bmp") || str_ends_with(item->name, ".png") ||
                str_ends_with(item->name, ".jpg") || str_ends_with(item->name, ".jpeg")) {
-        /* Open in Paint with real path argument! */
-        int64_t ret = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/apps/paint.exe", (uint64_t)(uintptr_t)full_path, 0, 0, 0);
+        /* Open in ImageViewer with real path argument! */
+        int64_t ret = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/apps/view.exe", (uint64_t)(uintptr_t)full_path, 0, 0, 0);
+        if (ret < 0) {
+            /* Fallback to Paint if view.exe is unavailable */
+            ret = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/apps/paint.exe", (uint64_t)(uintptr_t)full_path, 0, 0, 0);
+        }
         if (ret == -ENOMEM) {
             show_error_modal("Out of kernel", "heap!");
         } else if (ret < 0) {
-            show_error_modal("Failed to open", "Paint!");
+            show_error_modal("Failed to open", "Image Viewer!");
         }
     }
 }
@@ -803,8 +890,32 @@ static void action_paste(void) {
     char target_path[PATH_MAX_LEN];
     build_full_path(s_clip_name, target_path, sizeof(target_path));
     if (str_eq(s_clip_src, target_path)) {
-        str_copy(g_status_msg, "Source and destination are identical", sizeof(g_status_msg));
-        return;
+        if (s_clip_is_cut) {
+            str_copy(g_status_msg, "Source and destination are identical", sizeof(g_status_msg));
+            return;
+        }
+        char copy_name[64];
+        char num_str[8];
+        int found_slot = 0;
+        for (int cnum = 1; cnum < 100; cnum++) {
+            str_copy(copy_name, "Copy_", sizeof(copy_name));
+            if (cnum > 1) {
+                u64_to_str(cnum, num_str);
+                str_cat(copy_name, num_str, sizeof(copy_name));
+                str_cat(copy_name, "_", sizeof(copy_name));
+            }
+            str_cat(copy_name, s_clip_name, sizeof(copy_name));
+            build_full_path(copy_name, target_path, sizeof(target_path));
+            vfs_stat_t tst;
+            if (syscall(SYS_STAT, (uint64_t)(uintptr_t)target_path, (uint64_t)(uintptr_t)&tst, 0, 0, 0) != 0) {
+                found_slot = 1;
+                break;
+            }
+        }
+        if (!found_slot) {
+            str_copy(g_status_msg, "Too many copies in destination", sizeof(g_status_msg));
+            return;
+        }
     }
     if (copy_file(s_clip_src, target_path) != 0) {
         str_copy(g_status_msg, "Paste failed (permission or disk error)", sizeof(g_status_msg));

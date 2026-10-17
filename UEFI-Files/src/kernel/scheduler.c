@@ -42,6 +42,11 @@ void scheduler_disable(void) {
 void scheduler_tick(interrupt_frame_t *frame, registers_t *regs) {
     pit_tick();
 
+    extern void ps2_poll_controller(void);
+    extern void usb_hid_poll(void);
+    ps2_poll_controller();
+    usb_hid_poll();
+
     extern void syscall_check_scheduled_shutdown(void);
     syscall_check_scheduled_shutdown();
 
@@ -98,6 +103,14 @@ void scheduler_schedule(interrupt_frame_t *frame, registers_t *regs) {
         prev->context.ss     = frame->ss;
 
         prev->state = PROCESS_STATE_READY;
+    }
+
+    /* 1b. Auto-reap any terminated zombie processes whose stacks are idle */
+    for (int i = 1; i < MAX_PROCESSES; i++) {
+        process_t *zp = process_get_by_slot(i);
+        if (zp && zp->state == PROCESS_STATE_KILLED && zp != prev) {
+            process_free_resources(zp);
+        }
     }
 
     /* 2. Find next READY process in round-robin order by slot index */

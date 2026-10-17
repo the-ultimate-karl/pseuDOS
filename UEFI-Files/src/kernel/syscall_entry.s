@@ -6,12 +6,29 @@
 .extern g_current_kernel_rsp
 .extern g_syscall_user_rsp
 .extern g_current_process_privilege
+.extern g_current_process_is_user
 
 syscall_entry:
-    # 1. Save calling RSP
+    # 1. Save calling RSP (interrupts are masked on entry by IA32_SFMASK)
     movq %rsp, g_syscall_user_rsp(%rip)
 
-    # 2. Push interrupt frame for iretq
+    # 2. Check if caller is a Ring 3 user process
+    cmpq $0, g_current_process_is_user(%rip)
+    je .Lsyscall_from_ring0
+
+    # Switch from Ring 3 user stack to Ring 0 kernel stack
+    movq g_current_kernel_rsp(%rip), %rsp
+
+    # Push interrupt frame for iretq to Ring 3 (CPL 3)
+    pushq $0x1B                          # SS: User Data (0x18 | 3)
+    pushq g_syscall_user_rsp(%rip)       # RSP: User stack pointer
+    pushq %r11                           # RFLAGS: Flags saved by syscall
+    pushq $0x23                          # CS: User Code (0x20 | 3)
+    pushq %rcx                           # RIP: Instruction pointer saved by syscall
+    jmp .Lsyscall_frame_done
+
+.Lsyscall_from_ring0:
+    # Push interrupt frame for iretq to Ring 0 (CPL 0)
     pushq $0x10                          # SS: Kernel Data (0x10)
     pushq g_syscall_user_rsp(%rip)       # RSP: Caller stack pointer
     pushq %r11                           # RFLAGS: Flags saved by syscall

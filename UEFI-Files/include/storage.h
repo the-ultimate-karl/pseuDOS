@@ -56,6 +56,17 @@ void usb_storage_init(void);
 typedef void (*install_progress_cb_t)(const char *step_name, int is_ok);
 int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progress_cb);
 
+typedef struct {
+    char stage[64];
+    char details[128];
+    uint64_t failed_lba;
+    uint32_t sector_count;
+    int error_code;
+} GptInstallErrorInfo;
+
+const GptInstallErrorInfo *gpt_fat32_get_last_error(void);
+void flash_format_error_screen(char *buf, size_t buf_sz, const StorageDevice *dev);
+
 /* Block Device Filesystem Inspection API */
 typedef struct {
     int has_partition_table;       /* 1 if valid GPT or MBR found */
@@ -136,6 +147,7 @@ const uint8_t *payload_get_bootloader(size_t *out_size);
 const uint8_t *payload_get_kernel(size_t *out_size);
 const uint8_t *payload_get_autoinit(size_t *out_size);
 const uint8_t *payload_get_xshss(size_t *out_size);
+const uint8_t *payload_get_gman(size_t *out_size);
 const uint8_t *payload_get_superglue(size_t *out_size);
 const uint8_t *payload_get_ntfs(size_t *out_size);
 const uint8_t *payload_get_lack(size_t *out_size);
@@ -149,5 +161,6 @@ const uint8_t *payload_get_notepad(size_t *out_size);
 const uint8_t *payload_get_paint(size_t *out_size);
 const uint8_t *payload_get_clock(size_t *out_size);
 const uint8_t *payload_get_filemgr(size_t *out_size);
+const uint8_t *payload_get_view(size_t *out_size);
 
 #endif /* STORAGE_H */

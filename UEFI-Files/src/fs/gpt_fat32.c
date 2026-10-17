@@ -2,6 +2,7 @@
 #include "bootinfo.h"
 #include "fs.h"
 #include "lib.h"
+#include "klog.h"
 
 typedef struct {
     uint8_t  boot_indicator;
@@ -97,6 +98,25 @@ static uint32_t calculate_crc32(const void *data, size_t length) {
     return ~crc;
 }
 
+typedef struct {
+    uint8_t  order;
+    uint16_t name1[5];
+    uint8_t  attr;
+    uint8_t  type;
+    uint8_t  checksum;
+    uint16_t name2[6];
+    uint16_t fst_clus_lo;
+    uint16_t name3[2];
+} __attribute__((packed)) FatLfnEntry;
+
+static uint8_t gpt_lfn_checksum(const char dos_name[11]) {
+    uint8_t sum = 0;
+    for (int i = 0; i < 11; i++) {
+        sum = (uint8_t)(((sum & 1) ? 0x80 : 0) + (sum >> 1) + (uint8_t)dos_name[i]);
+    }
+    return sum;
+}
+
 static void make_dir_entry(FatDirEntry *entry, const char name11[11], uint8_t attr, uint32_t cluster, uint32_t size) {
     memset(entry, 0, sizeof(FatDirEntry));
     memcpy(entry->name, name11, 11);
@@ -106,8 +126,99 @@ static void make_dir_entry(FatDirEntry *entry, const char name11[11], uint8_t at
     entry->file_size = size;
 }
 
+static void make_lfn_entry(FatDirEntry *entries, int *inout_idx, const char *long_name, const char name11[11], uint8_t attr, uint32_t cluster, uint32_t size) {
+    if (!long_name || strcmp(long_name, ".") == 0 || strcmp(long_name, "..") == 0) {
+        make_dir_entry(&entries[*inout_idx], name11, attr, cluster, size);
+        (*inout_idx)++;
+        return;
+    }
+
+    uint8_t chk = gpt_lfn_checksum(name11);
+    size_t name_len = strlen(long_name);
+    int num_chunks = (int)((name_len + 12) / 13);
+    if (num_chunks < 1) num_chunks = 1;
+
+    for (int seq = num_chunks; seq >= 1; seq--) {
+        FatLfnEntry *lfn = (FatLfnEntry *)&entries[*inout_idx];
+        memset(lfn, 0, sizeof(FatLfnEntry));
+        lfn->order = (uint8_t)seq;
+        if (seq == num_chunks) lfn->order |= 0x40;
+        lfn->attr = 0x0F;
+        lfn->type = 0x00;
+        lfn->checksum = chk;
+        lfn->fst_clus_lo = 0;
+
+        int start_char = (seq - 1) * 13;
+        uint16_t chars[13];
+        for (int k = 0; k < 13; k++) {
+            size_t pos = start_char + k;
+            if (pos < name_len) {
+                chars[k] = (uint16_t)(uint8_t)long_name[pos];
+            } else if (pos == name_len) {
+                chars[k] = 0x0000;
+            } else {
+                chars[k] = 0xFFFF;
+            }
+        }
+        memcpy(lfn->name1, &chars[0], 5 * sizeof(uint16_t));
+        memcpy(lfn->name2, &chars[5], 6 * sizeof(uint16_t));
+        memcpy(lfn->name3, &chars[11], 2 * sizeof(uint16_t));
+        (*inout_idx)++;
+    }
+
+    make_dir_entry(&entries[*inout_idx], name11, attr, cluster, size);
+    (*inout_idx)++;
+}
+
+static GptInstallErrorInfo g_last_install_error;
+
+const GptInstallErrorInfo *gpt_fat32_get_last_error(void) {
+    return &g_last_install_error;
+}
+
+static void set_install_error(const char *stage, const char *details, uint64_t lba, uint32_t count, int code) {
+    memset(&g_last_install_error, 0, sizeof(g_last_install_error));
+    if (stage) strncpy(g_last_install_error.stage, stage, sizeof(g_last_install_error.stage) - 1);
+    if (details) strncpy(g_last_install_error.details, details, sizeof(g_last_install_error.details) - 1);
+    g_last_install_error.failed_lba = lba;
+    g_last_install_error.sector_count = count;
+    g_last_install_error.error_code = code;
+}
+
+void flash_format_error_screen(char *buf, size_t buf_sz, const StorageDevice *dev) {
+    if (!buf || buf_sz == 0) return;
+    const GptInstallErrorInfo *err = &g_last_install_error;
+
+    const char *dev_name = (dev && dev->name[0]) ? dev->name : "Unknown Device";
+    const char *dev_type = (dev && dev->type_str[0]) ? dev->type_str : "Block Device";
+    const char *dev_size = (dev && dev->size_str[0]) ? dev->size_str : "Unknown Size";
+    const char *dev_path = (dev && dev->devpath[0]) ? dev->devpath : "Unknown Path";
+    const char *bus_speed = (dev && dev->bus_speed[0]) ? dev->bus_speed : "Standard";
+
+    const char *stage = (err->stage[0]) ? err->stage : "Storage Subsystem Initialization";
+    const char *details = (err->details[0]) ? err->details : "Device I/O write rejected or timed out";
+
+    snprintf(buf, buf_sz,
+        "flash: fatal error: installation failed due to disk write error!\n"
+        "INFO: Hardware disk write error (%s)\n"
+        "      Stage:         %s\n"
+        "      Target Sector: LBA %llu (Count: %u sector%s)\n"
+        "      Target Device: %s (%s, %s, %s)\n"
+        "      Device Path:   %s\n",
+        details,
+        stage,
+        (unsigned long long)err->failed_lba, err->sector_count, (err->sector_count == 1) ? "" : "s",
+        dev_name, dev_type, dev_size, bus_speed,
+        dev_path
+    );
+}
+
 int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progress_cb) {
-    if (!dev || !dev->write_sectors || dev->total_sectors < 4096) return -1;
+    memset(&g_last_install_error, 0, sizeof(g_last_install_error));
+    if (!dev || !dev->write_sectors || dev->total_sectors < 4096) {
+        set_install_error("Validating Storage Geometry", "Drive capacity under 2 MB or invalid sector size", 0, 0, -1);
+        return -1;
+    }
 
     uint8_t sector_buf[512];
 
@@ -133,7 +244,10 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     sector_buf[510] = 0x55;
     sector_buf[511] = 0xAA;
 
-    if (dev->write_sectors(dev, 0, 1, sector_buf) != 0) return -1;
+    if (dev->write_sectors(dev, 0, 1, sector_buf) != 0) {
+        set_install_error("Writing Protective MBR (LBA 0)", "Device I/O write rejected or timed out", 0, 1, -1);
+        return -1;
+    }
 
     /* 3. Compute Dynamic Partition Geometry */
     uint64_t start_lba = 2048; /* Standard 1 MB alignment offset */
@@ -152,7 +266,10 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     /* 4. Generate GPT Partition Array (128 entries = 32 sectors) */
     if (progress_cb) progress_cb("creating dynamic EFI System Partition (ESP)...", 1);
     uint8_t *entries_buf = (uint8_t *)kmalloc(128 * sizeof(GptEntry));
-    if (!entries_buf) return -1;
+    if (!entries_buf) {
+        set_install_error("Allocating ESP Partition Table", "Out of kernel memory", 2, 32, -1);
+        return -1;
+    }
     memset(entries_buf, 0, 128 * sizeof(GptEntry));
 
     GptEntry *esp_entry = (GptEntry *)&entries_buf[0];
@@ -171,14 +288,20 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     uint32_t entries_crc = calculate_crc32(entries_buf, 128 * sizeof(GptEntry));
 
     /* Write Primary Partition Array (LBA 2–33) */
-    for (int i = 0; i < 32; i++) {
-        dev->write_sectors(dev, 2 + i, 1, &entries_buf[i * 512]);
+    if (dev->write_sectors(dev, 2, 32, entries_buf) != 0) {
+        klog_warn("Failed to write Primary GPT partition array");
+        set_install_error("Writing Primary GPT Partition Array (LBA 2-33)", "Device I/O write rejected or timed out", 2, 32, -1);
+        kfree(entries_buf);
+        return -1;
     }
 
     /* Write Secondary (Backup) Partition Array (LBA dev->total_sectors - 33 to -2) */
     uint64_t backup_entries_lba = dev->total_sectors - 33;
-    for (int i = 0; i < 32; i++) {
-        dev->write_sectors(dev, backup_entries_lba + i, 1, &entries_buf[i * 512]);
+    if (dev->write_sectors(dev, backup_entries_lba, 32, entries_buf) != 0) {
+        klog_warn("Failed to write Backup GPT partition array");
+        set_install_error("Writing Secondary (Backup) GPT Partition Array", "Device I/O write rejected or timed out", backup_entries_lba, 32, -1);
+        kfree(entries_buf);
+        return -1;
     }
     kfree(entries_buf);
 
@@ -207,7 +330,11 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     gpt_hdr->header_crc32 = 0;
     gpt_hdr->header_crc32 = calculate_crc32(gpt_hdr, 92);
 
-    dev->write_sectors(dev, 1, 1, sector_buf);
+    if (dev->write_sectors(dev, 1, 1, sector_buf) != 0) {
+        klog_warn("Failed to write Primary GPT header");
+        set_install_error("Writing Primary GPT Header (LBA 1)", "Device I/O write rejected or timed out", 1, 1, -1);
+        return -1;
+    }
 
     /* Secondary (Backup) GPT Header (LBA dev->total_sectors - 1) */
     gpt_hdr->my_lba = dev->total_sectors - 1;
@@ -216,7 +343,11 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     gpt_hdr->header_crc32 = 0;
     gpt_hdr->header_crc32 = calculate_crc32(gpt_hdr, 92);
 
-    dev->write_sectors(dev, dev->total_sectors - 1, 1, sector_buf);
+    if (dev->write_sectors(dev, dev->total_sectors - 1, 1, sector_buf) != 0) {
+        klog_warn("Failed to write Backup GPT header");
+        set_install_error("Writing Secondary (Backup) GPT Header", "Device I/O write rejected or timed out", dev->total_sectors - 1, 1, -1);
+        return -1;
+    }
 
     /* 6. Dynamic FAT32 Calculations */
     if (progress_cb) progress_cb("calculating dynamic FAT32 cluster geometry & parameters...", 1);
@@ -252,7 +383,7 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
         { "\\protected\\krnl\\vpkernel bare-metal payload", NULL, 0, 0, 0 },
         { "\\protected\\krnl\\autoinit.exe userland init process", NULL, 0, 0, 0 },
         { "\\protected\\crit\\xshss.exe shell subsystem", NULL, 0, 0, 0 },
-        { "\\protected\\gui\\superglue.exe display compositor", NULL, 0, 0, 0 },
+        { "\\protected\\gui\\gman.exe graphical manager", NULL, 0, 0, 0 },
         { "\\protected\\gui\\ntfs.exe display server", NULL, 0, 0, 0 },
         { "\\protected\\gui\\lack.exe login/auth session", NULL, 0, 0, 0 },
         { "\\protected\\gui\\ninds.exe window manager", NULL, 0, 0, 0 },
@@ -263,7 +394,9 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
         { "\\protected\\apps\\calc.exe calculator app", NULL, 0, 0, 0 },
         { "\\protected\\apps\\notepad.exe notepad app", NULL, 0, 0, 0 },
         { "\\protected\\apps\\paint.exe paint app", NULL, 0, 0, 0 },
-        { "\\protected\\apps\\clock.exe clock app", NULL, 0, 0, 0 }
+        { "\\protected\\apps\\clock.exe clock app", NULL, 0, 0, 0 },
+        { "\\protected\\apps\\view.exe image viewer app", NULL, 0, 0, 0 },
+        { "\\protected\\apps\\filemgr.exe file manager app", NULL, 0, 0, 0 }
     };
     int num_payloads = sizeof(payloads) / sizeof(payloads[0]);
 
@@ -271,7 +404,7 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     payloads[1].data = payload_get_kernel(&payloads[1].size);
     payloads[2].data = payload_get_autoinit(&payloads[2].size);
     payloads[3].data = payload_get_xshss(&payloads[3].size);
-    payloads[4].data = payload_get_superglue(&payloads[4].size);
+    payloads[4].data = payload_get_gman(&payloads[4].size);
     payloads[5].data = payload_get_ntfs(&payloads[5].size);
     payloads[6].data = payload_get_lack(&payloads[6].size);
     payloads[7].data = payload_get_ninds(&payloads[7].size);
@@ -283,6 +416,8 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     payloads[13].data = payload_get_notepad(&payloads[13].size);
     payloads[14].data = payload_get_paint(&payloads[14].size);
     payloads[15].data = payload_get_clock(&payloads[15].size);
+    payloads[16].data = payload_get_view(&payloads[16].size);
+    payloads[17].data = payload_get_filemgr(&payloads[17].size);
 
     uint32_t cluster_size_bytes = spc * 512;
     uint32_t next_cluster = 20; /* Clusters 2..19 reserved for directories and static config files */
@@ -331,7 +466,16 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     sector_buf[510] = 0x55;
     sector_buf[511] = 0xAA;
 
-    dev->write_sectors(dev, fat32_start_lba, 1, sector_buf);
+    if (dev->write_sectors(dev, fat32_start_lba, 1, sector_buf) != 0) {
+        klog_warn("Failed to write FAT32 VBR");
+        set_install_error("Writing FAT32 VBR (Volume Boot Record)", "Device I/O write rejected or timed out", fat32_start_lba, 1, -1);
+        return -1;
+    }
+    if (dev->write_sectors(dev, fat32_start_lba + 6, 1, sector_buf) != 0) { /* Backup Boot Sector */
+        klog_warn("Failed to write backup FAT32 VBR");
+        set_install_error("Writing Backup FAT32 VBR", "Device I/O write rejected or timed out", fat32_start_lba + 6, 1, -1);
+        return -1;
+    }
 
     /* 8. Write Dynamic FSInfo Sector */
     memset(sector_buf, 0, 512);
@@ -340,7 +484,16 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     *(uint32_t *)&sector_buf[488] = free_clusters;
     *(uint32_t *)&sector_buf[492] = next_free_cluster;
     *(uint32_t *)&sector_buf[508] = 0xAA550000;
-    dev->write_sectors(dev, fat32_start_lba + 1, 1, sector_buf);
+    if (dev->write_sectors(dev, fat32_start_lba + 1, 1, sector_buf) != 0) {
+        klog_warn("Failed to write FAT32 FSInfo sector");
+        set_install_error("Writing FAT32 FSInfo Sector", "Device I/O write rejected or timed out", fat32_start_lba + 1, 1, -1);
+        return -1;
+    }
+    if (dev->write_sectors(dev, fat32_start_lba + 7, 1, sector_buf) != 0) { /* Backup FSInfo */
+        klog_warn("Failed to write backup FAT32 FSInfo sector");
+        set_install_error("Writing Backup FAT32 FSInfo Sector", "Device I/O write rejected or timed out", fat32_start_lba + 7, 1, -1);
+        return -1;
+    }
 
     /* 9. Stream Write FAT1 & FAT2 Tables (4KB chunks) */
     if (progress_cb) progress_cb("writing dynamic FAT allocation tables (FAT1 & FAT2)...", 1);
@@ -381,12 +534,24 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
 
         uint32_t chunk_sectors = sizeof(fat_chunk) / 512;
         uint32_t cur_sector_offset = written_fat_bytes / 512;
+        uint32_t secs_to_write = chunk_sectors;
+        if (cur_sector_offset + secs_to_write > fat_size_sectors) {
+            secs_to_write = fat_size_sectors - cur_sector_offset;
+        }
 
-        for (uint32_t s = 0; s < chunk_sectors && (cur_sector_offset + s) < fat_size_sectors; s++) {
+        if (secs_to_write > 0) {
             /* Write to FAT1 */
-            dev->write_sectors(dev, fat32_start_lba + reserved_sectors + cur_sector_offset + s, 1, fat_chunk + s * 512);
+            if (dev->write_sectors(dev, fat32_start_lba + reserved_sectors + cur_sector_offset, secs_to_write, fat_chunk) != 0) {
+                klog_warn("Failed to write FAT1 chunk at offset %u", cur_sector_offset);
+                set_install_error("Writing Primary Allocation Table (FAT1)", "Device I/O write rejected or timed out", fat32_start_lba + reserved_sectors + cur_sector_offset, secs_to_write, -1);
+                return -1;
+            }
             /* Write to FAT2 */
-            dev->write_sectors(dev, fat32_start_lba + reserved_sectors + fat_size_sectors + cur_sector_offset + s, 1, fat_chunk + s * 512);
+            if (dev->write_sectors(dev, fat32_start_lba + reserved_sectors + fat_size_sectors + cur_sector_offset, secs_to_write, fat_chunk) != 0) {
+                klog_warn("Failed to write FAT2 chunk at offset %u", cur_sector_offset);
+                set_install_error("Writing Backup Allocation Table (FAT2)", "Device I/O write rejected or timed out", fat32_start_lba + reserved_sectors + fat_size_sectors + cur_sector_offset, secs_to_write, -1);
+                return -1;
+            }
         }
 
         current_cluster += entries_in_chunk;
@@ -396,25 +561,38 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     uint64_t data_lba_base = fat32_start_lba + reserved_sectors + (uint64_t)num_fats * fat_size_sectors;
 
     #define WRITE_CLUSTER(c, buf) \
-        for (int _s = 0; _s < spc; _s++) { \
-            dev->write_sectors(dev, data_lba_base + ((uint64_t)(c) - 2) * spc + _s, 1, ((const uint8_t *)(buf)) + _s * 512); \
-        }
+        do { \
+            uint64_t _clba = data_lba_base + ((uint64_t)(c) - 2) * spc; \
+            int _rc = dev->write_sectors(dev, _clba, spc, (buf)); \
+            if (_rc != 0) { \
+                klog_warn("WRITE_CLUSTER failed: cluster=%u lba=%llu", (uint32_t)(c), (unsigned long long)_clba); \
+                char _cstage[96]; \
+                snprintf(_cstage, sizeof(_cstage), "Writing Filesystem Metadata (Cluster %u)", (uint32_t)(c)); \
+                set_install_error(_cstage, "Device I/O write rejected or timed out", _clba, spc, _rc); \
+                kfree(cluster_buf); \
+                return -1; \
+            } \
+        } while (0)
 
     uint8_t *cluster_buf = (uint8_t *)kmalloc(cluster_size_bytes);
-    if (!cluster_buf) return -1;
+    if (!cluster_buf) {
+        set_install_error("Allocating Cluster Buffer", "Out of kernel memory", 0, 0, -1);
+        return -1;
+    }
 
     /* 10. Deploying System Directories & Configuration Files */
     if (progress_cb) progress_cb("creating filesystem directories and boot configuration...", 1);
 
-    /* Cluster 2: Root Directory contains "\EFI", "STARTUP.NSH", "\PROTECT", "\HOME", "\TMP", "\SERVICES" */
+    /* Cluster 2: Root Directory contains "\EFI", "startup.nsh", "\protected", "\home", "\tmp", "\services" */
     memset(cluster_buf, 0, cluster_size_bytes);
     FatDirEntry *entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], "EFI        ", 0x10, 3, 0);
-    make_dir_entry(&entries[1], "STARTUP NSH", 0x20, 6, 24);
-    make_dir_entry(&entries[2], "PROTECT    ", 0x10, 7, 0);
-    make_dir_entry(&entries[3], "HOME       ", 0x10, 16, 0);
-    make_dir_entry(&entries[4], "TMP        ", 0x10, 17, 0);
-    make_dir_entry(&entries[5], "SERVICES   ", 0x10, 18, 0);
+    int idx = 0;
+    make_lfn_entry(entries, &idx, "EFI",         "EFI        ", 0x10, 3, 0);
+    make_lfn_entry(entries, &idx, "startup.nsh", "STARTUP NSH", 0x20, 6, 24);
+    make_lfn_entry(entries, &idx, "protected",   "PROTEC~1   ", 0x10, 7, 0);
+    make_lfn_entry(entries, &idx, "home",        "HOME       ", 0x10, 16, 0);
+    make_lfn_entry(entries, &idx, "tmp",         "TMP        ", 0x10, 17, 0);
+    make_lfn_entry(entries, &idx, "services",    "SERVICES   ", 0x10, 18, 0);
     WRITE_CLUSTER(2, cluster_buf);
 
     /* Cluster 6: \startup.nsh file */
@@ -422,21 +600,23 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     strcpy((char *)cluster_buf, "\\EFI\\BOOT\\BOOTX64.EFI\r\n");
     WRITE_CLUSTER(6, cluster_buf);
 
-    /* Cluster 3: \EFI Directory contains "BOOT" and "PSEUDOS" */
+    /* Cluster 3: \EFI Directory contains "BOOT" and "pseuDOS" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 3, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 0, 0);
-    make_dir_entry(&entries[2], "BOOT       ", 0x10, 4, 0);
-    make_dir_entry(&entries[3], "PSEUDOS    ", 0x10, 5, 0);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",       ".          ", 0x10, 3, 0);
+    make_lfn_entry(entries, &idx, "..",      "..         ", 0x10, 0, 0);
+    make_lfn_entry(entries, &idx, "BOOT",    "BOOT       ", 0x10, 4, 0);
+    make_lfn_entry(entries, &idx, "pseuDOS", "PSEUDOS    ", 0x10, 5, 0);
     WRITE_CLUSTER(3, cluster_buf);
 
     /* Cluster 4: \EFI\BOOT contains "BOOTX64.EFI" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 4, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 3, 0);
-    make_dir_entry(&entries[2], "BOOTX64 EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",           ".          ", 0x10, 4, 0);
+    make_lfn_entry(entries, &idx, "..",          "..         ", 0x10, 3, 0);
+    make_lfn_entry(entries, &idx, "BOOTX64.EFI", "BOOTX64 EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
     WRITE_CLUSTER(4, cluster_buf);
 
     /* Cluster 12: \EFI\pseuDOS\grub.cfg file */
@@ -457,53 +637,57 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     const char *osrelease_content =
         "NAME=\"pseuDOS\"\r\n"
         "ID=pseudos\r\n"
-        "VERSION=\"0.6.0\"\r\n"
-        "PRETTY_NAME=\"pseuDOS v0.6.0 (x86_64 UEFI)\"\r\n"
+        "VERSION=\"0.7.1\"\r\n"
+        "PRETTY_NAME=\"pseuDOS v0.7.1 (x86_64 UEFI)\"\r\n"
         "HOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\r\n";
     uint32_t osrelease_len = (uint32_t)strlen(osrelease_content);
     memset(cluster_buf, 0, cluster_size_bytes);
     memcpy(cluster_buf, osrelease_content, osrelease_len);
     WRITE_CLUSTER(13, cluster_buf);
 
-    /* Cluster 5: \EFI\pseuDOS contains BOOTX64.EFI, PSEUDOS.EFI, fallback VPKERNEL, GRUB.CFG, OS-RELEA */
+    /* Cluster 5: \EFI\pseuDOS contains BOOTX64.EFI, pseudos.efi, fallback vpkernel, grub.cfg, os-release */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 5, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 3, 0);
-    make_dir_entry(&entries[2], "BOOTX64 EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
-    make_dir_entry(&entries[3], "PSEUDOS EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
-    make_dir_entry(&entries[4], "VPKERNEL   ", 0x20, payloads[1].start_cluster, (uint32_t)payloads[1].size);
-    make_dir_entry(&entries[5], "GRUB    CFG", 0x20, 12, grub_len);
-    make_dir_entry(&entries[6], "OS-RELEA   ", 0x20, 13, osrelease_len);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",           ".          ", 0x10, 5, 0);
+    make_lfn_entry(entries, &idx, "..",          "..         ", 0x10, 3, 0);
+    make_lfn_entry(entries, &idx, "BOOTX64.EFI", "BOOTX64 EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
+    make_lfn_entry(entries, &idx, "pseudos.efi", "PSEUDOS EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
+    make_lfn_entry(entries, &idx, "vpkernel",    "VPKERNEL   ", 0x20, payloads[1].start_cluster, (uint32_t)payloads[1].size);
+    make_lfn_entry(entries, &idx, "grub.cfg",    "GRUB    CFG", 0x20, 12, grub_len);
+    make_lfn_entry(entries, &idx, "os-release",  "OS-REL~1   ", 0x20, 13, osrelease_len);
     WRITE_CLUSTER(5, cluster_buf);
 
-    /* Cluster 7: \protected Directory contains "KRNL", "BOOTMGR", "CRIT", "GUI", "APPS" */
+    /* Cluster 7: \protected Directory contains "krnl", "bootmgr", "crit", "gui", "apps" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 7, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 0, 0);
-    make_dir_entry(&entries[2], "KRNL       ", 0x10, 8, 0);
-    make_dir_entry(&entries[3], "BOOTMGR    ", 0x10, 9, 0);
-    make_dir_entry(&entries[4], "CRIT       ", 0x10, 11, 0);
-    make_dir_entry(&entries[5], "GUI        ", 0x10, 14, 0);
-    make_dir_entry(&entries[6], "APPS       ", 0x10, 15, 0);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",       ".          ", 0x10, 7, 0);
+    make_lfn_entry(entries, &idx, "..",      "..         ", 0x10, 0, 0);
+    make_lfn_entry(entries, &idx, "krnl",    "KRNL       ", 0x10, 8, 0);
+    make_lfn_entry(entries, &idx, "bootmgr", "BOOTMGR    ", 0x10, 9, 0);
+    make_lfn_entry(entries, &idx, "crit",    "CRIT       ", 0x10, 11, 0);
+    make_lfn_entry(entries, &idx, "gui",     "GUI        ", 0x10, 14, 0);
+    make_lfn_entry(entries, &idx, "apps",    "APPS       ", 0x10, 15, 0);
     WRITE_CLUSTER(7, cluster_buf);
 
-    /* Cluster 8: \protected\krnl contains "VPKERNEL" and "AUTOINIT.EXE" */
+    /* Cluster 8: \protected\krnl contains "vpkernel" and "autoinit.exe" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 8, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
-    make_dir_entry(&entries[2], "VPKERNEL   ", 0x20, payloads[1].start_cluster, (uint32_t)payloads[1].size);
-    make_dir_entry(&entries[3], "AUTOINITEXE", 0x20, payloads[2].start_cluster, (uint32_t)payloads[2].size);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",            ".          ", 0x10, 8, 0);
+    make_lfn_entry(entries, &idx, "..",           "..         ", 0x10, 7, 0);
+    make_lfn_entry(entries, &idx, "vpkernel",     "VPKERNEL   ", 0x20, payloads[1].start_cluster, (uint32_t)payloads[1].size);
+    make_lfn_entry(entries, &idx, "autoinit.exe", "AUTOINITEXE", 0x20, payloads[2].start_cluster, (uint32_t)payloads[2].size);
     WRITE_CLUSTER(8, cluster_buf);
 
-    /* Cluster 11: \protected\crit contains "XSHSS.EXE" */
+    /* Cluster 11: \protected\crit contains "xshss.exe" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 11, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
-    make_dir_entry(&entries[2], "XSHSS   EXE", 0x20, payloads[3].start_cluster, (uint32_t)payloads[3].size);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",         ".          ", 0x10, 11, 0);
+    make_lfn_entry(entries, &idx, "..",        "..         ", 0x10, 7, 0);
+    make_lfn_entry(entries, &idx, "xshss.exe", "XSHSS   EXE", 0x20, payloads[3].start_cluster, (uint32_t)payloads[3].size);
     WRITE_CLUSTER(11, cluster_buf);
 
     /* Cluster 10: \protected\bootmgr\boot.cfg file content */
@@ -511,7 +695,7 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
         "# pseuDOS Boot Configuration\r\n"
         "kernel=\\protected\\krnl\\vpkernel\r\n"
         "autoinit=\\protected\\krnl\\autoinit.exe\r\n"
-        "shell=\\protected\\gui\\superglue.exe\r\n"
+        "shell=\\protected\\gui\\gman.exe\r\n"
         "cmdline=quiet devpath=hardware\r\n"
         "default_resolution=1280x720\r\n"
         "bootmgr_version=1.1.0\r\n";
@@ -521,87 +705,127 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     memcpy(cluster_buf, cfg_content, cfg_len);
     WRITE_CLUSTER(10, cluster_buf);
 
-    /* Cluster 9: \protected\bootmgr contains "BOOT.CFG" */
+    /* Cluster 9: \protected\bootmgr contains "boot.cfg" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 9, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
-    make_dir_entry(&entries[2], "BOOT    CFG", 0x20, 10, cfg_len);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",        ".          ", 0x10, 9, 0);
+    make_lfn_entry(entries, &idx, "..",       "..         ", 0x10, 7, 0);
+    make_lfn_entry(entries, &idx, "boot.cfg", "BOOT    CFG", 0x20, 10, cfg_len);
     WRITE_CLUSTER(9, cluster_buf);
 
-    /* Cluster 14: \protected\gui contains superglue, ntfs, lack, ninds, splash, gshss */
+    /* Cluster 14: \protected\gui contains gman, superglue, ntfs, lack, ninds, splash, gshss */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 14, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
-    make_dir_entry(&entries[2], "SUPERGLUEXE", 0x20, payloads[4].start_cluster, (uint32_t)payloads[4].size);
-    make_dir_entry(&entries[3], "NTFS    EXE", 0x20, payloads[5].start_cluster, (uint32_t)payloads[5].size);
-    make_dir_entry(&entries[4], "LACK    EXE", 0x20, payloads[6].start_cluster, (uint32_t)payloads[6].size);
-    make_dir_entry(&entries[5], "NINDS   EXE", 0x20, payloads[7].start_cluster, (uint32_t)payloads[7].size);
-    make_dir_entry(&entries[6], "SPLASH  EXE", 0x20, payloads[8].start_cluster, (uint32_t)payloads[8].size);
-    make_dir_entry(&entries[7], "GSHSS   EXE", 0x20, payloads[9].start_cluster, (uint32_t)payloads[9].size);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",             ".          ", 0x10, 14, 0);
+    make_lfn_entry(entries, &idx, "..",            "..         ", 0x10, 7, 0);
+    make_lfn_entry(entries, &idx, "gman.exe",      "GMAN    EXE", 0x20, payloads[4].start_cluster, (uint32_t)payloads[4].size);
+    make_lfn_entry(entries, &idx, "superglue.exe", "SUPERGLUEXE", 0x20, payloads[4].start_cluster, (uint32_t)payloads[4].size);
+    make_lfn_entry(entries, &idx, "ntfs.exe",      "NTFS    EXE", 0x20, payloads[5].start_cluster, (uint32_t)payloads[5].size);
+    make_lfn_entry(entries, &idx, "lack.exe",      "LACK    EXE", 0x20, payloads[6].start_cluster, (uint32_t)payloads[6].size);
+    make_lfn_entry(entries, &idx, "ninds.exe",     "NINDS   EXE", 0x20, payloads[7].start_cluster, (uint32_t)payloads[7].size);
+    make_lfn_entry(entries, &idx, "splash.exe",    "SPLASH  EXE", 0x20, payloads[8].start_cluster, (uint32_t)payloads[8].size);
+    make_lfn_entry(entries, &idx, "gshss.exe",     "GSHSS   EXE", 0x20, payloads[9].start_cluster, (uint32_t)payloads[9].size);
     WRITE_CLUSTER(14, cluster_buf);
 
-    /* Cluster 15: \protected\apps contains shell, sysmon, calc, notepad, paint, clock */
+    /* Cluster 15: \protected\apps contains shell, sysmon, calc, notepad, paint, clock, view, filemgr */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 15, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 7, 0);
-    make_dir_entry(&entries[2], "SHELL   EXE", 0x20, payloads[10].start_cluster, (uint32_t)payloads[10].size);
-    make_dir_entry(&entries[3], "SYSMON  EXE", 0x20, payloads[11].start_cluster, (uint32_t)payloads[11].size);
-    make_dir_entry(&entries[4], "CALC    EXE", 0x20, payloads[12].start_cluster, (uint32_t)payloads[12].size);
-    make_dir_entry(&entries[5], "NOTEPAD EXE", 0x20, payloads[13].start_cluster, (uint32_t)payloads[13].size);
-    make_dir_entry(&entries[6], "PAINT   EXE", 0x20, payloads[14].start_cluster, (uint32_t)payloads[14].size);
-    make_dir_entry(&entries[7], "CLOCK   EXE", 0x20, payloads[15].start_cluster, (uint32_t)payloads[15].size);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",           ".          ", 0x10, 15, 0);
+    make_lfn_entry(entries, &idx, "..",          "..         ", 0x10, 7, 0);
+    make_lfn_entry(entries, &idx, "shell.exe",   "SHELL   EXE", 0x20, payloads[10].start_cluster, (uint32_t)payloads[10].size);
+    make_lfn_entry(entries, &idx, "sysmon.exe",  "SYSMON  EXE", 0x20, payloads[11].start_cluster, (uint32_t)payloads[11].size);
+    make_lfn_entry(entries, &idx, "calc.exe",    "CALC    EXE", 0x20, payloads[12].start_cluster, (uint32_t)payloads[12].size);
+    make_lfn_entry(entries, &idx, "notepad.exe", "NOTEPAD EXE", 0x20, payloads[13].start_cluster, (uint32_t)payloads[13].size);
+    make_lfn_entry(entries, &idx, "paint.exe",   "PAINT   EXE", 0x20, payloads[14].start_cluster, (uint32_t)payloads[14].size);
+    make_lfn_entry(entries, &idx, "clock.exe",   "CLOCK   EXE", 0x20, payloads[15].start_cluster, (uint32_t)payloads[15].size);
+    make_lfn_entry(entries, &idx, "view.exe",    "VIEW    EXE", 0x20, payloads[16].start_cluster, (uint32_t)payloads[16].size);
+    make_lfn_entry(entries, &idx, "filemgr.exe", "FILEMGR EXE", 0x20, payloads[17].start_cluster, (uint32_t)payloads[17].size);
     WRITE_CLUSTER(15, cluster_buf);
 
-    /* Cluster 16: \HOME contains "USER" */
+    /* Cluster 16: \home contains "user" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 16, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 0, 0);
-    make_dir_entry(&entries[2], "USER       ", 0x10, 19, 0);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",    ".          ", 0x10, 16, 0);
+    make_lfn_entry(entries, &idx, "..",   "..         ", 0x10, 0, 0);
+    make_lfn_entry(entries, &idx, "user", "USER       ", 0x10, 19, 0);
     WRITE_CLUSTER(16, cluster_buf);
 
-    /* Cluster 17: \TMP (empty directory) */
+    /* Cluster 17: \tmp (empty directory) */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 17, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 0, 0);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",  ".          ", 0x10, 17, 0);
+    make_lfn_entry(entries, &idx, "..", "..         ", 0x10, 0, 0);
     WRITE_CLUSTER(17, cluster_buf);
 
-    /* Cluster 18: \SERVICES (empty directory) */
+    /* Cluster 18: \services (empty directory) */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 18, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 0, 0);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",  ".          ", 0x10, 18, 0);
+    make_lfn_entry(entries, &idx, "..", "..         ", 0x10, 0, 0);
     WRITE_CLUSTER(18, cluster_buf);
 
-    /* Cluster 19: \HOME\USER (empty directory) */
+    /* Cluster 19: \home\user (empty directory) */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
-    make_dir_entry(&entries[0], ".          ", 0x10, 19, 0);
-    make_dir_entry(&entries[1], "..         ", 0x10, 16, 0);
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",  ".          ", 0x10, 19, 0);
+    make_lfn_entry(entries, &idx, "..", "..         ", 0x10, 16, 0);
     WRITE_CLUSTER(19, cluster_buf);
 
     /* 11. Deploying all Payloads (Boot manager, Kernel, Init, Shell, GUI stack, Apps) */
+    #define BULK_CHUNK_SECTORS 128
+    uint8_t *bulk_buf = (uint8_t *)kmalloc(BULK_CHUNK_SECTORS * 512);
+    if (!bulk_buf) {
+        set_install_error("Allocating Payload Buffer", "Out of kernel memory", 0, 0, -1);
+        kfree(cluster_buf);
+        return -1;
+    }
+
     for (int p = 0; p < num_payloads; p++) {
         char msg[128];
         snprintf(msg, sizeof(msg), "copying %s...", payloads[p].desc);
         if (progress_cb) progress_cb(msg, 1);
 
-        for (uint32_t i = 0; i < payloads[p].clusters; i++) {
-            memset(cluster_buf, 0, cluster_size_bytes);
-            size_t offset = (size_t)i * cluster_size_bytes;
-            size_t to_copy = (payloads[p].size > offset) ? (payloads[p].size - offset) : 0;
-            if (to_copy > cluster_size_bytes) to_copy = cluster_size_bytes;
-            if (to_copy > 0 && payloads[p].data) {
-                memcpy(cluster_buf, payloads[p].data + offset, to_copy);
+        uint32_t total_sectors = payloads[p].clusters * spc;
+        uint64_t cur_payload_lba = data_lba_base + ((uint64_t)payloads[p].start_cluster - 2) * spc;
+        size_t bytes_written = 0;
+
+        while (total_sectors > 0) {
+            uint32_t cur_chunk = total_sectors > BULK_CHUNK_SECTORS ? BULK_CHUNK_SECTORS : total_sectors;
+            uint32_t chunk_bytes = cur_chunk * 512;
+            memset(bulk_buf, 0, chunk_bytes);
+
+            if (payloads[p].data && bytes_written < payloads[p].size) {
+                size_t avail = payloads[p].size - bytes_written;
+                size_t to_copy = avail < chunk_bytes ? avail : chunk_bytes;
+                memcpy(bulk_buf, payloads[p].data + bytes_written, to_copy);
+                bytes_written += to_copy;
             }
-            WRITE_CLUSTER(payloads[p].start_cluster + i, cluster_buf);
+
+            int rc = dev->write_sectors(dev, cur_payload_lba, cur_chunk, bulk_buf);
+            if (rc != 0) {
+                klog_warn("Bulk write failed: payload=%s lba=%llu count=%u",
+                          payloads[p].desc, (unsigned long long)cur_payload_lba, cur_chunk);
+                char pstage[96];
+                snprintf(pstage, sizeof(pstage), "Streaming Payload: %s", payloads[p].desc);
+                set_install_error(pstage, "Device I/O write rejected or timed out", cur_payload_lba, cur_chunk, rc);
+                kfree(bulk_buf);
+                kfree(cluster_buf);
+                return -1;
+            }
+
+            cur_payload_lba += cur_chunk;
+            total_sectors -= cur_chunk;
         }
     }
 
+    kfree(bulk_buf);
     kfree(cluster_buf);
 
     /* 12. Synchronizing Storage Cache */

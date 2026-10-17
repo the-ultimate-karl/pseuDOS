@@ -49,6 +49,9 @@ typedef struct {
     uint64_t kernel_raw_file_base;
     uint64_t kernel_raw_file_size;
 
+    uint64_t initramfs_base;
+    uint64_t initramfs_size;
+
     char hardware_devpath[384];
     char boot_file_path[128];
     char autoinit_path[128];

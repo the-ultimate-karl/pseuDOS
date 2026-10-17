@@ -4,6 +4,10 @@
 #include "mice.h"
 #include "lib.h"
 #include "scheduler.h"
+#include "process.h"
+#include "klog.h"
+#include "ipc.h"
+#include "shm.h"
 #include "panic.h"
 
 #define PIC1_COMMAND 0x20
@@ -165,6 +169,15 @@ void isr_dispatch(uint64_t vector, uint64_t error_code, interrupt_frame_t *frame
         return;
     }
 
+    /* 5b. Legacy / Software Syscall Gate (Vector 0x80) */
+    if (vector == 0x80) {
+        extern int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5);
+        if (regs) {
+            regs->rax = (uint64_t)syscall_dispatch(regs->rax, regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8);
+        }
+        return;
+    }
+
     /* 5. PS/2 Mouse IRQ 12 (Vector 44 = 40 + 4) */
     if (vector == 44) {
         mice_handle_irq();
@@ -215,6 +228,25 @@ void isr_dispatch(uint64_t vector, uint64_t error_code, interrupt_frame_t *frame
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
     }
 
+    /* If fault occurred in hardware Ring 3 (CPL 3) in a non-critical user process,
+       and is not the explicit 'panic pagefault' test address (0x00000080DEAD0000),
+       terminate only the offending process instead of bringing down the kernel. */
+    if (frame && (frame->cs & 3) == 3 && cr2 != 0x00000080DEAD0000ULL) {
+        process_t *curr = process_get_current();
+        if (curr && curr->pid >= 2) {
+            klog_err("[Ring 3 Protection] Terminating PID %u '%s' due to %s (vec=0x%02llX, err=0x%llX, rip=0x%016llX, cr2=0x%016llX)",
+                     curr->pid, curr->name, name,
+                     (unsigned long long)vector, (unsigned long long)error_code,
+                     (unsigned long long)frame->ip, (unsigned long long)cr2);
+            curr->state = PROCESS_STATE_KILLED;
+            curr->exit_code = -11;
+            ipc_close_process_sockets(curr->pid);
+            shm_cleanup_process(curr->pid);
+            scheduler_schedule(frame, regs);
+            return;
+        }
+    }
+
     panic_context_t pctx;
     memset(&pctx, 0, sizeof(pctx));
     pctx.vector = vector;
@@ -251,6 +283,43 @@ void isr_dispatch(uint64_t vector, uint64_t error_code, interrupt_frame_t *frame
     kernel_panic(reason, &pctx);
 }
 
+static void lapic_enable_extint(void) {
+    /* 1. Clear CR8 (Task Priority Register) so UEFI TPL does not block Vector 32/33 */
+    uint64_t zero = 0;
+    __asm__ volatile ("mov %0, %%cr8" : : "r"(zero));
+
+    /* 2. Check CPUID leaf 1 EDX bit 9 (APIC present) */
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
+    if (!(edx & (1U << 9))) return;
+
+    /* 3. Read IA32_APIC_BASE MSR (0x1B) */
+    uint32_t lo = 0, hi = 0;
+    __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x1B));
+    uint64_t apic_msr = ((uint64_t)hi << 32) | lo;
+    if (!(apic_msr & (1ULL << 11))) {
+        /* Local APIC globally disabled — 8259 PIC is already directly wired to INTR */
+        return;
+    }
+
+    if (apic_msr & (1ULL << 10)) {
+        /* x2APIC mode (MSR-based access) */
+        __asm__ volatile ("wrmsr" : : "c"(0x808), "a"(0), "d"(0));       /* TPR = 0 */
+        __asm__ volatile ("wrmsr" : : "c"(0x80F), "a"(0x1FF), "d"(0));   /* SVR: Enable APIC + Spurious Vector 255 */
+        __asm__ volatile ("wrmsr" : : "c"(0x835), "a"(0x00000700), "d"(0)); /* LVT LINT0: ExtINT (8259 PIC Virtual Wire), unmasked */
+        __asm__ volatile ("wrmsr" : : "c"(0x836), "a"(0x00000400), "d"(0)); /* LVT LINT1: NMI */
+    } else {
+        /* xAPIC mode (MMIO at apic_base, default 0xFEE00000) */
+        uintptr_t apic_base = (uintptr_t)(apic_msr & 0xFFFFFF000ULL);
+        if (apic_base != 0) {
+            *(volatile uint32_t *)(apic_base + 0x080) = 0;          /* TPR = 0 */
+            *(volatile uint32_t *)(apic_base + 0x0F0) |= 0x1FF;     /* SVR: Enable APIC + Spurious Vector 255 */
+            *(volatile uint32_t *)(apic_base + 0x350) = 0x00000700; /* LVT LINT0: ExtINT (8259 PIC Virtual Wire), unmasked */
+            *(volatile uint32_t *)(apic_base + 0x360) = 0x00000400; /* LVT LINT1: NMI */
+        }
+    }
+}
+
 void idt_init(void) {
     memset(g_idt, 0, sizeof(g_idt));
 
@@ -269,7 +338,8 @@ void idt_init(void) {
 
     __asm__ volatile ("lidt %0" : : "m"(g_idtr));
 
-    /* Remap 8259 PIC and enable interrupts */
+    /* Remap 8259 PIC, route LINT0 ExtINT through Local APIC, and enable interrupts */
     pic_remap();
+    lapic_enable_extint();
     __asm__ volatile ("sti");
 }

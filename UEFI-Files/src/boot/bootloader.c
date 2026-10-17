@@ -144,6 +144,20 @@ static void ascii_to_unicode(const char *src, CHAR16 *dst, size_t max_len) {
     dst[i] = 0;
 }
 
+static void cmdline_append(char *dst, const char *src, size_t max_len) {
+    if (!dst || !src || max_len == 0) return;
+    size_t dlen = strlen(dst);
+    if (dlen >= max_len - 1) return;
+    if (dlen > 0 && dst[dlen - 1] != ' ') {
+        dst[dlen++] = ' ';
+        dst[dlen] = '\0';
+    }
+    while (*src && dlen < max_len - 1) {
+        dst[dlen++] = *src++;
+    }
+    dst[dlen] = '\0';
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     uart_init();
 
@@ -273,16 +287,25 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_info.fb.pixels_per_scanline = gop->Mode->Info->PixelsPerScanLine;
     boot_info.fb.pixel_format = (gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor) ? FB_FORMAT_BGR : FB_FORMAT_RGB;
 
-    /* 6. Pre-allocate 128 MB Kernel Heap */
+    /* 6. Pre-allocate 128 MB Kernel Heap (prefer < 4GB for DMA safety) */
     boot_msg(SystemTable, "[bootmgfw] pre-allocating 128 MB kernel heap pages... ");
-    EFI_PHYSICAL_ADDRESS heap_buffer = 0;
+    EFI_PHYSICAL_ADDRESS heap_buffer = 0xFFFFFFFFULL;
     UINTN heap_pages = 32768; /* 128 MB */
     status = SystemTable->BootServices->AllocatePages(
-        AllocateAnyPages,
+        AllocateMaxAddress,
         EfiLoaderData,
         heap_pages,
         &heap_buffer
     );
+    if (EFI_ERROR(status) || heap_buffer == 0) {
+        heap_buffer = 0;
+        status = SystemTable->BootServices->AllocatePages(
+            AllocateAnyPages,
+            EfiLoaderData,
+            heap_pages,
+            &heap_buffer
+        );
+    }
 
     if (EFI_ERROR(status) || heap_buffer == 0) {
         boot_msg(SystemTable, "[failed]\n");
@@ -307,7 +330,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
     boot_msg(SystemTable, "[ok]\n");
 
-    /* Extract Device Path string if available */
+    /* Extract Device Path string and walk raw binary Device Path nodes */
+    int dp_has_cdrom = 0;
+    int dp_has_usb   = 0;
+    int dp_has_nvme  = 0;
+    int dp_has_sata  = 0;
     if (loaded_image->DeviceHandle) {
         EFI_DEVICE_PATH_PROTOCOL *dev_dp = NULL;
         status = SystemTable->BootServices->HandleProtocol(
@@ -316,6 +343,31 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             (VOID **)&dev_dp
         );
         if (!EFI_ERROR(status) && dev_dp) {
+            /* Walk raw binary EFI_DEVICE_PATH_PROTOCOL nodes (works even when DevicePathToText is absent in OEM BIOS) */
+            const EFI_DEVICE_PATH_PROTOCOL *node = dev_dp;
+            for (int iter = 0; iter < 64 && node; iter++) {
+                UINT16 node_len = (UINT16)node->Length[0] | ((UINT16)node->Length[1] << 8);
+                if (node->Type == EFI_DEVICE_PATH_TYPE_END || node_len < 4) {
+                    break;
+                }
+                if (node->Type == EFI_DEVICE_PATH_TYPE_MEDIA) {
+                    /* SubType 2 = MEDIA_CDROM_DP (El Torito), SubType 9 = MEDIA_RAM_DISK_DP */
+                    if (node->SubType == 2 || node->SubType == 9) {
+                        dp_has_cdrom = 1;
+                    }
+                } else if (node->Type == EFI_DEVICE_PATH_TYPE_MESSAGING) {
+                    /* SubType 5 = USB, 15 = USB Class, 16 = USB WWID */
+                    if (node->SubType == 5 || node->SubType == 15 || node->SubType == 16) {
+                        dp_has_usb = 1;
+                    } else if (node->SubType == 23) { /* NVMe Namespace */
+                        dp_has_nvme = 1;
+                    } else if (node->SubType == 18 || node->SubType == 1) { /* SATA / ATAPI */
+                        dp_has_sata = 1;
+                    }
+                }
+                node = (const EFI_DEVICE_PATH_PROTOCOL *)((const UINT8 *)node + node_len);
+            }
+
             EFI_DEVICE_PATH_TO_TEXT_PROTOCOL *dp_to_text = NULL;
             status = SystemTable->BootServices->LocateProtocol(
                 &gEfiDevicePathToTextProtocolGuid,
@@ -323,7 +375,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 (VOID **)&dp_to_text
             );
             if (!EFI_ERROR(status) && dp_to_text && dp_to_text->ConvertDevicePathToText) {
-                CHAR16 *text_u16 = dp_to_text->ConvertDevicePathToText(dev_dp, 1, 0);
+                CHAR16 *text_u16 = dp_to_text->ConvertDevicePathToText(dev_dp, FALSE, FALSE);
                 if (text_u16) {
                     unicode_to_ascii(text_u16, boot_info.hardware_devpath, sizeof(boot_info.hardware_devpath));
                 }
@@ -331,7 +383,20 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
     if (boot_info.hardware_devpath[0] == '\0') {
-        strcpy(boot_info.hardware_devpath, "Unknown / Direct Boot");
+        if (dp_has_cdrom) {
+            strcpy(boot_info.hardware_devpath, "PciRoot(0x0)/CDROM(0x1)");
+        } else if (dp_has_usb) {
+            strcpy(boot_info.hardware_devpath, "PciRoot(0x0)/USB(0x0,0x0)");
+        } else if (dp_has_nvme) {
+            strcpy(boot_info.hardware_devpath, "PciRoot(0x0)/NVMe(0x1)");
+        } else if (dp_has_sata) {
+            strcpy(boot_info.hardware_devpath, "PciRoot(0x0)/Sata(0x0,0x0,0x0)");
+        } else {
+            strcpy(boot_info.hardware_devpath, "Unknown / Direct Boot");
+        }
+    } else if (dp_has_cdrom && strstr(boot_info.hardware_devpath, "CDROM") == NULL &&
+               strstr(boot_info.hardware_devpath, "CdRom") == NULL) {
+        cmdline_append(boot_info.hardware_devpath, "/CDROM(0x1)", sizeof(boot_info.hardware_devpath));
     }
     boot_info.boot_file_path[0] = '\0';
 
@@ -358,104 +423,183 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_msg(SystemTable, "[ok]\n");
 
     /* 9. Check and Parse Boot Manager Configuration */
-    strcpy(boot_info.autoinit_path, "\\protected\\krnl\\autoinit.bin");
-    strcpy(boot_info.shell_path, "\\protected\\crit\\xshss.bin");
-    strcpy(boot_info.cmdline, "quiet devpath=hardware");
+    boot_msg(SystemTable, "[bootmgfw] checking boot configuration... ");
 
     char cfg_kernel_path[128] = "";
+    char cfg_initramfs_path[128] = "";
+    boot_info.autoinit_path[0] = '\0';
+    boot_info.shell_path[0] = '\0';
+    boot_info.cmdline[0] = '\0';
+
     const CHAR16 bootcfg_path1[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', 'e', 'd', '\\', 'b', 'o', 'o', 't', 'm', 'g', 'r', '\\', 'b', 'o', 'o', 't', '.', 'c', 'f', 'g', 0 };
-    const CHAR16 bootcfg_path2[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', '\\', 'b', 'o', 'o', 't', 'm', 'g', 'r', '\\', 'b', 'o', 'o', 't', '.', 'c', 'f', 'g', 0 };
+    const CHAR16 bootcfg_path2[] = { '\\', 'b', 'o', 'o', 't', '\\', 'b', 'o', 'o', 't', '.', 'c', 'f', 'g', 0 };
+    const CHAR16 bootcfg_path3[] = { '\\', 'b', 'o', 'o', 't', '.', 'c', 'f', 'g', 0 };
+
     EFI_FILE_PROTOCOL *cfg_file = NULL;
     status = root_dir->Open(root_dir, &cfg_file, (CHAR16 *)bootcfg_path1, EFI_FILE_MODE_READ, 0);
     if (EFI_ERROR(status) || !cfg_file) {
         status = root_dir->Open(root_dir, &cfg_file, (CHAR16 *)bootcfg_path2, EFI_FILE_MODE_READ, 0);
     }
-    if (!EFI_ERROR(status) && cfg_file) {
-        char cfg_buf[1024];
-        UINTN cfg_read_size = sizeof(cfg_buf) - 1;
-        status = cfg_file->Read(cfg_file, &cfg_read_size, cfg_buf);
-        if (!EFI_ERROR(status) && cfg_read_size > 0) {
-            cfg_buf[cfg_read_size] = '\0';
-            char *line = cfg_buf;
-            while (*line) {
-                while (*line == ' ' || *line == '\t' || *line == '\r' || *line == '\n') line++;
-                if (*line == '\0') break;
-                char *line_end = line;
-                while (*line_end && *line_end != '\r' && *line_end != '\n') line_end++;
-                char orig_end = *line_end;
-                *line_end = '\0';
+    if (EFI_ERROR(status) || !cfg_file) {
+        status = root_dir->Open(root_dir, &cfg_file, (CHAR16 *)bootcfg_path3, EFI_FILE_MODE_READ, 0);
+    }
 
-                if (*line != '#') {
-                    char *eq = strchr(line, '=');
-                    if (eq) {
-                        *eq = '\0';
-                        char *key = trim(line);
-                        char *val = trim(eq + 1);
-                        if (strcmp(key, "kernel") == 0) {
-                            strncpy(cfg_kernel_path, val, sizeof(cfg_kernel_path) - 1);
-                        } else if (strcmp(key, "autoinit") == 0) {
-                            strncpy(boot_info.autoinit_path, val, sizeof(boot_info.autoinit_path) - 1);
-                        } else if (strcmp(key, "shell") == 0) {
-                            strncpy(boot_info.shell_path, val, sizeof(boot_info.shell_path) - 1);
-                        } else if (strcmp(key, "cmdline") == 0) {
-                            strncpy(boot_info.cmdline, val, sizeof(boot_info.cmdline) - 1);
-                        }
+    if (EFI_ERROR(status) || !cfg_file) {
+        boot_msg(SystemTable, "[failed]\n");
+        error_boot(SystemTable, ERR_BOOTCFG_NOT_FOUND, "boot configuration not found (\\protected\\bootmgr\\boot.cfg required)");
+    }
+
+    char cfg_buf[2048];
+    UINTN cfg_read_size = sizeof(cfg_buf) - 1;
+    status = cfg_file->Read(cfg_file, &cfg_read_size, cfg_buf);
+    cfg_file->Close(cfg_file);
+
+    if (EFI_ERROR(status) || cfg_read_size == 0) {
+        boot_msg(SystemTable, "[failed]\n");
+        error_boot(SystemTable, ERR_BOOTCFG_NOT_FOUND, "boot.cfg is empty or unreadable");
+    }
+
+    cfg_buf[cfg_read_size] = '\0';
+    char *line = cfg_buf;
+    while (*line) {
+        while (*line == ' ' || *line == '\t' || *line == '\r' || *line == '\n') line++;
+        if (*line == '\0') break;
+        char *line_end = line;
+        while (*line_end && *line_end != '\r' && *line_end != '\n') line_end++;
+        char orig_end = *line_end;
+        *line_end = '\0';
+
+        if (*line != '#') {
+            char *eq = strchr(line, '=');
+            if (eq) {
+                *eq = '\0';
+                char *key = trim(line);
+                char *val = trim(eq + 1);
+                if (strcmp(key, "kernel") == 0) {
+                    strncpy(cfg_kernel_path, val, sizeof(cfg_kernel_path) - 1);
+                } else if (strcmp(key, "initramfs") == 0) {
+                    strncpy(cfg_initramfs_path, val, sizeof(cfg_initramfs_path) - 1);
+                } else if (strcmp(key, "autoinit") == 0) {
+                    strncpy(boot_info.autoinit_path, val, sizeof(boot_info.autoinit_path) - 1);
+                } else if (strcmp(key, "shell") == 0) {
+                    strncpy(boot_info.shell_path, val, sizeof(boot_info.shell_path) - 1);
+                } else if (strcmp(key, "cmdline") == 0) {
+                    strncpy(boot_info.cmdline, val, sizeof(boot_info.cmdline) - 1);
+                }
+            }
+        }
+
+        if (orig_end == '\0') break;
+        line = line_end + 1;
+    }
+    boot_msg(SystemTable, "[ok]\n");
+
+    /* boot.cfg MUST specify kernel= */
+    if (cfg_kernel_path[0] == '\0') {
+        error_boot(SystemTable, ERR_BOOTCFG_NOT_FOUND, "boot.cfg missing required 'kernel=' directive");
+    }
+
+    if (dp_has_cdrom && strstr(boot_info.cmdline, "boot=live") == NULL) {
+        cmdline_append(boot_info.cmdline, "boot=live", sizeof(boot_info.cmdline));
+    }
+
+    /* 9b. Parse UEFI LoadedImage LoadOptions (passed from EFI Shell or boot manager) */
+    if (loaded_image && loaded_image->ImageLoadOptions && loaded_image->ImageLoadOptionsSize > 0) {
+        char opt_buf[256];
+        size_t opt_len = 0;
+        const CHAR16 *u16 = (const CHAR16 *)loaded_image->ImageLoadOptions;
+        UINTN chars = loaded_image->ImageLoadOptionsSize / sizeof(CHAR16);
+        if (chars > 0 && u16[0] != 0 && (u16[0] & 0xFF00) == 0) {
+            while (opt_len < chars && opt_len < sizeof(opt_buf) - 1 && u16[opt_len] != 0) {
+                opt_buf[opt_len] = (char)(u16[opt_len] & 0x7F);
+                opt_len++;
+            }
+            opt_buf[opt_len] = '\0';
+        } else {
+            const char *asc = (const char *)loaded_image->ImageLoadOptions;
+            size_t bytes = (loaded_image->ImageLoadOptionsSize < sizeof(opt_buf) - 1)
+                           ? loaded_image->ImageLoadOptionsSize : (sizeof(opt_buf) - 1);
+            memcpy(opt_buf, asc, bytes);
+            opt_buf[bytes] = '\0';
+        }
+        if (opt_buf[0] != '\0') {
+            cmdline_append(boot_info.cmdline, opt_buf, sizeof(boot_info.cmdline));
+            boot_msg(SystemTable, "[bootmgfw] appended UEFI LoadOptions: ");
+            boot_msg(SystemTable, opt_buf);
+            boot_msg(SystemTable, "\n");
+        }
+    }
+
+    /* 9c. Probe QEMU fw_cfg command-line options */
+    if (in_vm) {
+        outw(0x510, 0x0000); /* FW_CFG_SIGNATURE */
+        char sig[4];
+        for (int k = 0; k < 4; k++) sig[k] = (char)inb(0x511);
+        if (memcmp(sig, "QEMU", 4) == 0) {
+            /* Try standard FW_CFG_CMDLINE_SIZE / DATA (selector 4 & 5) */
+            outw(0x510, 0x0004);
+            uint32_t sz = (uint32_t)inb(0x511) | ((uint32_t)inb(0x511) << 8) |
+                          ((uint32_t)inb(0x511) << 16) | ((uint32_t)inb(0x511) << 24);
+            if (sz > 0 && sz < 512) {
+                outw(0x510, 0x0005);
+                char fw_buf[256];
+                size_t r = sz < sizeof(fw_buf) - 1 ? sz : sizeof(fw_buf) - 1;
+                for (size_t k = 0; k < r; k++) fw_buf[k] = (char)inb(0x511);
+                fw_buf[r] = '\0';
+                if (fw_buf[0] != '\0') {
+                    cmdline_append(boot_info.cmdline, fw_buf, sizeof(boot_info.cmdline));
+                    boot_msg(SystemTable, "[bootmgfw] appended QEMU fw_cfg cmdline: ");
+                    boot_msg(SystemTable, fw_buf);
+                    boot_msg(SystemTable, "\n");
+                }
+            }
+
+            /* Also check named fw_cfg files for "opt/cmdline" */
+            outw(0x510, 0x0019); /* FW_CFG_FILE_DIR */
+            uint32_t file_count = ((uint32_t)inb(0x511) << 24) | ((uint32_t)inb(0x511) << 16) |
+                                  ((uint32_t)inb(0x511) << 8) | (uint32_t)inb(0x511);
+            if (file_count > 0 && file_count < 1024) {
+                for (uint32_t f = 0; f < file_count; f++) {
+                    uint32_t fsize = ((uint32_t)inb(0x511) << 24) | ((uint32_t)inb(0x511) << 16) |
+                                     ((uint32_t)inb(0x511) << 8) | (uint32_t)inb(0x511);
+                    uint16_t fsel = ((uint16_t)inb(0x511) << 8) | (uint16_t)inb(0x511);
+                    (void)inb(0x511); (void)inb(0x511); /* reserved */
+                    char fname[56];
+                    for (int k = 0; k < 56; k++) fname[k] = (char)inb(0x511);
+                    fname[55] = '\0';
+                    if (strcmp(fname, "opt/cmdline") == 0 && fsize > 0 && fsize < 256) {
+                        outw(0x510, fsel);
+                        char fbuf[256];
+                        for (uint32_t k = 0; k < fsize; k++) fbuf[k] = (char)inb(0x511);
+                        fbuf[fsize] = '\0';
+                        cmdline_append(boot_info.cmdline, fbuf, sizeof(boot_info.cmdline));
+                        boot_msg(SystemTable, "[bootmgfw] appended QEMU fw_cfg opt/cmdline: ");
+                        boot_msg(SystemTable, fbuf);
+                        boot_msg(SystemTable, "\n");
+                        break;
                     }
                 }
-
-                if (orig_end == '\0') break;
-                line = line_end + 1;
             }
-            boot_msg(SystemTable, "[bootmgfw] parsed boot configuration \\protected\\bootmgr\\boot.cfg [ok]\n");
         }
-        cfg_file->Close(cfg_file);
     }
 
-    /* 10. Look for Kernel Image */
+    /* 10. Load Kernel Image specified in boot.cfg */
     boot_msg(SystemTable, "[bootmgfw] looking for kernel image...\n");
-    const CHAR16 kernel_path_win1[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', 'e', 'd', '\\', 'k', 'r', 'n', 'l', '\\', 'v', 'p', 'k', 'e', 'r', 'n', 'e', 'l', 0 };
-    const CHAR16 kernel_path_win2[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', '\\', 'k', 'r', 'n', 'l', '\\', 'v', 'p', 'k', 'e', 'r', 'n', 'e', 'l', 0 };
-    const CHAR16 kernel_path_legacy[] = { '\\', 'E', 'F', 'I', '\\', 'p', 's', 'e', 'u', 'D', 'O', 'S', '\\', 'v', 'p', 'k', 'e', 'r', 'n', 'e', 'l', 0 };
-    const CHAR16 kernel_path_bin[] = { '\\', 'p', 'r', 'o', 't', 'e', 'c', 't', 'e', 'd', '\\', 'k', 'r', 'n', 'l', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'b', 'i', 'n', 0 };
+    boot_msg(SystemTable, "[bootmgfw] loading kernel from boot.cfg: ");
+    boot_msg(SystemTable, cfg_kernel_path);
+    boot_msg(SystemTable, "... ");
+
+    CHAR16 cfg_kernel_path16[128];
+    ascii_to_unicode(cfg_kernel_path, cfg_kernel_path16, sizeof(cfg_kernel_path16) / sizeof(CHAR16));
     EFI_FILE_PROTOCOL *kernel_file = NULL;
+    status = root_dir->Open(root_dir, &kernel_file, cfg_kernel_path16, EFI_FILE_MODE_READ, 0);
 
-    if (cfg_kernel_path[0] != '\0') {
-        CHAR16 cfg_kernel_path16[128];
-        ascii_to_unicode(cfg_kernel_path, cfg_kernel_path16, sizeof(cfg_kernel_path16) / sizeof(CHAR16));
-        status = root_dir->Open(root_dir, &kernel_file, cfg_kernel_path16, EFI_FILE_MODE_READ, 0);
-        if (!EFI_ERROR(status) && kernel_file) {
-            strcpy(boot_info.boot_file_path, cfg_kernel_path);
-            boot_msg(SystemTable, "[bootmgfw] found kernel from boot.cfg: ");
-            boot_msg(SystemTable, cfg_kernel_path);
-            boot_msg(SystemTable, " [ok]\n");
-        }
+    if (EFI_ERROR(status) || !kernel_file) {
+        boot_msg(SystemTable, "[failed]\n");
+        error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "kernel image specified in boot.cfg not found");
     }
-
-    if (!kernel_file) {
-        status = root_dir->Open(root_dir, &kernel_file, (CHAR16 *)kernel_path_win1, EFI_FILE_MODE_READ, 0);
-        if (EFI_ERROR(status) || !kernel_file) {
-            status = root_dir->Open(root_dir, &kernel_file, (CHAR16 *)kernel_path_win2, EFI_FILE_MODE_READ, 0);
-        }
-
-        if (!EFI_ERROR(status) && kernel_file) {
-            strcpy(boot_info.boot_file_path, "\\protected\\krnl\\vpkernel");
-            boot_msg(SystemTable, "[bootmgfw] found kernel at \\protected\\krnl\\vpkernel [ok]\n");
-        } else {
-            status = root_dir->Open(root_dir, &kernel_file, (CHAR16 *)kernel_path_legacy, EFI_FILE_MODE_READ, 0);
-            if (!EFI_ERROR(status) && kernel_file) {
-                strcpy(boot_info.boot_file_path, "\\EFI\\pseuDOS\\vpkernel");
-                boot_msg(SystemTable, "[bootmgfw] found kernel at \\EFI\\pseuDOS\\vpkernel (fallback) [ok]\n");
-            } else {
-                status = root_dir->Open(root_dir, &kernel_file, (CHAR16 *)kernel_path_bin, EFI_FILE_MODE_READ, 0);
-                if (!EFI_ERROR(status) && kernel_file) {
-                    strcpy(boot_info.boot_file_path, "\\protected\\krnl\\kernel.bin");
-                    boot_msg(SystemTable, "[bootmgfw] found kernel at \\protected\\krnl\\kernel.bin (legacy) [ok]\n");
-                } else {
-                    error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "kernel image not found (checked boot.cfg, \\protected\\krnl and \\EFI\\pseuDOS)");
-                }
-            }
-        }
-    }
+    strcpy(boot_info.boot_file_path, cfg_kernel_path);
+    boot_msg(SystemTable, "[ok]\n");
 
     /* 11. Dynamically Query Kernel File Size */
     boot_msg(SystemTable, "[bootmgfw] querying kernel image file size... ");
@@ -491,13 +635,22 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     /* 12. Read Kernel Binary into Temporary Buffer */
     boot_msg(SystemTable, "[bootmgfw] allocating memory for kernel loading... ");
-    EFI_PHYSICAL_ADDRESS temp_file_buffer = 0;
+    EFI_PHYSICAL_ADDRESS temp_file_buffer = 0xFFFFFFFFULL;
     status = SystemTable->BootServices->AllocatePages(
-        AllocateAnyPages,
+        AllocateMaxAddress,
         EfiLoaderData,
         kernel_file_pages,
         &temp_file_buffer
     );
+    if (EFI_ERROR(status) || temp_file_buffer == 0) {
+        temp_file_buffer = 0;
+        status = SystemTable->BootServices->AllocatePages(
+            AllocateAnyPages,
+            EfiLoaderData,
+            kernel_file_pages,
+            &temp_file_buffer
+        );
+    }
 
     if (EFI_ERROR(status) || temp_file_buffer == 0) {
         boot_msg(SystemTable, "[failed]\n");
@@ -507,6 +660,42 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     UINTN read_size = actual_file_size;
     status = kernel_file->Read(kernel_file, &read_size, (VOID *)(uintptr_t)temp_file_buffer);
     kernel_file->Close(kernel_file);
+
+    /* 12b. Attempt to load initramfs from boot.cfg if specified */
+    if (cfg_initramfs_path[0] != '\0') {
+        boot_msg(SystemTable, "[bootmgfw] loading initramfs from boot.cfg: ");
+        boot_msg(SystemTable, cfg_initramfs_path);
+        boot_msg(SystemTable, "... ");
+        CHAR16 cfg_initramfs_path16[128];
+        ascii_to_unicode(cfg_initramfs_path, cfg_initramfs_path16, sizeof(cfg_initramfs_path16) / sizeof(CHAR16));
+        EFI_FILE_PROTOCOL *ramfs_file = NULL;
+        status = root_dir->Open(root_dir, &ramfs_file, cfg_initramfs_path16, EFI_FILE_MODE_READ, 0);
+        if (!EFI_ERROR(status) && ramfs_file) {
+            boot_msg(SystemTable, "[ok]\n");
+            UINTN r_info_size = sizeof(info_buf);
+            UINTN ramfs_file_size = 0;
+            if (!EFI_ERROR(ramfs_file->GetInfo(ramfs_file, &gEfiFileInfoGuid, &r_info_size, info_buf))) {
+                ramfs_file_size = ((EFI_FILE_INFO *)info_buf)->FileSize;
+            }
+            if (ramfs_file_size > 0) {
+                UINTN r_pages = (ramfs_file_size + 4095) / 4096;
+                EFI_PHYSICAL_ADDRESS ramfs_buf = 0;
+                if (!EFI_ERROR(SystemTable->BootServices->AllocatePages(AllocateAnyPages, EfiLoaderData, r_pages, &ramfs_buf)) && ramfs_buf != 0) {
+                    UINTN r_read = ramfs_file_size;
+                    if (!EFI_ERROR(ramfs_file->Read(ramfs_file, &r_read, (VOID *)(uintptr_t)ramfs_buf))) {
+                        boot_info.initramfs_base = (uint64_t)ramfs_buf;
+                        boot_info.initramfs_size = (uint64_t)r_read;
+                        boot_msg(SystemTable, "[bootmgfw] loaded initramfs into memory [ok]\n");
+                    }
+                }
+            }
+            ramfs_file->Close(ramfs_file);
+        } else {
+            boot_msg(SystemTable, "[failed]\n");
+            error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "initramfs image specified in boot.cfg not found");
+        }
+    }
+
     root_dir->Close(root_dir);
 
     if (EFI_ERROR(status)) {
@@ -579,6 +768,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         kernel_buffer = (EFI_PHYSICAL_ADDRESS)image_base;
         status = SystemTable->BootServices->AllocatePages(
             AllocateAddress,
+            EfiLoaderCode,
+            kernel_image_pages,
+            &kernel_buffer
+        );
+    }
+
+    if (EFI_ERROR(status) || kernel_buffer == 0) {
+        kernel_buffer = 0xFFFFFFFFULL;
+        status = SystemTable->BootServices->AllocatePages(
+            AllocateMaxAddress,
             EfiLoaderCode,
             kernel_image_pages,
             &kernel_buffer
@@ -682,6 +881,54 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
     boot_msg(SystemTable, "[ok]\n");
+
+    /* 11b. Wake UEFI Pointer Protocols (powers on OEM I2C-HID / PS/2 trackpads before ExitBootServices) */
+    {
+        typedef struct _EFI_SIMPLE_POINTER_PROTOCOL {
+            EFI_STATUS (EFIAPI *Reset)(struct _EFI_SIMPLE_POINTER_PROTOCOL *This, BOOLEAN ExtendedVerification);
+            VOID *GetState;
+            VOID *WaitForInput;
+            VOID *Mode;
+        } EFI_SIMPLE_POINTER_PROTOCOL;
+
+        typedef EFI_STATUS (EFIAPI *EFI_LOCATE_HANDLE_BUFFER_FN)(
+            UINT32 SearchType,
+            const EFI_GUID *Protocol,
+            VOID *SearchKey,
+            UINTN *NoHandles,
+            EFI_HANDLE **Buffer
+        );
+
+        static const EFI_GUID simple_ptr_guid = {
+            0x31878c87, 0x0b75, 0x11d5, { 0x9a, 0x4f, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d }
+        };
+        static const EFI_GUID abs_ptr_guid = {
+            0x8d59d32b, 0xc655, 0x4ae9, { 0x9b, 0x15, 0xf2, 0x59, 0x04, 0x99, 0x2a, 0x43 }
+        };
+
+        EFI_SIMPLE_POINTER_PROTOCOL *sptr = NULL;
+        if (SystemTable->BootServices->LocateProtocol(&simple_ptr_guid, NULL, (VOID **)&sptr) == EFI_SUCCESS && sptr && sptr->Reset) {
+            sptr->Reset(sptr, FALSE);
+        }
+        if (SystemTable->BootServices->LocateProtocol(&abs_ptr_guid, NULL, (VOID **)&sptr) == EFI_SUCCESS && sptr && sptr->Reset) {
+            sptr->Reset(sptr, FALSE);
+        }
+
+        if (SystemTable->BootServices->LocateHandleBuffer) {
+            EFI_LOCATE_HANDLE_BUFFER_FN locate_hb = (EFI_LOCATE_HANDLE_BUFFER_FN)SystemTable->BootServices->LocateHandleBuffer;
+            UINTN handle_count = 0;
+            EFI_HANDLE *handles = NULL;
+            if (locate_hb(2 /* ByProtocol */, &simple_ptr_guid, NULL, &handle_count, &handles) == EFI_SUCCESS && handles) {
+                for (UINTN h = 0; h < handle_count; h++) {
+                    EFI_SIMPLE_POINTER_PROTOCOL *p = NULL;
+                    if (SystemTable->BootServices->HandleProtocol(handles[h], &simple_ptr_guid, (VOID **)&p) == EFI_SUCCESS && p && p->Reset) {
+                        p->Reset(p, FALSE);
+                    }
+                }
+                SystemTable->BootServices->FreePool(handles);
+            }
+        }
+    }
 
     /* 12. Allocate Buffer for Memory Map Snapshot */
     EFI_PHYSICAL_ADDRESS map_buf_phys = 0;

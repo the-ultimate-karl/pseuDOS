@@ -152,7 +152,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
                     kernel_panic("unexpected second instance of init process detected!", NULL);
                 }
             }
-            process_privilege_t priv = (curr->privilege_level == PRIV_KERNEL && a2 == 1) ? PRIV_KERNEL : PRIV_USER;
+            process_privilege_t priv = (a4 == PRIV_KERNEL || (curr->privilege_level == PRIV_KERNEL && a2 == 1)) ? PRIV_KERNEL : PRIV_USER;
             process_t *proc = pe_spawn_process(NULL, path, priv);
             if (!proc) {
                 int err = pe_get_last_error();
@@ -187,7 +187,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
 
         case SYS_KILL: {
             uint32_t target_pid = (uint32_t)a1;
-            if (target_pid < 3) {
+            if (target_pid < 2) {
                 kernel_panic("Attempted to kill critical processes!", NULL);
             }
             if (target_pid != curr->pid && curr->privilege_level != PRIV_KERNEL) {
@@ -515,6 +515,13 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
                     g_syscall_flash_log[0] = '\0';
                 }
                 int res = gpt_fat32_format_and_install(dev, flash_install_progress);
+                if (res == 0) {
+                    vfs_refresh_mounts_dir();
+                } else if (g_syscall_flash_log && g_syscall_flash_cap > g_syscall_flash_pos) {
+                    flash_format_error_screen(g_syscall_flash_log + g_syscall_flash_pos,
+                                              g_syscall_flash_cap - g_syscall_flash_pos,
+                                              dev);
+                }
                 g_syscall_flash_log = NULL;
                 return (res == 0) ? 0 : -EIO;
             }

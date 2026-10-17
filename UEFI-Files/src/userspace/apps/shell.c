@@ -125,6 +125,23 @@ static char *strcat(char *dest, const char *src) {
     return dest;
 }
 
+static char *strstr(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return NULL;
+    if (!*needle) return (char *)haystack;
+    for (; *haystack; haystack++) {
+        if (*haystack == *needle) {
+            const char *h = haystack;
+            const char *n = needle;
+            while (*h && *n && *h == *n) {
+                h++;
+                n++;
+            }
+            if (!*n) return (char *)haystack;
+        }
+    }
+    return NULL;
+}
+
 #define SCROLLBAR_W 16
 #define TERM_DEFAULT_W 656
 #define TERM_DEFAULT_H 384
@@ -1035,9 +1052,9 @@ static void cmd_uptime(void) {
 
 static void cmd_uname(const char *arg) {
     if (arg && (strcmp(arg, "-a") == 0 || strcmp(arg, "--all") == 0)) {
-        puts("pseuDOS 0.6.0-scheduling x86_64 UEFI\n");
+        puts("pseuDOS 0.7.1-gui x86_64 UEFI\n");
     } else if (arg && strcmp(arg, "-r") == 0) {
-        puts("0.6.0-scheduling\n");
+        puts("0.7.1-gui\n");
     } else if (arg && strcmp(arg, "-m") == 0) {
         puts("x86_64\n");
     } else if (arg && strcmp(arg, "-s") == 0) {
@@ -1092,6 +1109,7 @@ static void cmd_help(void) {
     puts(" kernel / su                 : escalate privilege to KERNEL mode\n");
     puts(" exit / drop                 : drop privileges or exit shell\n");
     puts(" sudo <command>              : run single command with KERNEL privileges\n");
+    puts(" <app> [args...] --as-root   : launch application with KERNEL privileges (priv=KERNEL)\n");
     puts(" dmesg                       : display kernel message buffer\n");
     puts(" grub                        : display GRUB 2 chainloader config & setup\n");
     puts(" flash                       : install pseuDOS to persistent disk (requires sudo)\n");
@@ -1719,6 +1737,16 @@ static void cmd_kill(const char *arg) {
 
 static void cmd_syscalltest(void) {
     puts("--- testing syscall interface from userspace ---\n");
+    uint16_t cs = 0, ss = 0;
+    __asm__ volatile ("mov %%cs, %0\n\tmov %%ss, %1" : "=r"(cs), "=r"(ss));
+    puts("0. hardware cpu ring: CS=0x");
+    print_hex(cs);
+    puts(" SS=0x");
+    print_hex(ss);
+    puts(" CPL=");
+    print_num((uint64_t)(cs & 3));
+    puts(((cs & 3) == 3) ? " (hardware Ring 3 active)\n" : " (Ring 0)\n");
+
     int64_t pid = syscall(SYS_GETPID, 0, 0, 0, 0, 0);
     puts("1. sys_getpid() = PID ");
     print_num((uint64_t)pid);
@@ -2384,14 +2412,264 @@ static void execute_command(char *cmd_line) {
     }
 }
 
+static int is_singleton_app(const char *name) {
+    if (!name || !name[0]) return 0;
+    const char *base = strrchr(name, '/');
+    if (base) base++;
+    else base = name;
+    const char *bslash = strrchr(base, '\\');
+    if (bslash) base = bslash + 1;
+
+    char tmp[32];
+    strncpy(tmp, base, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    char *dot = strrchr(tmp, '.');
+    if (dot && (strcmp(dot, ".exe") == 0 || strcmp(dot, ".bin") == 0)) {
+        *dot = '\0';
+    }
+
+    return (strcmp(tmp, "ntfs") == 0 ||
+            strcmp(tmp, "lack") == 0 ||
+            strcmp(tmp, "ninds") == 0 ||
+            strcmp(tmp, "gshss") == 0 ||
+            strcmp(tmp, "xshss") == 0);
+}
+
+static int is_app_running(const char *name) {
+    if (!name || !name[0]) return 0;
+    const char *base = strrchr(name, '/');
+    if (base) base++;
+    else base = name;
+    const char *bslash = strrchr(base, '\\');
+    if (bslash) base = bslash + 1;
+
+    char base_noext[32];
+    strncpy(base_noext, base, sizeof(base_noext) - 1);
+    base_noext[sizeof(base_noext) - 1] = '\0';
+    char *dot = strrchr(base_noext, '.');
+    if (dot && strcmp(dot, ".exe") == 0) *dot = '\0';
+
+    char exe_name[36];
+    strcpy(exe_name, base_noext);
+    strcat(exe_name, ".exe");
+
+    g_sys_cmd_buf[0] = '\0';
+    int64_t res = syscall(SYS_PS, (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0, 0);
+    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
+        if (strstr(g_sys_cmd_buf, exe_name) != NULL || strstr(g_sys_cmd_buf, base_noext) != NULL) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int extract_as_root_flag(const char *args_in, char *args_out, size_t out_size) {
+    if (args_out && out_size > 0) args_out[0] = '\0';
+    if (!args_in || !args_in[0]) return 0;
+
+    int found_as_root = 0;
+    char tmp[256];
+    strncpy(tmp, args_in, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+
+    char *token = tmp;
+    while (*token) {
+        while (*token == ' ' || *token == '\t') token++;
+        if (!*token) break;
+        char *end = token;
+        while (*end && *end != ' ' && *end != '\t') end++;
+        char saved = *end;
+        *end = '\0';
+
+        if (strcmp(token, "--as-root") == 0) {
+            found_as_root = 1;
+        } else {
+            if (args_out && out_size > 0) {
+                if (args_out[0] != '\0') {
+                    size_t l = strlen(args_out);
+                    if (l + 1 < out_size) {
+                        args_out[l] = ' ';
+                        args_out[l + 1] = '\0';
+                    }
+                }
+                size_t l = strlen(args_out);
+                size_t tlen = strlen(token);
+                if (l + tlen < out_size) {
+                    strcat(args_out, token);
+                }
+            }
+        }
+
+        if (saved == '\0') break;
+        token = end + 1;
+    }
+    return found_as_root;
+}
+
+static void execute_external_command(const char *cmd, const char *arg, int as_root) {
+    if (!cmd || !cmd[0]) return;
+
+    /* 1. Check singleton enforcement */
+    if (is_singleton_app(cmd) && is_app_running(cmd)) {
+        const char *base = strrchr(cmd, '/');
+        if (base) base++;
+        else base = cmd;
+        puts("error: '");
+        puts(base);
+        puts("' is already running!\n");
+        return;
+    }
+
+    /* 2. Build candidate paths */
+    char candidates[16][128];
+    int num_candidates = 0;
+
+    int has_slash = (strchr(cmd, '/') != NULL || strchr(cmd, '\\') != NULL);
+    size_t cmd_len = strlen(cmd);
+    int has_exe = (cmd_len >= 4 && strcmp(cmd + cmd_len - 4, ".exe") == 0);
+
+    if (has_slash) {
+        resolve_path(cmd, candidates[num_candidates++], 128);
+        if (!has_exe && num_candidates < 16) {
+            char tmp[128];
+            strcpy(tmp, cmd);
+            strcat(tmp, ".exe");
+            resolve_path(tmp, candidates[num_candidates++], 128);
+        }
+    } else {
+        /* Check current working directory */
+        resolve_path(cmd, candidates[num_candidates++], 128);
+        if (!has_exe && num_candidates < 16) {
+            char tmp[128];
+            strcpy(tmp, cmd);
+            strcat(tmp, ".exe");
+            resolve_path(tmp, candidates[num_candidates++], 128);
+        }
+
+        /* Check system directories */
+        static const char *search_dirs[] = {
+            "/protected/apps/",
+            "/protected/gui/",
+            "/protected/crit/",
+            "/protected/krnl/",
+            "/protected/bin/"
+        };
+        for (int d = 0; d < 5 && num_candidates < 15; d++) {
+            char alt[128];
+            strcpy(alt, search_dirs[d]);
+            strcat(alt, cmd);
+            strncpy(candidates[num_candidates++], alt, 127);
+            if (!has_exe && num_candidates < 16) {
+                strcat(alt, ".exe");
+                strncpy(candidates[num_candidates++], alt, 127);
+            }
+        }
+        if (num_candidates < 16) {
+            strncpy(candidates[num_candidates++], cmd, 127);
+        }
+    }
+
+    int found_file = 0;
+    int last_err = 0;
+
+    for (int i = 0; i < num_candidates; i++) {
+        vfs_stat_t st;
+        if (syscall(SYS_STAT, (uint64_t)(uintptr_t)candidates[i], (uint64_t)(uintptr_t)&st, 0, 0, 0) == 0) {
+            if (st.type == VFS_TYPE_DIR) continue;
+            found_file = 1;
+
+            if (is_singleton_app(candidates[i]) && is_app_running(candidates[i])) {
+                const char *base = strrchr(candidates[i], '/');
+                if (base) base++;
+                else base = candidates[i];
+                puts("error: '");
+                puts(base);
+                puts("' is already running!\n");
+                return;
+            }
+
+            int current_priv = (int)syscall(SYS_GET_PRIVILEGE, 0, 0, 0, 0, 0);
+            int effective_as_root = as_root || (current_priv == 1);
+            int64_t pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)candidates[i], (uint64_t)(uintptr_t)arg, 0, (uint64_t)(effective_as_root ? 1 : 0), 0);
+            if (pid > 0) {
+                if (effective_as_root) {
+                    puts("[launched process as root (priv=KERNEL)]\n");
+                } else {
+                    puts("[launched process]\n");
+                }
+                return;
+            }
+            last_err = (int)pid;
+            if (pid == -EEXIST || pid == -EADDRINUSE) {
+                const char *base = strrchr(candidates[i], '/');
+                if (base) base++;
+                else base = candidates[i];
+                puts("error: '");
+                puts(base);
+                puts("' is already running!\n");
+                return;
+            } else if (pid == -ENOEXEC || pid == -EINVAL) {
+                puts("error: '");
+                puts(cmd);
+                puts("' is not a valid PE32+ executable!\n");
+                return;
+            } else if (pid == -ENOMEM) {
+                puts("error: out of kernel heap!\n");
+                return;
+            } else if (pid == -EPERM || pid == -EACCES) {
+                puts("error: permission denied!\n");
+                return;
+            }
+        }
+    }
+
+    if (found_file && (last_err == -ENOEXEC || last_err == -EINVAL)) {
+        puts("error: '");
+        puts(cmd);
+        puts("' is not a valid PE32+ executable!\n");
+    } else {
+        puts("unknown command '");
+        puts(cmd);
+        puts("'. type 'help' for available commands.\n");
+    }
+}
+
 static void execute_command_internal(char *cmd_line) {
     char *cmd = trim(cmd_line);
     if (!cmd || cmd[0] == '\0') return;
 
-    char *arg = strchr(cmd, ' ');
-    if (arg) {
-        *arg = '\0';
-        arg = trim(arg + 1);
+    if (strcmp(cmd, "--as-root") == 0) {
+        char *app_arg = strchr(cmd_line, ' ');
+        if (app_arg) app_arg = trim(app_arg + 1);
+        if (app_arg && app_arg[0] != '\0') {
+            char reordered[512];
+            strncpy(reordered, app_arg, sizeof(reordered) - 12);
+            reordered[sizeof(reordered) - 12] = '\0';
+            strcat(reordered, " --as-root");
+            execute_command_internal(reordered);
+            return;
+        }
+        puts("error: --as-root requires an application before it\n");
+        puts("usage: <application> [args...] --as-root\n");
+        return;
+    }
+
+    char *raw_arg = strchr(cmd, ' ');
+    if (raw_arg) {
+        *raw_arg = '\0';
+        raw_arg = trim(raw_arg + 1);
+    }
+
+    char clean_arg_buf[256];
+    int as_root = extract_as_root_flag(raw_arg, clean_arg_buf, sizeof(clean_arg_buf));
+    char *arg = (clean_arg_buf[0] != '\0') ? clean_arg_buf : NULL;
+
+    int64_t prev_priv = 0;
+    if (as_root) {
+        prev_priv = syscall(SYS_GET_PRIVILEGE, 0, 0, 0, 0, 0);
+        if (prev_priv != 1) {
+            syscall(SYS_ELEVATE, 0, 0, 0, 0, 0);
+        }
     }
 
     if (strcmp(cmd, "help") == 0) {
@@ -2543,34 +2821,11 @@ static void execute_command_internal(char *cmd_line) {
             syscall(SYS_EXIT, 0, 0, 0, 0, 0);
         }
     } else {
-        int64_t pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)cmd, (uint64_t)(uintptr_t)arg, 0, 0, 0);
-        if (pid <= 0) {
-            static const char *search_dirs[] = {
-                "/protected/apps/",
-                "/protected/krnl/",
-                "/protected/gui/",
-                "/protected/crit/"
-            };
-            for (int d = 0; d < 4 && pid <= 0; d++) {
-                char alt[128];
-                strcpy(alt, search_dirs[d]);
-                strcat(alt, cmd);
-                pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)alt, (uint64_t)(uintptr_t)arg, 0, 0, 0);
-                if (pid <= 0) {
-                    strcat(alt, ".exe");
-                    pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)alt, (uint64_t)(uintptr_t)arg, 0, 0, 0);
-                }
-            }
-        }
-        if (pid > 0) {
-            puts("[launched process]\n");
-        } else if (pid == -ENOMEM) {
-            puts("error: out of kernel heap!\n");
-        } else {
-            puts("unknown command '");
-            puts(cmd);
-            puts("'. type 'help' for available commands.\n");
-        }
+        execute_external_command(cmd, arg, as_root);
+    }
+
+    if (as_root && prev_priv != 1) {
+        syscall(SYS_DROP_PRIVILEGES, 0, 0, 0, 0, 0);
     }
 }
 
@@ -2585,7 +2840,7 @@ void shell_main(void) {
     env_init();
     env_set("SHELL", "/protected/apps/shell.exe");
 
-    puts("pseuDOS Virtual Terminal [xshss engine] (v0.7.0)\n");
+    puts("pseuDOS Virtual Terminal [xshss engine] (v0.7.1)\n");
     puts("type 'help' for a list of commands.\n\n");
     render_terminal();
 

@@ -38,6 +38,7 @@ typedef struct {
 
 void mice_init(const FramebufferInfo *fb);
 void mice_handle_irq(void);
+void mice_post_event(int32_t dx, int32_t dy, int32_t dz, uint8_t buttons);
 int mice_get_event(mouse_event_t *ev);
 void mice_get_state(mouse_state_t *state);
 void mice_set_bounds(uint32_t max_x, uint32_t max_y);

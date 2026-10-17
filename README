@@ -151,6 +151,10 @@ Once you have installed pseuDOS to a virtual drive using `flash`, boot directly 
 
 # Boot directly from the installed SATA drive:
 .\run_realistic.ps1 -Gui --boot-from sata
+
+# Boot directly from an installed USB 3.0 or USB 2.0 drive:
+.\run_realistic.ps1 -Gui --boot-from usb
+.\run_realistic.ps1 -Gui --boot-from usb2
 ```
 
 ---

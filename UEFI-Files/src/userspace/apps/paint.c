@@ -13,7 +13,7 @@
 #define CANVAS_Y 8
 
 /* Memory arena for image decoding */
-#define ARENA_SIZE (4 * 1024 * 1024)
+#define ARENA_SIZE (16 * 1024 * 1024)
 static uint8_t s_arena[ARENA_SIZE];
 static size_t s_arena_offset = 0;
 
@@ -47,7 +47,7 @@ void *memmove(void *dest, const void *src, size_t n) {
     return dest;
 }
 
-static void *my_malloc(size_t sz) {
+static void *arena_alloc(size_t sz) {
     size_t total = sizeof(alloc_hdr_t) + ((sz + 15) & ~15);
     if (s_arena_offset + total > ARENA_SIZE) return NULL;
     alloc_hdr_t *hdr = (alloc_hdr_t *)(s_arena + s_arena_offset);
@@ -56,17 +56,17 @@ static void *my_malloc(size_t sz) {
     return (void *)(hdr + 1);
 }
 
-static void *my_realloc(void *ptr, size_t sz) {
-    if (!ptr) return my_malloc(sz);
+static void *arena_realloc(void *ptr, size_t sz) {
+    if (!ptr) return arena_alloc(sz);
     alloc_hdr_t *hdr = ((alloc_hdr_t *)ptr) - 1;
-    void *new_ptr = my_malloc(sz);
+    void *new_ptr = arena_alloc(sz);
     if (!new_ptr) return NULL;
     size_t copy_sz = (hdr->size < sz) ? hdr->size : sz;
     memcpy(new_ptr, ptr, copy_sz);
     return new_ptr;
 }
 
-static void my_free(void *ptr) {
+static void arena_free(void *ptr) {
     (void)ptr;
 }
 
@@ -86,9 +86,9 @@ int abs(int x) {
 #define STBI_ONLY_BMP
 #define STBI_NO_SIMD
 #define STBI_NO_THREAD_LOCALS
-#define STBI_MALLOC(sz)           my_malloc(sz)
-#define STBI_REALLOC(p,newsz)     my_realloc(p,newsz)
-#define STBI_FREE(p)              my_free(p)
+#define STBI_MALLOC(sz)           arena_alloc(sz)
+#define STBI_REALLOC(p,newsz)     arena_realloc(p,newsz)
+#define STBI_FREE(p)              arena_free(p)
 #define STBI_ASSERT(x)            ((void)0)
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -257,7 +257,7 @@ static int paint_save_bmp(const char *path) {
     size_t file_size = 54 + image_bytes;
 
     arena_reset();
-    uint8_t *bmp_buf = (uint8_t *)my_malloc(file_size);
+    uint8_t *bmp_buf = (uint8_t *)arena_alloc(file_size);
     if (!bmp_buf) {
         ntfs_strncpy(s_save_status, "Err Mem", sizeof(s_save_status) - 1);
         render_toolbar();
@@ -556,7 +556,7 @@ static int paint_open_image(const char *path) {
     if (st.size == 0) return -1;
 
     arena_reset();
-    uint8_t *file_data = (uint8_t *)my_malloc(st.size + 16);
+    uint8_t *file_data = (uint8_t *)arena_alloc(st.size + 16);
     if (!file_data) {
         arena_reset();
         return -1;

@@ -14,6 +14,9 @@ typedef enum {
     /* Mapped from Python ModuleNotFoundError: No such file or directory */
     ERR_KERNEL_NOT_FOUND,
 
+    /* Boot configuration text file (boot.cfg) missing or invalid */
+    ERR_BOOTCFG_NOT_FOUND,
+
     /* Mapped from Python TypeError / NameError / SyntaxError: cannot verify integrity of the kernel */
     ERR_KERNEL_INTEGRITY,
 

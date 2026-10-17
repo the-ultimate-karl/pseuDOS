@@ -94,6 +94,7 @@ KERNEL_SRCS = src/kernel/kernel.c \
 
 USER_SRCS = src/userspace/autoinit.c \
             src/userspace/xshss.c \
+            src/userspace/gman.c \
             src/userspace/superglue.c \
             src/userspace/ntfs.c \
             src/userspace/lack.c \
@@ -106,31 +107,14 @@ USER_SRCS = src/userspace/autoinit.c \
             src/userspace/apps/notepad.c \
             src/userspace/apps/paint.c \
             src/userspace/apps/clock.c \
-            src/userspace/apps/filemgr.c
+            src/userspace/apps/filemgr.c \
+            src/userspace/apps/view.c
 
 BOOT_OBJS = $(patsubst src/%.c, bin/%.o, $(BOOT_SRCS))
 KERNEL_OBJS = $(patsubst src/%.c, bin/%.o, $(KERNEL_SRCS))
 USER_OBJS = $(patsubst src/%.c, bin/%.o, $(USER_SRCS))
 
-KERNEL_EXTRA_OBJS = bin/kernel/bootx64_payload.o \
-                    bin/kernel/autoinit_payload.o \
-                    bin/kernel/xshss_payload.o \
-                    bin/kernel/superglue_payload.o \
-                    bin/kernel/ntfs_payload.o \
-                    bin/kernel/lack_payload.o \
-                    bin/kernel/ninds_payload.o \
-                    bin/kernel/splash_payload.o \
-                    bin/kernel/gshss_payload.o \
-                    bin/kernel/shell_payload.o \
-                    bin/kernel/sysmon_payload.o \
-                    bin/kernel/calc_payload.o \
-                    bin/kernel/notepad_payload.o \
-                    bin/kernel/paint_payload.o \
-                    bin/kernel/clock_payload.o \
-                    bin/kernel/filemgr_payload.o \
-                    bin/kernel/image2_payload.o \
-                    bin/kernel/wallpapers_payload.o \
-                    bin/drivers/isr_stubs.o \
+KERNEL_EXTRA_OBJS = bin/drivers/isr_stubs.o \
                     bin/kernel/gdt_flush.o \
                     bin/kernel/syscall_entry.o
 
@@ -142,6 +126,7 @@ TARGET_KERNEL = bin/vpkernel
 
 TARGET_AUTOINIT = bin/autoinit.exe
 TARGET_XSHSS = bin/xshss.exe
+TARGET_GMAN = bin/gman.exe
 TARGET_SUPERGLUE = bin/superglue.exe
 TARGET_NTFS = bin/ntfs.exe
 TARGET_LACK = bin/lack.exe
@@ -155,9 +140,11 @@ TARGET_NOTEPAD = bin/notepad.exe
 TARGET_PAINT = bin/paint.exe
 TARGET_CLOCK = bin/clock.exe
 TARGET_FILEMGR = bin/filemgr.exe
+TARGET_VIEW = bin/view.exe
 
 TARGET_USER_EXES = $(TARGET_AUTOINIT) \
                    $(TARGET_XSHSS) \
+                   $(TARGET_GMAN) \
                    $(TARGET_SUPERGLUE) \
                    $(TARGET_NTFS) \
                    $(TARGET_LACK) \
@@ -170,7 +157,8 @@ TARGET_USER_EXES = $(TARGET_AUTOINIT) \
                    $(TARGET_NOTEPAD) \
                    $(TARGET_PAINT) \
                    $(TARGET_CLOCK) \
-                   $(TARGET_FILEMGR)
+                   $(TARGET_FILEMGR) \
+                   $(TARGET_VIEW)
 
 TARGET_ISO = build/pseuDOS.iso
 
@@ -180,11 +168,17 @@ OVMF_BIOS ?= /usr/share/ovmf/OVMF.fd
 
 all: $(TARGET_ISO)
 
+TARGET_INITRAMFS = bin/initramfs.img
+
 iso: $(TARGET_ISO)
 
-$(TARGET_ISO): $(TARGET_EFI) $(TARGET_KERNEL) $(TARGET_USER_EXES)
+$(TARGET_INITRAMFS): $(TARGET_USER_EXES) $(TARGET_EFI)
+	@$(MKDIR_P) bin
+	$(PYTHON) scripts/make_initramfs.py
+
+$(TARGET_ISO): $(TARGET_EFI) $(TARGET_KERNEL) $(TARGET_USER_EXES) $(TARGET_INITRAMFS)
 	@$(MKDIR_P) build
-	$(PYTHON) scripts/make_iso.py --efi $(TARGET_EFI) --kernel $(TARGET_KERNEL) --iso $(TARGET_ISO)
+	$(PYTHON) scripts/make_iso.py --efi $(TARGET_EFI) --kernel $(TARGET_KERNEL) --initramfs $(TARGET_INITRAMFS) --iso $(TARGET_ISO)
 
 $(TARGET_EFI): $(BOOT_OBJS)
 	@$(MKDIR_P) bin
@@ -197,6 +191,10 @@ $(TARGET_AUTOINIT): bin/userspace/autoinit.o
 $(TARGET_XSHSS): bin/userspace/xshss.o
 	@$(MKDIR_P) bin
 	$(LD) $(LDFLAGS_USER) -e xshss_main -o $@ $^
+
+$(TARGET_GMAN): bin/userspace/gman.o
+	@$(MKDIR_P) bin
+	$(LD) $(LDFLAGS_USER) -e gman_main -o $@ $^
 
 $(TARGET_SUPERGLUE): bin/userspace/superglue.o
 	@$(MKDIR_P) bin
@@ -250,6 +248,10 @@ $(TARGET_FILEMGR): bin/userspace/apps/filemgr.o
 	@$(MKDIR_P) bin
 	$(LD) $(LDFLAGS_USER) -e filemgr_main -o $@ $^
 
+$(TARGET_VIEW): bin/userspace/apps/view.o
+	@$(MKDIR_P) bin
+	$(LD) $(LDFLAGS_USER) -e view_main -o $@ $^
+
 bin/kernel/bootx64_payload.o: $(TARGET_EFI)
 	@$(MKDIR_P) bin/kernel
 	$(PYTHON) -c "with open('bin/kernel/bootx64_payload.s', 'w') as f: f.write('.section .rodata\n.global g_payload_bootx64_data\n.global g_payload_bootx64_size\ng_payload_bootx64_data:\n    .incbin \"$(subst \,/,$<)\"\ng_payload_bootx64_end:\ng_payload_bootx64_size:\n    .quad g_payload_bootx64_end - g_payload_bootx64_data\n')"
@@ -268,11 +270,11 @@ bin/kernel/xshss_payload.o: $(TARGET_XSHSS)
 	$(CC) -c bin/kernel/xshss_payload.s -o $@
 	@$(PYTHON) -c "import os; os.remove('bin/kernel/xshss_payload.s') if os.path.exists('bin/kernel/xshss_payload.s') else None"
 
-bin/kernel/superglue_payload.o: $(TARGET_SUPERGLUE)
+bin/kernel/gman_payload.o: $(TARGET_GMAN)
 	@$(MKDIR_P) bin/kernel
-	$(PYTHON) -c "with open('bin/kernel/superglue_payload.s', 'w') as f: f.write('.section .rodata\n.global g_payload_superglue_data\n.global g_payload_superglue_size\ng_payload_superglue_data:\n    .incbin \"$(subst \,/,$<)\"\ng_payload_superglue_end:\ng_payload_superglue_size:\n    .quad g_payload_superglue_end - g_payload_superglue_data\n')"
-	$(CC) -c bin/kernel/superglue_payload.s -o $@
-	@$(PYTHON) -c "import os; os.remove('bin/kernel/superglue_payload.s') if os.path.exists('bin/kernel/superglue_payload.s') else None"
+	$(PYTHON) -c "with open('bin/kernel/gman_payload.s', 'w') as f: f.write('.section .rodata\n.global g_payload_gman_data\n.global g_payload_gman_size\ng_payload_gman_data:\n    .incbin \"$(subst \,/,$<)\"\ng_payload_gman_end:\ng_payload_gman_size:\n    .quad g_payload_gman_end - g_payload_gman_data\n')"
+	$(CC) -c bin/kernel/gman_payload.s -o $@
+	@$(PYTHON) -c "import os; os.remove('bin/kernel/gman_payload.s') if os.path.exists('bin/kernel/gman_payload.s') else None"
 
 bin/kernel/ntfs_payload.o: $(TARGET_NTFS)
 	@$(MKDIR_P) bin/kernel
@@ -346,6 +348,12 @@ bin/kernel/filemgr_payload.o: $(TARGET_FILEMGR)
 	$(CC) -c bin/kernel/filemgr_payload.s -o $@
 	@$(PYTHON) -c "import os; os.remove('bin/kernel/filemgr_payload.s') if os.path.exists('bin/kernel/filemgr_payload.s') else None"
 
+bin/kernel/view_payload.o: $(TARGET_VIEW)
+	@$(MKDIR_P) bin/kernel
+	$(PYTHON) -c "with open('bin/kernel/view_payload.s', 'w') as f: f.write('.section .rodata\n.global g_payload_view_data\n.global g_payload_view_size\ng_payload_view_data:\n    .incbin \"$(subst \,/,$<)\"\ng_payload_view_end:\ng_payload_view_size:\n    .quad g_payload_view_end - g_payload_view_data\n')"
+	$(CC) -c bin/kernel/view_payload.s -o $@
+	@$(PYTHON) -c "import os; os.remove('bin/kernel/view_payload.s') if os.path.exists('bin/kernel/view_payload.s') else None"
+
 bin/kernel/image2_payload.o: ../Test-Media/image2_testmedia.png
 	@$(MKDIR_P) bin/kernel
 	$(PYTHON) -c "with open('bin/kernel/image2_payload.s', 'w') as f: f.write('.section .rodata\n.global g_media_image2_png\n.global g_media_image2_png_size\ng_media_image2_png:\n    .incbin \"$(subst \,/,$<)\"\ng_media_image2_png_end:\ng_media_image2_png_size:\n    .quad g_media_image2_png_end - g_media_image2_png\n')"
@@ -358,12 +366,12 @@ bin/userspace/gshss_fallback.o: ../Test-Media/Wallpapers/fallback.png
 	$(CC) -c bin/userspace/gshss_fallback.s -o $@
 	@$(PYTHON) -c "import os; os.remove('bin/userspace/gshss_fallback.s') if os.path.exists('bin/userspace/gshss_fallback.s') else None"
 
-bin/kernel/wallpapers_payload.o: scripts/generate_wallpapers_payload.py
+bin/kernel/wallpapers_payload.o: scripts/generate_wallpapers_payload.py ../Test-Media/Wallpapers/fallback.png
 	@$(MKDIR_P) bin/kernel
 	$(PYTHON) scripts/generate_wallpapers_payload.py
 	$(CC) -c bin/kernel/wallpapers_payload.s -o $@
 
-$(TARGET_KERNEL): $(TARGET_USER_EXES) $(KERNEL_OBJS) $(KERNEL_EXTRA_OBJS)
+$(TARGET_KERNEL): $(KERNEL_OBJS) $(KERNEL_EXTRA_OBJS)
 	@$(MKDIR_P) bin
 	$(LD) $(LDFLAGS_KERNEL) -o $@ $(KERNEL_OBJS) $(KERNEL_EXTRA_OBJS)
 

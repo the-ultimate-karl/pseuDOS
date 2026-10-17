@@ -107,8 +107,11 @@ static void parse_partition_filesystem(StorageDevice *dev, uint64_t part_start_l
     uint32_t tot_sec_32 = *(uint32_t *)&sector[32];
     uint32_t total_sec = tot_sec_32 != 0 ? tot_sec_32 : tot_sec_16;
     uint32_t fat_sz_32 = *(uint32_t *)&sector[36];
+    int valid_bpb = (bps == 512 && spc > 0 && spc <= 128 && (spc & (spc - 1)) == 0 &&
+                     rsvd > 0 && fats >= 1 && fats <= 2);
 
-    if (bps >= 512 && spc > 0 && fats > 0 && fat_sz_32 > 0) {
+    if (valid_bpb && fat_sz_16 == 0 && fat_sz_32 > 0 &&
+        total_sec > ((uint32_t)rsvd + (uint32_t)fats * fat_sz_32)) {
         /* FAT32 Volume */
         p->has_fs = 1;
         strcpy(p->fs_type, "FAT32");
@@ -162,10 +165,10 @@ static void parse_partition_filesystem(StorageDevice *dev, uint64_t part_start_l
         storage_format_size(p->used_bytes, p->used_str, sizeof(p->used_str));
 
         strcpy(p->health_status, "Clean / Healthy");
-    } else if (bps >= 512 && spc > 0 && fats > 0 && fat_sz_16 > 0) {
+    } else if (valid_bpb && fat_sz_16 > 0 &&
+               total_sec > ((uint32_t)rsvd + (uint32_t)fats * fat_sz_16)) {
         /* FAT16 / FAT12 Volume */
         p->has_fs = 1;
-        strcpy(p->fs_type, "FAT16");
         p->bytes_per_sector = bps;
         p->sectors_per_cluster = spc;
         p->cluster_size = bps * spc;
@@ -185,6 +188,7 @@ static void parse_partition_filesystem(StorageDevice *dev, uint64_t part_start_l
         uint32_t data_sec = total_sec > (rsvd + fats * fat_sz_16 + root_dir_sectors) ?
             (total_sec - (rsvd + fats * fat_sz_16 + root_dir_sectors)) : 0;
         p->total_clusters = data_sec / spc;
+        strcpy(p->fs_type, (p->total_clusters < 4085) ? "FAT12" : "FAT16");
         p->free_clusters = p->total_clusters;
         p->used_clusters = 0;
         p->total_bytes = (uint64_t)p->total_clusters * p->cluster_size;
@@ -465,7 +469,8 @@ StorageDevice *storage_get_boot_device(const char *boot_devpath, int *out_drive_
     if (!boot_devpath || boot_devpath[0] == '\0') return NULL;
 
     /* Optical CD-ROM / DVD-ROM media is an ISO volume, not a registered writable disk */
-    if (strstr(boot_devpath, "CDROM") || strstr(boot_devpath, "CdRom") || strstr(boot_devpath, "cdrom")) {
+    if (strstr(boot_devpath, "CDROM") || strstr(boot_devpath, "CdRom") || strstr(boot_devpath, "cdrom") ||
+        strstr(boot_devpath, "CD-ROM") || strstr(boot_devpath, "Cd-Rom") || strstr(boot_devpath, "cd-rom")) {
         return NULL;
     }
 

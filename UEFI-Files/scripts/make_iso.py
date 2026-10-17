@@ -7,7 +7,7 @@ import tempfile
 import argparse
 import shutil
 
-def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_kb=8192):
+def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, initramfs_binary_path=None, size_kb=8192):
     with open(efi_binary_path, "rb") as f:
         efi_data = f.read()
 
@@ -16,10 +16,15 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
         with open(kernel_binary_path, "rb") as f:
             kernel_data = f.read()
 
-    needed_bytes = len(efi_data) + (len(kernel_data) if kernel_data else 0) + 1024 * 1024
+    initramfs_data = None
+    if initramfs_binary_path and os.path.exists(initramfs_binary_path):
+        with open(initramfs_binary_path, "rb") as f:
+            initramfs_data = f.read()
+
+    needed_bytes = len(efi_data) + (len(kernel_data) if kernel_data else 0) + (len(initramfs_data) if initramfs_data else 0) + 1024 * 1024
     needed_kb = (needed_bytes + 1023) // 1024
     if size_kb < needed_kb:
-        size_kb = max(8192, ((needed_kb + 2047) // 2048) * 2048)
+        size_kb = ((needed_kb + 2047) // 2048) * 2048
 
     sector_size = 512
     total_sectors = (size_kb * 1024) // sector_size
@@ -89,6 +94,45 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
         struct.pack_into("<I", e, 28, size)
         return e
 
+    def lfn_checksum(name8_3):
+        s = 0
+        for b in name8_3.encode("ascii")[:11]:
+            s = (((s & 1) << 7) + (s >> 1) + b) & 0xFF
+        return s
+
+    def mklfn(long_name, name8_3, attr, cluster, size):
+        if long_name in (".", ".."):
+            return mkentry(name8_3, attr, cluster, size)
+        chk = lfn_checksum(name8_3)
+        chunks = [long_name[i:i+13] for i in range(0, len(long_name), 13)]
+        out = bytearray()
+        total = len(chunks)
+        for seq in range(total, 0, -1):
+            chunk = chunks[seq - 1]
+            e = bytearray(32)
+            e[0] = seq | (0x40 if seq == total else 0x00)
+            chars = [ord(c) for c in chunk]
+            if len(chars) < 13:
+                chars.append(0x0000)
+                while len(chars) < 13:
+                    chars.append(0xFFFF)
+            for i in range(5):
+                struct.pack_into("<H", e, 1 + i * 2, chars[i])
+            e[11] = 0x0F
+            e[12] = 0x00
+            e[13] = chk
+            for i in range(6):
+                struct.pack_into("<H", e, 14 + i * 2, chars[5 + i])
+            struct.pack_into("<H", e, 26, 0x0000)
+            for i in range(2):
+                struct.pack_into("<H", e, 28 + i * 2, chars[11 + i])
+            out.extend(e)
+        out.extend(mkentry(name8_3, attr, cluster, size))
+        return out
+
+    def append_dir(buf, off, data):
+        buf[off:off+len(data)] = data
+        return off + len(data)
 
     efi_clus = alloc(1)
     boot_clus = alloc(1)
@@ -101,17 +145,19 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
     osrelease_clus = alloc(1) if kernel_data else 0
     
     root_off = (rsvd_sec + num_fats * sec_per_fat) * sector_size
-    image[root_off:root_off+32] = mkentry("EFI        ", 0x10, efi_clus, 0)
+    roff = root_off
+    roff = append_dir(image, roff, mklfn("EFI", "EFI        ", 0x10, efi_clus, 0))
     if protect_clus:
-        image[root_off+32:root_off+64] = mkentry("PROTECT    ", 0x10, protect_clus, 0)
+        roff = append_dir(image, roff, mklfn("protected", "PROTEC~1   ", 0x10, protect_clus, 0))
     
-    # EFI dir contains BOOT and PSEUDOS subdirectories
+    # EFI dir contains BOOT and pseuDOS subdirectories
     d = bytearray(sec_per_clus * sector_size)
-    d[0:32] = mkentry(".          ", 0x10, efi_clus, 0)
-    d[32:64] = mkentry("..         ", 0x10, 0, 0)
-    d[64:96] = mkentry("BOOT       ", 0x10, boot_clus, 0)
+    off = 0
+    off = append_dir(d, off, mkentry(".          ", 0x10, efi_clus, 0))
+    off = append_dir(d, off, mkentry("..         ", 0x10, 0, 0))
+    off = append_dir(d, off, mklfn("BOOT", "BOOT       ", 0x10, boot_clus, 0))
     if kernel_data:
-        d[96:128] = mkentry("PSEUDOS    ", 0x10, pseudos_clus, 0)
+        off = append_dir(d, off, mklfn("pseuDOS", "PSEUDOS    ", 0x10, pseudos_clus, 0))
     write_clus(efi_clus, d)
     
     # BOOT dir with BOOTX64.EFI
@@ -120,58 +166,68 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, size_k
     write_clus(c_start, efi_data)
     
     d2 = bytearray(sec_per_clus * sector_size)
-    d2[0:32] = mkentry(".          ", 0x10, boot_clus, 0)
-    d2[32:64] = mkentry("..         ", 0x10, efi_clus, 0)
-    d2[64:96] = mkentry("BOOTX64 EFI", 0x20, c_start, len(efi_data))
+    off = 0
+    off = append_dir(d2, off, mkentry(".          ", 0x10, boot_clus, 0))
+    off = append_dir(d2, off, mkentry("..         ", 0x10, efi_clus, 0))
+    off = append_dir(d2, off, mklfn("BOOTX64.EFI", "BOOTX64 EFI", 0x20, c_start, len(efi_data)))
     write_clus(boot_clus, d2)
 
-    # PSEUDOS dir with fallback KERNEL.BIN
+    # pseuDOS dir
     if kernel_data:
         k_cnt = (len(kernel_data) + sec_per_clus * sector_size - 1) // (sec_per_clus * sector_size)
         k_start = alloc(k_cnt)
         write_clus(k_start, kernel_data)
 
         d3 = bytearray(sec_per_clus * sector_size)
-        d3[0:32] = mkentry(".          ", 0x10, pseudos_clus, 0)
-        d3[32:64] = mkentry("..         ", 0x10, efi_clus, 0)
-        d3[64:96] = mkentry("VPKERNEL   ", 0x20, k_start, len(kernel_data))
-        d3[96:128] = mkentry("BOOTX64 EFI", 0x20, c_start, len(efi_data))
-        d3[128:160] = mkentry("PSEUDOS EFI", 0x20, c_start, len(efi_data))
+        off = 0
+        off = append_dir(d3, off, mkentry(".          ", 0x10, pseudos_clus, 0))
+        off = append_dir(d3, off, mkentry("..         ", 0x10, efi_clus, 0))
+        off = append_dir(d3, off, mklfn("vpkernel", "VPKERNEL   ", 0x20, k_start, len(kernel_data)))
+        off = append_dir(d3, off, mklfn("BOOTX64.EFI", "BOOTX64 EFI", 0x20, c_start, len(efi_data)))
+        off = append_dir(d3, off, mklfn("pseudos.efi", "PSEUDOS EFI", 0x20, c_start, len(efi_data)))
 
         # GRUB config snippet and OS release info
         grub_bytes = b"# GRUB 2 configuration snippet for pseuDOS\r\nmenuentry \"pseuDOS x86_64\" {\r\n    insmod fat\r\n    insmod chain\r\n    search --no-floppy --set=root --file /EFI/pseuDOS/BOOTX64.EFI\r\n    chainloader /EFI/pseuDOS/BOOTX64.EFI\r\n}\r\n"
         write_clus(grubcfg_clus, grub_bytes)
-        d3[160:192] = mkentry("GRUB    CFG", 0x20, grubcfg_clus, len(grub_bytes))
+        off = append_dir(d3, off, mklfn("grub.cfg", "GRUB    CFG", 0x20, grubcfg_clus, len(grub_bytes)))
 
         osrelease_bytes = b"NAME=\"pseuDOS\"\r\nID=pseudos\r\nVERSION=\"0.7.0\"\r\nPRETTY_NAME=\"pseuDOS v0.7.0\"\r\nHOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\r\n"
         write_clus(osrelease_clus, osrelease_bytes)
-        d3[192:224] = mkentry("OS-RELEA   ", 0x20, osrelease_clus, len(osrelease_bytes))
+        off = append_dir(d3, off, mklfn("os-release", "OS-REL~1   ", 0x20, osrelease_clus, len(osrelease_bytes)))
 
         write_clus(pseudos_clus, d3)
 
-        # PROTECT dir contains KRNL and BOOTMGR
+        # protected dir contains krnl and bootmgr
         dp = bytearray(sec_per_clus * sector_size)
-        dp[0:32] = mkentry(".          ", 0x10, protect_clus, 0)
-        dp[32:64] = mkentry("..         ", 0x10, 0, 0)
-        dp[64:96] = mkentry("KRNL       ", 0x10, krnl_clus, 0)
-        dp[96:128] = mkentry("BOOTMGR    ", 0x10, bootmgr_clus, 0)
+        off = 0
+        off = append_dir(dp, off, mkentry(".          ", 0x10, protect_clus, 0))
+        off = append_dir(dp, off, mkentry("..         ", 0x10, 0, 0))
+        off = append_dir(dp, off, mklfn("krnl", "KRNL       ", 0x10, krnl_clus, 0))
+        off = append_dir(dp, off, mklfn("bootmgr", "BOOTMGR    ", 0x10, bootmgr_clus, 0))
         write_clus(protect_clus, dp)
 
-        # KRNL dir with primary VPKERNEL
+        # krnl dir with primary vpkernel and initramfs.img
         dk = bytearray(sec_per_clus * sector_size)
-        dk[0:32] = mkentry(".          ", 0x10, krnl_clus, 0)
-        dk[32:64] = mkentry("..         ", 0x10, protect_clus, 0)
-        dk[64:96] = mkentry("VPKERNEL   ", 0x20, k_start, len(kernel_data))
+        off = 0
+        off = append_dir(dk, off, mkentry(".          ", 0x10, krnl_clus, 0))
+        off = append_dir(dk, off, mkentry("..         ", 0x10, protect_clus, 0))
+        off = append_dir(dk, off, mklfn("vpkernel", "VPKERNEL   ", 0x20, k_start, len(kernel_data)))
+        if initramfs_data:
+            init_cnt = (len(initramfs_data) + sec_per_clus * sector_size - 1) // (sec_per_clus * sector_size)
+            init_start = alloc(init_cnt)
+            write_clus(init_start, initramfs_data)
+            off = append_dir(dk, off, mklfn("initramfs.img", "INITRAMFIMG", 0x20, init_start, len(initramfs_data)))
         write_clus(krnl_clus, dk)
 
-        # BOOTMGR dir with BOOT.CFG
-        cfg_bytes = b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\vpkernel\r\nautoinit=\\protected\\krnl\\autoinit.exe\r\nshell=\\protected\\gui\\superglue.exe\r\ncmdline=quiet devpath=hardware\r\ndefault_resolution=1280x720\r\n"
+        # bootmgr dir with boot.cfg
+        cfg_bytes = b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\vpkernel\r\ninitramfs=\\protected\\krnl\\initramfs.img\r\nautoinit=\\protected\\krnl\\autoinit.exe\r\nshell=\\protected\\gui\\gman.exe\r\ncmdline=quiet devpath=hardware boot=live\r\ndefault_resolution=1280x720\r\n"
         write_clus(bootcfg_clus, cfg_bytes)
 
         db = bytearray(sec_per_clus * sector_size)
-        db[0:32] = mkentry(".          ", 0x10, bootmgr_clus, 0)
-        db[32:64] = mkentry("..         ", 0x10, protect_clus, 0)
-        db[64:96] = mkentry("BOOT    CFG", 0x20, bootcfg_clus, len(cfg_bytes))
+        off = 0
+        off = append_dir(db, off, mkentry(".          ", 0x10, bootmgr_clus, 0))
+        off = append_dir(db, off, mkentry("..         ", 0x10, protect_clus, 0))
+        off = append_dir(db, off, mklfn("boot.cfg", "BOOT    CFG", 0x20, bootcfg_clus, len(cfg_bytes)))
         write_clus(bootmgr_clus, db)
     
     fat1_off = rsvd_sec * sector_size
@@ -346,7 +402,6 @@ def make_eltorito_iso(efiboot_img_path, output_iso_path):
     # --- LBA 21: efiboot.img data ---
     data_off = efiboot_lba * SECTOR_SIZE
     iso[data_off:data_off+efi_size] = efi_img_bytes
-
     with open(output_iso_path, "wb") as f:
         f.write(iso)
 
@@ -354,6 +409,7 @@ def main():
     parser = argparse.ArgumentParser(description="Create UEFI El Torito Bootable ISO")
     parser.add_argument("--efi", required=True, help="Path to BOOTX64.EFI")
     parser.add_argument("--kernel", required=False, help="Path to kernel.bin")
+    parser.add_argument("--initramfs", required=False, help="Path to initramfs.img")
     parser.add_argument("--iso", required=True, help="Output ISO path")
     args = parser.parse_args()
 
@@ -365,7 +421,27 @@ def main():
         os.makedirs(iso_root, exist_ok=True)
         efiboot_img = os.path.join(iso_root, "efiboot.img")
 
-        make_fat12_esp(efiboot_img, args.efi, args.kernel)
+        make_fat12_esp(efiboot_img, args.efi, args.kernel, args.initramfs)
+
+        # Also populate ISO 9660 directory tree so Rufus "ISO Mode" extraction works on real USB sticks
+        efi_boot_dir = os.path.join(iso_root, "EFI", "BOOT")
+        efi_pseudos_dir = os.path.join(iso_root, "EFI", "pseuDOS")
+        prot_krnl_dir = os.path.join(iso_root, "protected", "krnl")
+        prot_bmgr_dir = os.path.join(iso_root, "protected", "bootmgr")
+        os.makedirs(efi_boot_dir, exist_ok=True)
+        os.makedirs(efi_pseudos_dir, exist_ok=True)
+        os.makedirs(prot_krnl_dir, exist_ok=True)
+        os.makedirs(prot_bmgr_dir, exist_ok=True)
+
+        shutil.copy2(args.efi, os.path.join(efi_boot_dir, "BOOTX64.EFI"))
+        shutil.copy2(args.efi, os.path.join(efi_pseudos_dir, "BOOTX64.EFI"))
+        if args.kernel and os.path.exists(args.kernel):
+            shutil.copy2(args.kernel, os.path.join(efi_pseudos_dir, "vpkernel"))
+            shutil.copy2(args.kernel, os.path.join(prot_krnl_dir, "vpkernel"))
+        if args.initramfs and os.path.exists(args.initramfs):
+            shutil.copy2(args.initramfs, os.path.join(prot_krnl_dir, "initramfs.img"))
+        with open(os.path.join(prot_bmgr_dir, "boot.cfg"), "wb") as bf:
+            bf.write(b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\vpkernel\r\ninitramfs=\\protected\\krnl\\initramfs.img\r\nautoinit=\\protected\\krnl\\autoinit.exe\r\nshell=\\protected\\gui\\gman.exe\r\ncmdline=quiet devpath=hardware boot=live\r\ndefault_resolution=1280x720\r\n")
 
         genisoimage_bin = shutil.which("genisoimage")
         if genisoimage_bin:

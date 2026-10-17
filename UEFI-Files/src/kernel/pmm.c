@@ -67,9 +67,8 @@ void pmm_init(const MemoryMapInfo *mem, const BootInfo *boot_info) {
         }
     }
 
-    /* Round up to at least 1 GB to cover standard system memory */
-    if (g_max_phys_addr < (1024ULL * 1024ULL * 1024ULL)) {
-        g_max_phys_addr = 1024ULL * 1024ULL * 1024ULL;
+    if (g_max_phys_addr == 0) {
+        return;
     }
 
     g_total_pages = g_max_phys_addr / PAGE_SIZE;
@@ -132,6 +131,11 @@ void pmm_init(const MemoryMapInfo *mem, const BootInfo *boot_info) {
     /* Reserve ACPI RSDP Table */
     if (boot_info && boot_info->acpi_rsdp_address) {
         pmm_reserve_range(boot_info->acpi_rsdp_address, 4096);
+    }
+
+    /* Reserve Initramfs Archive */
+    if (boot_info && boot_info->initramfs_base && boot_info->initramfs_size) {
+        pmm_reserve_range(boot_info->initramfs_base, boot_info->initramfs_size);
     }
 
     /* Reserve BootInfo handoff structure */

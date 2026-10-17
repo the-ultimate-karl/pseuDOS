@@ -183,6 +183,7 @@ static int shm_region_has_active_mappings(const shm_region_t *reg) {
 
 static void shm_free_region_if_ready(shm_region_t *reg) {
     if (!reg || !reg->in_use) return;
+    if (reg->is_framebuffer) return;
     /* Never free physical memory while any client holds a mapped virtual address */
     if (shm_region_has_active_mappings(reg)) {
         return;
@@ -202,10 +203,29 @@ static void shm_free_region_if_ready(shm_region_t *reg) {
 
 void shm_update_framebuffer(uint64_t phys_base, size_t new_size) {
     for (int i = 0; i < MAX_SHM_REGIONS; i++) {
-        if (g_shm_regions[i].in_use && g_shm_regions[i].is_framebuffer) {
-            g_shm_regions[i].phys_addr = phys_base;
-            g_shm_regions[i].size = new_size;
-            g_shm_regions[i].num_pages = (new_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        shm_region_t *reg = &g_shm_regions[i];
+        if (reg->in_use && reg->is_framebuffer) {
+            size_t old_pages = reg->num_pages;
+            reg->phys_addr = phys_base;
+            reg->size = new_size;
+            size_t new_pages = (new_size + PAGE_SIZE - 1) / PAGE_SIZE;
+            reg->num_pages = new_pages;
+
+            /* Expand or shrink page mappings for any active client */
+            for (int c = 0; c < MAX_SHM_CLIENTS; c++) {
+                if (reg->clients[c].ref_count > 0 && reg->clients[c].virt_addr != 0) {
+                    process_t *p = process_get_by_pid(reg->clients[c].pid);
+                    uint64_t *pml4 = (p && p->cr3) ? (uint64_t *)(uintptr_t)p->cr3 : vmm_get_kernel_pml4();
+                    uint64_t virt = reg->clients[c].virt_addr;
+                    uint64_t pte_flags = PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_PWT;
+
+                    if (new_pages > old_pages) {
+                        vmm_map_pages(pml4, virt + (old_pages * PAGE_SIZE), phys_base + (old_pages * PAGE_SIZE), new_pages - old_pages, pte_flags);
+                    } else if (new_pages < old_pages) {
+                        vmm_unmap_pages(pml4, virt + (new_pages * PAGE_SIZE), old_pages - new_pages);
+                    }
+                }
+            }
         }
     }
 }

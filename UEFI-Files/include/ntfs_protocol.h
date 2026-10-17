@@ -28,6 +28,7 @@
 #define NTFS_MSG_SCREEN_INFO       14
 #define NTFS_MSG_SET_WIREFRAME     15
 #define NTFS_MSG_WINDOW_RESIZED    16
+#define NTFS_MSG_SCREEN_RESIZED    17
 
 /* Client Roles */
 #define NTFS_ROLE_CLIENT           0
@@ -48,6 +49,7 @@
 #define NTFS_WIN_TASKBAR           0x04
 #define NTFS_WIN_SPLASH            0x08
 #define NTFS_WIN_FIXED_SIZE        0x10
+#define NTFS_WIN_MINIMIZED         0x80000000U
 
 /* Special Key Codes */
 #define NTFS_KEY_WIN               0x90

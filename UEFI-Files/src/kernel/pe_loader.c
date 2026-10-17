@@ -3,8 +3,11 @@
 #include "lib.h"
 #include "klog.h"
 #include "vmm.h"
+#include "pmm.h"
 #include "syscall.h"
 #include "panic.h"
+
+static int g_last_load_from_pmm = 0;
 
 int pe_load_binary(const uint8_t *raw_file, size_t raw_size, void **out_image_base, uint64_t *out_entry_point, size_t *out_image_size) {
     if (!raw_file || raw_size < 0x40 || !out_image_base || !out_entry_point) {
@@ -14,7 +17,7 @@ int pe_load_binary(const uint8_t *raw_file, size_t raw_size, void **out_image_ba
     /* 1. Validate DOS MZ Header */
     if (raw_file[0] != 'M' || raw_file[1] != 'Z') {
         klog_warn("PE loader: missing 'MZ' header signature");
-        return -EINVAL;
+        return -ENOEXEC;
     }
 
     uint32_t pe_offset = *(const uint32_t *)(raw_file + 0x3C);
@@ -22,14 +25,14 @@ int pe_load_binary(const uint8_t *raw_file, size_t raw_size, void **out_image_ba
         raw_file[pe_offset] != 'P' || raw_file[pe_offset + 1] != 'E' ||
         raw_file[pe_offset + 2] != '\0' || raw_file[pe_offset + 3] != '\0') {
         klog_warn("PE loader: missing or corrupted 'PE' signature at offset 0x%X", pe_offset);
-        return -EINVAL;
+        return -ENOEXEC;
     }
 
     /* 2. Validate Architecture */
     uint16_t machine = *(const uint16_t *)(raw_file + pe_offset + 4);
     if (machine != 0x8664) {
         klog_warn("PE loader: unsupported machine type 0x%04X (expected x86_64 0x8664)", machine);
-        return -EINVAL;
+        return -ENOEXEC;
     }
 
     uint16_t num_sections = *(const uint16_t *)(raw_file + pe_offset + 6);
@@ -51,13 +54,29 @@ int pe_load_binary(const uint8_t *raw_file, size_t raw_size, void **out_image_ba
         return -EINVAL;
     }
 
-    /* 3. Allocate In-Memory Execution Buffer */
-    void *image_buffer = kmalloc(size_of_image);
-    if (!image_buffer) {
-        klog_err("PE loader: failed to allocate %u bytes for execution image", size_of_image);
-        return -ENOMEM;
+    /* 3. Allocate 4KB Page-Aligned Execution Buffer and map PTE_USER */
+    size_t img_pages = (size_of_image + PAGE_SIZE - 1) / PAGE_SIZE;
+    void *image_buffer = NULL;
+    uint64_t phys_pages = pmm_alloc_pages(img_pages);
+    if (phys_pages != 0) {
+        image_buffer = (void *)(uintptr_t)phys_pages;
+        g_last_load_from_pmm = 1;
+        memset(image_buffer, 0, img_pages * PAGE_SIZE);
+        vmm_map_pages(vmm_get_kernel_pml4(), phys_pages, phys_pages, img_pages,
+                      PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    } else {
+        image_buffer = kmalloc(size_of_image);
+        if (!image_buffer) {
+            klog_err("PE loader: failed to allocate %u bytes for execution image", size_of_image);
+            return -ENOMEM;
+        }
+        g_last_load_from_pmm = 0;
+        memset(image_buffer, 0, size_of_image);
+        uint64_t start_p = (uint64_t)(uintptr_t)image_buffer & ~0xFFFULL;
+        uint64_t end_p = ((uint64_t)(uintptr_t)image_buffer + size_of_image + PAGE_SIZE - 1) & ~0xFFFULL;
+        vmm_map_pages(vmm_get_kernel_pml4(), start_p, start_p, (end_p - start_p) / PAGE_SIZE,
+                      PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
-    memset(image_buffer, 0, size_of_image);
 
     /* 4. Copy PE Headers */
     size_t copy_hdr = (size_of_headers > raw_size) ? raw_size : size_of_headers;
@@ -128,6 +147,29 @@ int pe_get_last_error(void) {
     return g_pe_last_error;
 }
 
+static int is_singleton_process(const char *name) {
+    if (!name || !name[0]) return 0;
+    const char *base = strrchr(name, '/');
+    if (base) base++;
+    else base = name;
+    const char *bslash = strrchr(base, '\\');
+    if (bslash) base = bslash + 1;
+
+    char tmp[32];
+    strncpy(tmp, base, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    char *dot = strrchr(tmp, '.');
+    if (dot && (strcmp(dot, ".exe") == 0 || strcmp(dot, ".bin") == 0)) {
+        *dot = '\0';
+    }
+
+    return (strcmp(tmp, "ntfs") == 0 ||
+            strcmp(tmp, "lack") == 0 ||
+            strcmp(tmp, "ninds") == 0 ||
+            strcmp(tmp, "gshss") == 0 ||
+            strcmp(tmp, "xshss") == 0);
+}
+
 process_t *pe_spawn_process(const char *name, const char *path, process_privilege_t priv) {
     if (!path) {
         g_pe_last_error = -EINVAL;
@@ -144,6 +186,32 @@ process_t *pe_spawn_process(const char *name, const char *path, process_privileg
         }
     }
     norm_path[j] = '\0';
+
+    const char *proc_name = name;
+    if (!proc_name) {
+        proc_name = strrchr(norm_path, '/');
+        if (proc_name) proc_name++;
+        else proc_name = norm_path;
+    }
+
+    /* Check for duplicate singleton instances (ntfs.exe, lack.exe, ninds.exe, gshss.exe, xshss.exe) */
+    if (is_singleton_process(proc_name) || is_singleton_process(norm_path)) {
+        if (process_is_running(proc_name ? proc_name : norm_path)) {
+            klog_warn("PE spawn: singleton process '%s' is already running; launch denied", proc_name ? proc_name : norm_path);
+            g_pe_last_error = -EEXIST;
+            return NULL;
+        }
+    }
+
+    /* Check for duplicate autoinit instance */
+    if ((strstr(norm_path, "autoinit") != NULL) ||
+        (proc_name && strstr(proc_name, "autoinit") != NULL)) {
+        if (process_has_active_init()) {
+            klog_err("CRITICAL: Detected second instance of autoinit process! (path='%s', proc='%s')",
+                     norm_path, proc_name ? proc_name : "");
+            kernel_panic("unexpected second instance of init process detected!", NULL);
+        }
+    }
 
     vfs_node_t *node = vfs_find_node(norm_path);
     if (!node || node->type != VFS_NODE_FILE || !node->content || node->size == 0) {
@@ -163,35 +231,24 @@ process_t *pe_spawn_process(const char *name, const char *path, process_privileg
         return NULL;
     }
 
-    const char *proc_name = name;
-    if (!proc_name) {
-        proc_name = strrchr(norm_path, '/');
-        if (proc_name) proc_name++;
-        else proc_name = norm_path;
-    }
-
-    /* Check for duplicate autoinit instance */
-    if ((strstr(norm_path, "autoinit") != NULL) ||
-        (proc_name && strstr(proc_name, "autoinit") != NULL)) {
-        if (process_has_active_init()) {
-            klog_err("CRITICAL: Detected second instance of autoinit process! (path='%s', proc='%s')",
-                     norm_path, proc_name ? proc_name : "");
-            kernel_panic("unexpected second instance of init process detected!", NULL);
-        }
-    }
-
-    process_t *proc = process_create(proc_name, (void (*)(void))(uintptr_t)entry_point, priv);
+    int from_pmm = g_last_load_from_pmm;
+    process_t *proc = process_create_user(proc_name, (void (*)(void))(uintptr_t)entry_point, priv,
+                                          image_base, image_size, from_pmm);
     if (!proc) {
         klog_err("PE spawn: failed to create process for '%s'", proc_name);
-        kfree(image_base);
+        if (from_pmm && image_size > 0) {
+            size_t img_pages = (image_size + PAGE_SIZE - 1) / PAGE_SIZE;
+            uint64_t ibase = (uint64_t)(uintptr_t)image_base;
+            vmm_map_pages(vmm_get_kernel_pml4(), ibase, ibase, img_pages, PTE_PRESENT | PTE_WRITABLE);
+            pmm_free_pages(ibase, img_pages);
+        } else {
+            kfree(image_base);
+        }
         g_pe_last_error = -ENOMEM;
         return NULL;
     }
 
-    proc->image_base = image_base;
-    proc->image_size = image_size;
-
-    klog_info("PE spawn: launched PID %u '%s' from %s", proc->pid, proc->name, norm_path);
+    klog_info("PE spawn: launched Ring 3 PID %u '%s' from %s", proc->pid, proc->name, norm_path);
     g_pe_last_error = 0;
     return proc;
 }

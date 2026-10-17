@@ -68,20 +68,20 @@ static int strcasecmp(const char *s1, const char *s2) {
     return (int)((unsigned char)*s1 - (unsigned char)*s2);
 }
 
-/* Memory arena for image decoding */
-#define ARENA_SIZE (16 * 1024 * 1024)
+/* Memory arena for image decoding (36 MB fits 1440p decodes while fitting in 128 MB kernel heap) */
+#define ARENA_SIZE (36 * 1024 * 1024)
 static uint8_t s_arena[ARENA_SIZE];
 static size_t s_arena_offset = 0;
 
 /* Dedicated static file buffer for reading wallpaper files from VFS */
-#define MAX_WALLPAPER_FILE_BYTES (1024 * 1024)
+#define MAX_WALLPAPER_FILE_BYTES (8 * 1024 * 1024)
 static uint8_t s_file_buf[MAX_WALLPAPER_FILE_BYTES];
 
 typedef struct {
     size_t size;
 } alloc_hdr_t;
 
-static void *my_malloc(size_t sz) {
+static void *arena_alloc(size_t sz) {
     size_t total = sizeof(alloc_hdr_t) + ((sz + 15) & ~15);
     if (s_arena_offset + total > ARENA_SIZE) return NULL;
     alloc_hdr_t *hdr = (alloc_hdr_t *)(s_arena + s_arena_offset);
@@ -90,17 +90,17 @@ static void *my_malloc(size_t sz) {
     return (void *)(hdr + 1);
 }
 
-static void *my_realloc(void *ptr, size_t sz) {
-    if (!ptr) return my_malloc(sz);
+static void *arena_realloc(void *ptr, size_t sz) {
+    if (!ptr) return arena_alloc(sz);
     alloc_hdr_t *hdr = ((alloc_hdr_t *)ptr) - 1;
-    void *new_ptr = my_malloc(sz);
+    void *new_ptr = arena_alloc(sz);
     if (!new_ptr) return NULL;
     size_t copy_sz = (hdr->size < sz) ? hdr->size : sz;
     memcpy(new_ptr, ptr, copy_sz);
     return new_ptr;
 }
 
-static void my_free(void *ptr) {
+static void arena_free(void *ptr) {
     (void)ptr;
 }
 
@@ -116,9 +116,9 @@ static void arena_reset(void) {
 #define STBI_ONLY_BMP
 #define STBI_NO_SIMD
 #define STBI_NO_THREAD_LOCALS
-#define STBI_MALLOC(sz)           my_malloc(sz)
-#define STBI_REALLOC(p,newsz)     my_realloc(p,newsz)
-#define STBI_FREE(p)              my_free(p)
+#define STBI_MALLOC(sz)           arena_alloc(sz)
+#define STBI_REALLOC(p,newsz)     arena_realloc(p,newsz)
+#define STBI_FREE(p)              arena_free(p)
 #define STBI_ASSERT(x)            ((void)0)
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -195,13 +195,14 @@ static const char *g_menu_items[] = {
     "Calculator",
     "Notepad",
     "Paint",
+    "Image Viewer",
     "Digital Clock",
     "Reboot",
     "Shutdown"
 };
-#define MENU_ITEM_COUNT 9
+#define MENU_ITEM_COUNT 10
 #define MENU_WIDTH 160
-#define MENU_HEIGHT 202
+#define MENU_HEIGHT 223
 
 static void close_desktop_error(void);
 static void close_context_menu(void);
@@ -325,7 +326,7 @@ static void draw_background(void) {
         }
         int wx = (int)g_screen_width - 320;
         int wy = (int)g_screen_height - 80;
-        gfx_draw_string(g_bg_client.pixels, g_screen_width, g_screen_height, wx, wy, "pseuDOS v0.7.0", COLOR_WHITE, 0, 1);
+        gfx_draw_string(g_bg_client.pixels, g_screen_width, g_screen_height, wx, wy, "pseuDOS v0.7.1", COLOR_WHITE, 0, 1);
         gfx_draw_string(g_bg_client.pixels, g_screen_width, g_screen_height, wx, wy + 20, "Graphical Shell Subsystem", COLOR_BTN_LIGHT, 0, 1);
     }
 
@@ -558,6 +559,111 @@ static void draw_psi_logo(uint32_t *buf, uint32_t buf_w, uint32_t buf_h, int x0,
     }
 }
 
+#define MAX_TASKBAR_APPS 16
+
+typedef struct {
+    uint32_t window_id;
+    char title[32];
+    uint8_t is_focused;
+    uint8_t is_minimized;
+    int32_t btn_x;
+    int32_t btn_w;
+} taskbar_app_t;
+
+static taskbar_app_t g_tb_apps[MAX_TASKBAR_APPS];
+static int g_tb_app_count = 0;
+
+static int find_taskbar_app(uint32_t wid) {
+    for (int i = 0; i < g_tb_app_count; i++) {
+        if (g_tb_apps[i].window_id == wid) return i;
+    }
+    return -1;
+}
+
+static void add_taskbar_app(uint32_t wid, const char *title, uint32_t flags) {
+    if (wid == 0) return;
+    if (flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR | NTFS_WIN_SPLASH | NTFS_WIN_FRAMELESS)) {
+        return;
+    }
+    int idx = find_taskbar_app(wid);
+    if (idx >= 0) {
+        if (title && title[0]) {
+            ntfs_strncpy(g_tb_apps[idx].title, title, sizeof(g_tb_apps[idx].title) - 1);
+            g_tb_apps[idx].title[sizeof(g_tb_apps[idx].title) - 1] = '\0';
+        }
+        return;
+    }
+    if (g_tb_app_count >= MAX_TASKBAR_APPS) return;
+
+    taskbar_app_t *app = &g_tb_apps[g_tb_app_count++];
+    memset(app, 0, sizeof(*app));
+    app->window_id = wid;
+    if (title && title[0]) {
+        ntfs_strncpy(app->title, title, sizeof(app->title) - 1);
+        app->title[sizeof(app->title) - 1] = '\0';
+    } else {
+        ntfs_strncpy(app->title, "Window", sizeof(app->title) - 1);
+    }
+    app->is_focused = 1;
+    app->is_minimized = 0;
+
+    for (int i = 0; i < g_tb_app_count - 1; i++) {
+        g_tb_apps[i].is_focused = 0;
+    }
+}
+
+static void remove_taskbar_app(uint32_t wid) {
+    int idx = find_taskbar_app(wid);
+    if (idx < 0) return;
+    for (int i = idx; i < g_tb_app_count - 1; i++) {
+        g_tb_apps[i] = g_tb_apps[i + 1];
+    }
+    g_tb_app_count--;
+}
+
+static void set_taskbar_app_focus(uint32_t wid) {
+    for (int i = 0; i < g_tb_app_count; i++) {
+        if (g_tb_apps[i].window_id == wid) {
+            g_tb_apps[i].is_focused = 1;
+            g_tb_apps[i].is_minimized = 0;
+        } else {
+            g_tb_apps[i].is_focused = 0;
+        }
+    }
+}
+
+static void set_taskbar_app_geometry(uint32_t wid, uint32_t flags) {
+    int idx = find_taskbar_app(wid);
+    if (idx >= 0) {
+        if (flags & NTFS_WIN_MINIMIZED) {
+            g_tb_apps[idx].is_minimized = 1;
+            g_tb_apps[idx].is_focused = 0;
+        } else {
+            g_tb_apps[idx].is_minimized = 0;
+        }
+    }
+}
+
+static void draw_app_icon(uint32_t *buf, uint32_t buf_w, uint32_t buf_h, int x0, int y0) {
+    if (!buf) return;
+    int iw = 12;
+    int ih = 11;
+    for (int y = 0; y < ih; y++) {
+        for (int x = 0; x < iw; x++) {
+            int px = x0 + x;
+            int py = y0 + y;
+            if (px < 0 || (uint32_t)px >= buf_w || py < 0 || (uint32_t)py >= buf_h) continue;
+            if (x == 0 || x == iw - 1 || y == 0 || y == ih - 1) {
+                buf[py * buf_w + px] = COLOR_BTN_DKSHADOW;
+            } else if (y <= 2) {
+                buf[py * buf_w + px] = COLOR_WIN_TITLE;
+            } else {
+                buf[py * buf_w + px] = COLOR_WHITE;
+            }
+        }
+    }
+}
+
 static void draw_taskbar(void) {
     if (!g_tb_client.pixels) return;
 
@@ -586,8 +692,9 @@ static void draw_taskbar(void) {
     /* "Start" text */
     gfx_draw_string(g_tb_client.pixels, w, h, sb_x + 19, sb_y + 3, "Start", COLOR_BLACK, 0, 1);
 
-    /* Quick status info in middle */
-    gfx_draw_string(g_tb_client.pixels, w, h, 80, 6, "pseuDOS", COLOR_BTN_SHADOW, 0, 1);
+    /* Groove separator after Start button */
+    gfx_fill_rect(g_tb_client.pixels, w, h, 68, 3, 1, 22, COLOR_BTN_SHADOW);
+    gfx_fill_rect(g_tb_client.pixels, w, h, 69, 3, 1, 22, COLOR_WHITE);
 
     /* System Tray at right: (w - 78, 3, 74, 22) */
     int tray_x = (int)w - 78;
@@ -612,6 +719,87 @@ static void draw_taskbar(void) {
     time_str[8] = '\0';
 
     gfx_draw_string(g_tb_client.pixels, w, h, tray_x + 6, tray_y + 3, time_str, COLOR_TEXT, 0, 1);
+
+    /* App Buttons Area: between separator (x=73) and tray (x=tray_x - 5) */
+    int app_area_x = 73;
+    int max_right = tray_x - 5;
+    int app_area_w = max_right - app_area_x;
+
+    if (g_tb_app_count == 0) {
+        /* No apps running: show brand text */
+        gfx_draw_string(g_tb_client.pixels, w, h, 80, 6, "pseuDOS", COLOR_BTN_SHADOW, 0, 1);
+    } else if (app_area_w > 50) {
+        int max_btn_w = 150;
+        int spacing = 3;
+        int total_spacing = (g_tb_app_count - 1) * spacing;
+        int btn_w = (app_area_w - total_spacing) / g_tb_app_count;
+        if (btn_w > max_btn_w) btn_w = max_btn_w;
+        if (btn_w < 45) btn_w = 45;
+
+        for (int k = 0; k < g_tb_app_count; k++) {
+            int bx = app_area_x + k * (btn_w + spacing);
+            int by = 3;
+            int bw = btn_w;
+            int bh = 22;
+
+            if (bx + bw > max_right) {
+                bw = max_right - bx;
+                if (bw < 20) {
+                    g_tb_apps[k].btn_x = 0;
+                    g_tb_apps[k].btn_w = 0;
+                    break;
+                }
+            }
+            g_tb_apps[k].btn_x = bx;
+            g_tb_apps[k].btn_w = bw;
+
+            int is_active = (g_tb_apps[k].is_focused && !g_tb_apps[k].is_minimized);
+
+            if (is_active) {
+                /* Sunken bevel */
+                gfx_draw_bevel(g_tb_client.pixels, w, h, bx, by, bw, bh, 1);
+                /* Classic 2x2 dither pattern for active button */
+                for (int py = by + 2; py < by + bh - 2; py++) {
+                    uint32_t *row = &g_tb_client.pixels[py * w];
+                    for (int px = bx + 2; px < bx + bw - 2; px++) {
+                        row[px] = ((px + py) & 1) ? COLOR_BTN_LIGHT : COLOR_WHITE;
+                    }
+                }
+                /* Shifted content (+1 px down and right) */
+                draw_app_icon(g_tb_client.pixels, w, h, bx + 5, by + 6);
+            } else {
+                /* Raised bevel & button face */
+                gfx_fill_rect(g_tb_client.pixels, w, h, bx, by, bw, bh, COLOR_BTN_FACE);
+                gfx_draw_bevel(g_tb_client.pixels, w, h, bx, by, bw, bh, 0);
+                draw_app_icon(g_tb_client.pixels, w, h, bx + 4, by + 5);
+            }
+
+            /* Draw title text */
+            int tx = bx + 19 + (is_active ? 1 : 0);
+            int ty = by + 3 + (is_active ? 1 : 0);
+            int avail_w = bw - 24;
+            if (avail_w > 8) {
+                int max_chars = avail_w / 8;
+                if (max_chars < 1) max_chars = 1;
+                char disp[32];
+                size_t tlen = strlen(g_tb_apps[k].title);
+                if ((int)tlen <= max_chars) {
+                    ntfs_strncpy(disp, g_tb_apps[k].title, sizeof(disp) - 1);
+                    disp[sizeof(disp) - 1] = '\0';
+                } else {
+                    int c = max_chars;
+                    if (c > 2) c -= 2;
+                    for (int ci = 0; ci < c && ci < (int)sizeof(disp) - 3; ci++) {
+                        disp[ci] = g_tb_apps[k].title[ci];
+                    }
+                    disp[c] = '.';
+                    disp[c + 1] = '.';
+                    disp[c + 2] = '\0';
+                }
+                gfx_draw_string(g_tb_client.pixels, w, h, tx, ty, disp, COLOR_BLACK, 0, 1);
+            }
+        }
+    }
 
     ntfs_client_damage(&g_tb_client, 0, 0, w, h);
 }
@@ -718,12 +906,15 @@ static void launch_app(int item_idx) {
             ret = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/apps/paint.exe", 0, 0, 0, 0);
             break;
         case 6:
-            ret = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/apps/clock.exe", 0, 0, 0, 0);
+            ret = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/apps/view.exe", 0, 0, 0, 0);
             break;
         case 7:
+            ret = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/apps/clock.exe", 0, 0, 0, 0);
+            break;
+        case 8:
             syscall(SYS_REBOOT, 0, 0, 0, 0, 0);
             return;
-        case 8:
+        case 9:
             syscall(SYS_SHUTDOWN, 0, 0, 0, 0, 0);
             return;
         default:
@@ -878,6 +1069,52 @@ static void toggle_start_menu(void) {
     draw_taskbar();
 }
 
+static void handle_desktop_screen_resized(uint32_t new_w, uint32_t new_h) {
+    if (new_w == 0 || new_h == 0) return;
+    g_screen_width = new_w;
+    g_screen_height = new_h;
+
+    /* Dismiss open menus/dialogs */
+    if (g_err_open) close_desktop_error();
+    if (g_wall_dlg_open) close_wallpaper_dialog();
+    if (g_menu_open) toggle_start_menu();
+    if (g_ctx_open) close_context_menu();
+
+    /* 1. Update desktop background surface geometry */
+    g_bg_client.width = g_screen_width;
+    g_bg_client.height = g_screen_height;
+    ntfs_msg_t bg_geom;
+    memset(&bg_geom, 0, sizeof(bg_geom));
+    bg_geom.type = NTFS_MSG_SET_GEOMETRY;
+    bg_geom.window_id = g_bg_client.window_id;
+    bg_geom.x = 0;
+    bg_geom.y = 0;
+    bg_geom.width = g_screen_width;
+    bg_geom.height = g_screen_height;
+    bg_geom.shm_id = (uint32_t)g_bg_client.shm_id;
+    bg_geom.flags = 1;
+    syscall(SYS_SEND, g_bg_client.sock, (uint64_t)(uintptr_t)&bg_geom, sizeof(bg_geom), 0, 0);
+
+    /* 2. Reposition taskbar to bottom of newly sized screen */
+    g_tb_client.width = g_screen_width;
+    g_tb_client.height = TASKBAR_HEIGHT;
+    ntfs_msg_t tb_geom;
+    memset(&tb_geom, 0, sizeof(tb_geom));
+    tb_geom.type = NTFS_MSG_SET_GEOMETRY;
+    tb_geom.window_id = g_tb_client.window_id;
+    tb_geom.x = 0;
+    tb_geom.y = (int32_t)g_screen_height - (int32_t)TASKBAR_HEIGHT;
+    tb_geom.width = g_screen_width;
+    tb_geom.height = TASKBAR_HEIGHT;
+    tb_geom.shm_id = (uint32_t)g_tb_client.shm_id;
+    tb_geom.flags = 1000;
+    syscall(SYS_SEND, g_tb_client.sock, (uint64_t)(uintptr_t)&tb_geom, sizeof(tb_geom), 0, 0);
+
+    /* 3. Re-render desktop background and taskbar */
+    draw_background();
+    draw_taskbar();
+}
+
 void gshss_main(void) {
     puts("[gshss] Graphical Shell Subsystem starting up...\n");
 
@@ -955,7 +1192,9 @@ void gshss_main(void) {
         /* Check background events (dismiss menus or open context menu on right click) */
         ntfs_msg_t bg_msg;
         while (ntfs_client_poll_event(&g_bg_client, &bg_msg)) {
-            if (bg_msg.type == NTFS_MSG_MOUSE_EVENT) {
+            if (bg_msg.type == NTFS_MSG_SCREEN_RESIZED) {
+                handle_desktop_screen_resized(bg_msg.width, bg_msg.height);
+            } else if (bg_msg.type == NTFS_MSG_MOUSE_EVENT) {
                 uint8_t left_down = (bg_msg.buttons_or_key & NTFS_MOUSE_BTN_LEFT);
                 uint8_t right_down = (bg_msg.buttons_or_key & NTFS_MOUSE_BTN_RIGHT);
                 uint8_t left_click = (left_down && !g_prev_bg_left);
@@ -980,7 +1219,21 @@ void gshss_main(void) {
         /* Check taskbar events */
         ntfs_msg_t tb_msg;
         while (ntfs_client_poll_event(&g_tb_client, &tb_msg)) {
-            if (tb_msg.type == NTFS_MSG_MOUSE_EVENT) {
+            if (tb_msg.type == NTFS_MSG_SCREEN_RESIZED) {
+                continue;
+            } else if (tb_msg.type == NTFS_MSG_CREATE_WINDOW) {
+                add_taskbar_app(tb_msg.window_id, tb_msg.title, tb_msg.flags);
+                draw_taskbar();
+            } else if (tb_msg.type == NTFS_MSG_DESTROY_WINDOW || tb_msg.type == NTFS_MSG_WINDOW_DESTROYED) {
+                remove_taskbar_app(tb_msg.window_id);
+                draw_taskbar();
+            } else if (tb_msg.type == NTFS_MSG_FOCUS_WINDOW) {
+                set_taskbar_app_focus(tb_msg.window_id);
+                draw_taskbar();
+            } else if (tb_msg.type == NTFS_MSG_SET_GEOMETRY) {
+                set_taskbar_app_geometry(tb_msg.window_id, tb_msg.flags);
+                draw_taskbar();
+            } else if (tb_msg.type == NTFS_MSG_MOUSE_EVENT) {
                 uint8_t left_down = (tb_msg.buttons_or_key & NTFS_MOUSE_BTN_LEFT);
                 uint8_t left_click = (left_down && !g_prev_tb_left);
                 if (left_click) {
@@ -990,6 +1243,33 @@ void gshss_main(void) {
                     /* Check Start Button click at (3, 3, 62, 22) */
                     if (tb_msg.x >= 3 && tb_msg.x <= 65 && tb_msg.y >= 3 && tb_msg.y <= 25) {
                         toggle_start_menu();
+                    } else {
+                        /* Check clicks on open app buttons */
+                        int clicked_app = -1;
+                        for (int k = 0; k < g_tb_app_count; k++) {
+                            int bx = g_tb_apps[k].btn_x;
+                            int bw = g_tb_apps[k].btn_w;
+                            if (bw > 0 && tb_msg.x >= bx && tb_msg.x < bx + bw && tb_msg.y >= 3 && tb_msg.y <= 25) {
+                                clicked_app = k;
+                                break;
+                            }
+                        }
+                        if (clicked_app >= 0) {
+                            if (g_menu_open) toggle_start_menu();
+                            uint32_t target_wid = g_tb_apps[clicked_app].window_id;
+                            ntfs_msg_t fmsg;
+                            memset(&fmsg, 0, sizeof(fmsg));
+                            fmsg.type = NTFS_MSG_FOCUS_WINDOW;
+                            fmsg.window_id = target_wid;
+                            if (g_tb_apps[clicked_app].is_focused && !g_tb_apps[clicked_app].is_minimized) {
+                                /* Active window button clicked -> Minimize it */
+                                fmsg.flags = 1;
+                            } else {
+                                /* Inactive or minimized window button clicked -> Restore and focus it */
+                                fmsg.flags = 0;
+                            }
+                            syscall(SYS_SEND, g_tb_client.sock, (uint64_t)(uintptr_t)&fmsg, sizeof(fmsg), 0, 0);
+                        }
                     }
                 }
                 g_prev_tb_left = left_down;

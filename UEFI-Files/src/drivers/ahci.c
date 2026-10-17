@@ -2,6 +2,7 @@
 #include "drivers.h"
 #include "io.h"
 #include "lib.h"
+#include "vmm.h"
 
 /* PCI Configuration I/O Ports */
 #define PCI_CONFIG_ADDRESS 0xCF8
@@ -198,7 +199,7 @@ static int ahci_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t cou
     /* Issue command to slot 0 */
     port->ci = 1;
 
-    int timeout = 2000000;
+    int timeout = 10000000;
     while ((port->ci & 1) && --timeout > 0) {
         if (port->is & (1 << 30)) { /* Task File Error */
             return -1;
@@ -206,6 +207,7 @@ static int ahci_read_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t cou
         if (port->tfd & (1 << 0)) { /* ERR bit */
             return -1;
         }
+        __asm__ volatile ("pause");
     }
 
     if (timeout == 0 || (port->is & (1 << 30)) || (port->tfd & (1 << 0))) {
@@ -265,7 +267,7 @@ static int ahci_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t co
     /* Issue command to slot 0 */
     port->ci = 1;
 
-    int timeout = 2000000;
+    int timeout = 10000000;
     while ((port->ci & 1) && --timeout > 0) {
         if (port->is & (1 << 30)) { /* Task File Error */
             return -1;
@@ -273,6 +275,7 @@ static int ahci_write_sectors_impl(StorageDevice *dev, uint64_t lba, uint32_t co
         if (port->tfd & (1 << 0)) { /* ERR bit */
             return -1;
         }
+        __asm__ volatile ("pause");
     }
 
     if (timeout == 0 || (port->is & (1 << 30)) || (port->tfd & (1 << 0))) {
@@ -423,12 +426,18 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     memset(ident_buf, 0, sizeof(ident_buf));
 
     port->is = (uint32_t)-1;
+    port->serr = (uint32_t)-1;
     cmd_headers[0].cfl = sizeof(uint32_t) * 5 / 4;
     cmd_headers[0].w = 0;
     cmd_headers[0].prdtl = 1;
 
-    cmd_tables->prdt_entry[0].dba = (uint32_t)(uintptr_t)ident_buf;
-    cmd_tables->prdt_entry[0].dbau = (uint32_t)(((uint64_t)(uintptr_t)ident_buf) >> 32);
+    uint64_t ident_phys = (uint64_t)(uintptr_t)ident_buf;
+    if (ident_phys >= 0xFFFF800000000000ULL) {
+        ident_phys -= 0xFFFF800000000000ULL;
+    }
+
+    cmd_tables->prdt_entry[0].dba = (uint32_t)ident_phys;
+    cmd_tables->prdt_entry[0].dbau = (uint32_t)(ident_phys >> 32);
     cmd_tables->prdt_entry[0].dbc = 512 - 1;
     cmd_tables->prdt_entry[0].i = 1;
 
@@ -436,17 +445,23 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     fis[0] = 0x27;
     fis[1] = 1 << 7;
     fis[2] = ATA_CMD_IDENTIFY;
+    fis[7] = 0;
 
     port->ci = 1;
-    int timeout = 500000;
-    while ((port->ci & 1) && --timeout > 0);
+    int timeout = 10000000;
+    while ((port->ci & 1) && --timeout > 0) {
+        if ((port->is & (1 << 30)) || (port->tfd & (1 << 0))) {
+            break;
+        }
+        __asm__ volatile ("pause");
+    }
 
     char model[41];
     memset(model, 0, sizeof(model));
 
     uint64_t total_sectors = 0;
 
-    if (timeout > 0 && !(port->is & (1 << 30))) {
+    if (timeout > 0 && !(port->is & (1 << 30)) && !(port->tfd & (1 << 0))) {
         /* Extract ATA Model String (Words 27-46, bytes swapped) */
         for (int i = 0; i < 20; i++) {
             uint16_t word = ident_buf[27 + i];
@@ -466,7 +481,7 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
         }
     } else {
         strcpy(model, "SATA Hard Disk");
-        total_sectors = 1048576; /* Standard fallback */
+        total_sectors = 1024000; /* 500 MiB safe fallback */
     }
 
     if (model[0] == '\0') {
@@ -493,7 +508,7 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     else strcpy(dev.bus_speed, "SATA 6.0 Gbps");
 
     dev.type = STORAGE_TYPE_INTERNAL_SATA;
-    dev.total_sectors = total_sectors > 0 ? total_sectors : 1048576;
+    dev.total_sectors = total_sectors > 0 ? total_sectors : 1024000;
     dev.sector_size = 512;
     dev.pci_bus = bus;
     dev.pci_slot = slot;
@@ -529,10 +544,17 @@ void ahci_init(void) {
                     pci_write16((uint8_t)bus, slot, func, 0x04, (uint16_t)(cmd_reg | 0x06));
 
                     /* Read BAR5 (ABAR) */
-                    uint32_t abar_phys = pci_read32((uint8_t)bus, slot, func, 0x24) & 0xFFFFFFF0;
+                    uint32_t abar_raw = pci_read32((uint8_t)bus, slot, func, 0x24);
+                    if (abar_raw == 0 || abar_raw == 0xFFFFFFFF || (abar_raw & 1)) continue;
+                    uint64_t abar_phys = (uint64_t)(abar_raw & 0xFFFFFFF0U);
                     if (abar_phys == 0) continue;
 
-                    HbaMem *hba = (HbaMem *)(uintptr_t)abar_phys;
+                    uint64_t abar_page = abar_phys & ~0xFFFULL;
+                    uint64_t abar_virt = KERNEL_VIRTUAL_BASE + abar_page;
+                    vmm_map_pages(vmm_get_kernel_pml4(), abar_virt, abar_page, 4, PTE_WRITABLE | PTE_PCD | PTE_PWT);
+                    vmm_map_pages(vmm_get_kernel_pml4(), abar_page, abar_page, 4, PTE_WRITABLE | PTE_PCD | PTE_PWT);
+
+                    HbaMem *hba = (HbaMem *)(uintptr_t)(abar_virt + (abar_phys & 0xFFFULL));
 
                     /* BIOS/OS Handoff (BOHC) if supported */
                     if (hba->cap2 & (1 << 0)) {

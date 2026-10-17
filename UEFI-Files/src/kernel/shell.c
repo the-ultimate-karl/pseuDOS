@@ -75,9 +75,8 @@ void cmd_attached_drives(const char *arg) {
     int show_external = 0;
 
     if (!arg || arg[0] == '\0') {
-        TargetFilterMode cur = storage_get_target_mode();
-        if (cur == TARGET_MODE_INTERNAL) show_internal = 1;
-        else show_external = 1;
+        show_internal = 1;
+        show_external = 1;
     } else if (strcmp(arg, "--internal") == 0) {
         show_internal = 1;
     } else if (strcmp(arg, "--external") == 0) {
@@ -235,7 +234,9 @@ void cmd_flash(const char *arg) {
     console_puts("\n");
     int res = gpt_fat32_format_and_install(selected_dev, install_progress_handler);
     if (res != 0) {
-        console_puts("flash: fatal error: installation failed due to hardware disk write error!\n");
+        static char err_screen[1536];
+        flash_format_error_screen(err_screen, sizeof(err_screen), selected_dev);
+        console_puts(err_screen);
         return;
     }
 
@@ -308,16 +309,6 @@ void cmd_screenres(const char *arg) {
     int res = fb_set_resolution((uint32_t)target_w, (uint32_t)target_h);
     if (res == 0) {
         console_printf("screenres: successfully switched resolution to %ux%u\n", (uint32_t)target_w, (uint32_t)target_h);
-        /* If GUI display server (ntfs.exe) is running, kill it so superglue can orchestrate a clean restart with new screen dimensions */
-        for (int s = 0; s < MAX_PROCESSES; s++) {
-            process_t *p = process_get_by_slot(s);
-            if (p && p->state != PROCESS_STATE_UNUSED && p->state != PROCESS_STATE_KILLED) {
-                if (strstr(p->name, "ntfs") != NULL) {
-                    process_kill(p->pid);
-                    break;
-                }
-            }
-        }
         return;
     }
 
@@ -1092,8 +1083,8 @@ void shell_run(const BootInfo *boot_info) {
     char prompt_buf[512];
     char prompt_path[256];
 
-    console_puts("pseuDOS kernel v0.5.4-baremetal (x86_64 uefi / bare-metal)\n");
-    console_puts("what's new (kernel version 0.5.4):\n");
+    console_puts("pseuDOS kernel v0.7.1-gui (x86_64 uefi / bare-metal)\n");
+    console_puts("what's new (kernel version 0.7.1-gui):\n");
     console_puts("- fast text-buffer console scrolling & 64-bit memory copy routines (memcpy/memmove/memset)\n");
     console_puts("- dynamic PE32+ base relocation engine in bootloader (.reloc DIR64 / HIGHLOW)\n");
     console_puts("- full 256-vector assembly ISR dispatch table with CPU exception stack normalization\n");

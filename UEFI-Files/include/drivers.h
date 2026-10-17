@@ -48,6 +48,7 @@ char keyboard_getchar_nonblock(void);
 int keyboard_has_char(void);
 void keyboard_readline(char *buffer, size_t max_len, const char *prompt);
 void keyboard_isr_handler(void);
+void keyboard_post_scancode(uint8_t scancode);
 
 /* Mouse Input Driver */
 #include "mice.h"
@@ -67,5 +68,9 @@ void pci_write_config_32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset
 /* Bare-metal Power Management */
 void acpi_reboot(void);
 void acpi_shutdown(void);
+
+/* USB Subsystem */
+void usb_storage_init(void);
+void usb_hid_poll(void);
 
 #endif /* DRIVERS_H */

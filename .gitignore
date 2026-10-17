@@ -15,3 +15,5 @@ UEFI-Files/build/disks/
 __pycache__/
 *.gitignore
 AGENTS.md
+/*.png
+UEFI-Files/build/*.png

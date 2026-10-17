@@ -47,6 +47,9 @@ typedef struct process {
 
     void *image_base;
     size_t image_size;
+    int is_user;
+    int image_from_pmm;
+    int user_stack_from_pmm;
 
     void (*entry)(void);
     int exit_code;
@@ -60,6 +63,8 @@ typedef struct process {
 /* Core Process API */
 void process_init(void);
 process_t *process_create(const char *name, void (*entry)(void), process_privilege_t priv);
+process_t *process_create_user(const char *name, void (*entry)(void), process_privilege_t priv,
+                               void *image_base, size_t image_size, int image_from_pmm);
 process_t *process_get_current(void);
 void process_set_current(process_t *proc);
 process_t *process_get_by_pid(uint32_t pid);
@@ -70,6 +75,7 @@ void process_exit(int exit_code);
 void process_dump_list(void);
 void process_free_resources(process_t *proc);
 int process_has_active_init(void);
+int process_is_running(const char *name);
 void system_shutdown_sequence(int is_reboot);
 
 #endif /* PROCESS_H */

@@ -63,6 +63,8 @@ typedef struct {
     uint32_t flags;
     char title[32];
     int has_geometry;
+    int is_maximized;
+    int is_minimized;
 } lack_surface_t;
 
 static lack_surface_t g_surfaces[MAX_WINDOWS];
@@ -87,7 +89,7 @@ static void render_scene(int sock) {
     int order[MAX_WINDOWS];
     int count = 0;
     for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (g_surfaces[i].active && g_surfaces[i].pixels && g_surfaces[i].has_geometry) {
+        if (g_surfaces[i].active && g_surfaces[i].pixels && g_surfaces[i].has_geometry && !g_surfaces[i].is_minimized) {
             order[count++] = i;
         }
     }
@@ -135,6 +137,37 @@ static void render_scene(int sock) {
 
             int bx = sx + sw - 17;
             int by = sy - TITLEBAR_HEIGHT + 5;
+
+            /* Minimize button [_] */
+            int min_btn = bx - 32;
+            gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, min_btn, by, 14, 14, COLOR_BTN_FACE);
+            gfx_draw_bevel(cur_canvas, g_screen_width, g_screen_height, min_btn, by, 14, 14, 0);
+            gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, min_btn + 3, by + 9, 8, 2, COLOR_BLACK);
+
+            /* Maximize/Restore button */
+            int mx_btn = bx - 16;
+            gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn, by, 14, 14, COLOR_BTN_FACE);
+            gfx_draw_bevel(cur_canvas, g_screen_width, g_screen_height, mx_btn, by, 14, 14, 0);
+            if (surf->is_maximized) {
+                /* Classic dual overlapping restore boxes */
+                /* Back box */
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 4, by + 2, 7, 2, COLOR_BLACK);
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 10, by + 2, 1, 6, COLOR_BLACK);
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 8, by + 7, 3, 1, COLOR_BLACK);
+                /* Front box */
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 2, by + 5, 7, 2, COLOR_BLACK);
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 2, by + 5, 2, 6, COLOR_BLACK);
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 8, by + 5, 2, 6, COLOR_BLACK);
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 2, by + 10, 7, 1, COLOR_BLACK);
+            } else {
+                /* Single maximize box outline with thick top bar */
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 2, by + 2, 10, 2, COLOR_BLACK);
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 2, by + 2, 2, 9, COLOR_BLACK);
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 10, by + 2, 2, 9, COLOR_BLACK);
+                gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, mx_btn + 2, by + 10, 10, 1, COLOR_BLACK);
+            }
+
+            /* Close button [X] */
             gfx_fill_rect(cur_canvas, g_screen_width, g_screen_height, bx, by, 14, 14, COLOR_BTN_FACE);
             gfx_draw_bevel(cur_canvas, g_screen_width, g_screen_height, bx, by, 14, 14, 0);
             gfx_draw_char(cur_canvas, g_screen_width, g_screen_height, bx + 3, by - 1, 'X', COLOR_BLACK, 0, 1);
@@ -273,8 +306,8 @@ void lack_main(void) {
         }
     }
 
-    /* 3. Allocate shared composition canvas (double buffered) */
-    size_t canvas_bytes = (size_t)g_screen_width * (size_t)g_screen_height * 4;
+    /* 3. Allocate shared composition canvas (double buffered pre-sized to 2560x1440) */
+    size_t canvas_bytes = 2560ULL * 1440ULL * 4;
     g_canvas_shm_id = (int)syscall(SYS_SHM_CREATE, (uint64_t)(uintptr_t)"shm:lack_canvas", canvas_bytes * 2, 0, 0, 0);
     if (g_canvas_shm_id < 0) {
         puts("[lack] ERROR: could not allocate shm:lack_canvas\n");
@@ -391,8 +424,23 @@ void lack_main(void) {
                                 g_surfaces[i].y = msg.y;
                                 if (msg.width > 0) g_surfaces[i].width = msg.width;
                                 if (msg.height > 0) g_surfaces[i].height = msg.height;
-                                g_surfaces[i].z_order = (int)msg.flags;
+                                if (msg.shm_id > 0 && (int)msg.shm_id != g_surfaces[i].shm_id) {
+                                    if (g_surfaces[i].pixels) {
+                                        syscall(SYS_SHM_UNMAP, (uint64_t)(uintptr_t)g_surfaces[i].pixels, 0, 0, 0, 0);
+                                    }
+                                    g_surfaces[i].shm_id = (int)msg.shm_id;
+                                    g_surfaces[i].pixels = (uint32_t *)(uintptr_t)syscall(SYS_SHM_MAP, msg.shm_id, 0, SHM_READ, 0, 0);
+                                }
+                                if (!(g_surfaces[i].flags & (NTFS_WIN_BACKGROUND | NTFS_WIN_TASKBAR))) {
+                                    g_surfaces[i].is_minimized = ((msg.flags & NTFS_WIN_MINIMIZED) != 0);
+                                } else {
+                                    g_surfaces[i].is_minimized = 0;
+                                }
+                                g_surfaces[i].z_order = (int)(msg.flags & ~NTFS_WIN_MINIMIZED);
                                 g_surfaces[i].has_geometry = 1;
+                                g_surfaces[i].is_maximized = (g_surfaces[i].x <= (int)BORDER_WIDTH &&
+                                                              g_surfaces[i].y <= (int)TITLEBAR_HEIGHT &&
+                                                              g_surfaces[i].width >= g_screen_width - 2 * BORDER_WIDTH);
                                 needs_redraw = 1;
                                 break;
                             }
@@ -421,6 +469,33 @@ void lack_main(void) {
                         } else {
                             g_wireframe_active = 0;
                         }
+                        needs_redraw = 1;
+                        break;
+                    }
+
+                    case NTFS_MSG_SCREEN_RESIZED: {
+                        g_screen_width = msg.width;
+                        g_screen_height = msg.height;
+
+                        /* Pre-sized canvas (2560x1440) remains valid across resolution changes */
+
+                        /* Update any background or taskbar surface geometry */
+                        for (int i = 0; i < MAX_WINDOWS; i++) {
+                            if (g_surfaces[i].active) {
+                                if (g_surfaces[i].flags & NTFS_WIN_BACKGROUND) {
+                                    g_surfaces[i].x = 0;
+                                    g_surfaces[i].y = 0;
+                                    g_surfaces[i].width = g_screen_width;
+                                    g_surfaces[i].height = g_screen_height;
+                                } else if (g_surfaces[i].flags & NTFS_WIN_TASKBAR) {
+                                    g_surfaces[i].x = 0;
+                                    g_surfaces[i].y = (int)g_screen_height - (int)TASKBAR_HEIGHT;
+                                    g_surfaces[i].width = g_screen_width;
+                                    g_surfaces[i].height = TASKBAR_HEIGHT;
+                                }
+                            }
+                        }
+
                         needs_redraw = 1;
                         break;
                     }
