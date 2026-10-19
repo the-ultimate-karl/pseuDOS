@@ -7,7 +7,7 @@ import tempfile
 import argparse
 import shutil
 
-def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, initramfs_binary_path=None, size_kb=8192):
+def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, initramfs_binary_path=None, recovery_binary_path=None, size_kb=8192):
     with open(efi_binary_path, "rb") as f:
         efi_data = f.read()
 
@@ -21,7 +21,12 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, initra
         with open(initramfs_binary_path, "rb") as f:
             initramfs_data = f.read()
 
-    needed_bytes = len(efi_data) + (len(kernel_data) if kernel_data else 0) + (len(initramfs_data) if initramfs_data else 0) + 1024 * 1024
+    recovery_data = None
+    if recovery_binary_path and os.path.exists(recovery_binary_path):
+        with open(recovery_binary_path, "rb") as f:
+            recovery_data = f.read()
+
+    needed_bytes = len(efi_data) + (len(kernel_data) if kernel_data else 0) + (len(initramfs_data) if initramfs_data else 0) + (len(recovery_data) if recovery_data else 0) + 1024 * 1024
     needed_kb = (needed_bytes + 1023) // 1024
     if size_kb < needed_kb:
         size_kb = ((needed_kb + 2047) // 2048) * 2048
@@ -160,16 +165,24 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, initra
         off = append_dir(d, off, mklfn("pseuDOS", "PSEUDOS    ", 0x10, pseudos_clus, 0))
     write_clus(efi_clus, d)
     
-    # BOOT dir with BOOTX64.EFI
+    # BOOT dir with BOOTX64.EFI and recovery.efi
     c_cnt = (len(efi_data) + sec_per_clus * sector_size - 1) // (sec_per_clus * sector_size)
     c_start = alloc(c_cnt)
     write_clus(c_start, efi_data)
     
+    rec_start = 0
+    if recovery_data:
+        rec_cnt = (len(recovery_data) + sec_per_clus * sector_size - 1) // (sec_per_clus * sector_size)
+        rec_start = alloc(rec_cnt)
+        write_clus(rec_start, recovery_data)
+
     d2 = bytearray(sec_per_clus * sector_size)
     off = 0
     off = append_dir(d2, off, mkentry(".          ", 0x10, boot_clus, 0))
     off = append_dir(d2, off, mkentry("..         ", 0x10, efi_clus, 0))
     off = append_dir(d2, off, mklfn("BOOTX64.EFI", "BOOTX64 EFI", 0x20, c_start, len(efi_data)))
+    if recovery_data and rec_start:
+        off = append_dir(d2, off, mklfn("recovery.efi", "RECOVERYEFI", 0x20, rec_start, len(recovery_data)))
     write_clus(boot_clus, d2)
 
     # pseuDOS dir
@@ -184,7 +197,7 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, initra
         off = append_dir(d3, off, mkentry("..         ", 0x10, efi_clus, 0))
         off = append_dir(d3, off, mklfn("vpkernel", "VPKERNEL   ", 0x20, k_start, len(kernel_data)))
         off = append_dir(d3, off, mklfn("BOOTX64.EFI", "BOOTX64 EFI", 0x20, c_start, len(efi_data)))
-        off = append_dir(d3, off, mklfn("pseudos.efi", "PSEUDOS EFI", 0x20, c_start, len(efi_data)))
+        off = append_dir(d3, off, mklfn("silo.efi", "SILO    EFI", 0x20, c_start, len(efi_data)))
 
         # GRUB config snippet and OS release info
         grub_bytes = b"# GRUB 2 configuration snippet for pseuDOS\r\nmenuentry \"pseuDOS x86_64\" {\r\n    insmod fat\r\n    insmod chain\r\n    search --no-floppy --set=root --file /EFI/pseuDOS/BOOTX64.EFI\r\n    chainloader /EFI/pseuDOS/BOOTX64.EFI\r\n}\r\n"
@@ -220,7 +233,7 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, initra
         write_clus(krnl_clus, dk)
 
         # bootmgr dir with boot.cfg
-        cfg_bytes = b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\vpkernel\r\ninitramfs=\\protected\\krnl\\initramfs.img\r\nautoinit=\\protected\\krnl\\autoinit.exe\r\nshell=\\protected\\gui\\gman.exe\r\ncmdline=quiet devpath=hardware boot=live\r\ndefault_resolution=1280x720\r\n"
+        cfg_bytes = b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\vpkernel\r\ninitramfs=\\protected\\krnl\\initramfs.img\r\nautoinit=\\protected\\krnl\\autoinit.exe\r\nshell=\\protected\\gui\\gman.exe\r\ncmdline=quiet devpath=hardware boot=live\r\ndefault_resolution=auto\r\n"
         write_clus(bootcfg_clus, cfg_bytes)
 
         db = bytearray(sec_per_clus * sector_size)
@@ -402,12 +415,21 @@ def make_eltorito_iso(efiboot_img_path, output_iso_path):
     # --- LBA 21: efiboot.img data ---
     data_off = efiboot_lba * SECTOR_SIZE
     iso[data_off:data_off+efi_size] = efi_img_bytes
-    with open(output_iso_path, "wb") as f:
-        f.write(iso)
+    try:
+        with open(output_iso_path, "wb") as f:
+            f.write(iso)
+    except OSError as e:
+        sys.stderr.write(
+            f"\n[make_iso] ERROR: Failed to write '{output_iso_path}': {e}\n"
+            f"[make_iso] The ISO file is currently locked by another process (most likely a running QEMU instance).\n"
+            f"[make_iso] Please close or kill QEMU, then retry the build.\n"
+        )
+        sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(description="Create UEFI El Torito Bootable ISO")
     parser.add_argument("--efi", required=True, help="Path to BOOTX64.EFI")
+    parser.add_argument("--recovery", required=False, help="Path to recovery.efi")
     parser.add_argument("--kernel", required=False, help="Path to kernel.bin")
     parser.add_argument("--initramfs", required=False, help="Path to initramfs.img")
     parser.add_argument("--iso", required=True, help="Output ISO path")
@@ -421,7 +443,7 @@ def main():
         os.makedirs(iso_root, exist_ok=True)
         efiboot_img = os.path.join(iso_root, "efiboot.img")
 
-        make_fat12_esp(efiboot_img, args.efi, args.kernel, args.initramfs)
+        make_fat12_esp(efiboot_img, args.efi, args.kernel, args.initramfs, args.recovery)
 
         # Also populate ISO 9660 directory tree so Rufus "ISO Mode" extraction works on real USB sticks
         efi_boot_dir = os.path.join(iso_root, "EFI", "BOOT")
@@ -435,13 +457,16 @@ def main():
 
         shutil.copy2(args.efi, os.path.join(efi_boot_dir, "BOOTX64.EFI"))
         shutil.copy2(args.efi, os.path.join(efi_pseudos_dir, "BOOTX64.EFI"))
+        if args.recovery and os.path.exists(args.recovery):
+            shutil.copy2(args.recovery, os.path.join(efi_boot_dir, "recovery.efi"))
+            shutil.copy2(args.recovery, os.path.join(efi_pseudos_dir, "recovery.efi"))
         if args.kernel and os.path.exists(args.kernel):
             shutil.copy2(args.kernel, os.path.join(efi_pseudos_dir, "vpkernel"))
             shutil.copy2(args.kernel, os.path.join(prot_krnl_dir, "vpkernel"))
         if args.initramfs and os.path.exists(args.initramfs):
             shutil.copy2(args.initramfs, os.path.join(prot_krnl_dir, "initramfs.img"))
         with open(os.path.join(prot_bmgr_dir, "boot.cfg"), "wb") as bf:
-            bf.write(b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\vpkernel\r\ninitramfs=\\protected\\krnl\\initramfs.img\r\nautoinit=\\protected\\krnl\\autoinit.exe\r\nshell=\\protected\\gui\\gman.exe\r\ncmdline=quiet devpath=hardware boot=live\r\ndefault_resolution=1280x720\r\n")
+            bf.write(b"# pseuDOS Boot Configuration\r\nkernel=\\protected\\krnl\\vpkernel\r\ninitramfs=\\protected\\krnl\\initramfs.img\r\nautoinit=\\protected\\krnl\\autoinit.exe\r\nshell=\\protected\\gui\\gman.exe\r\ncmdline=quiet devpath=hardware boot=live\r\ndefault_resolution=auto\r\n")
 
         genisoimage_bin = shutil.which("genisoimage")
         if genisoimage_bin:

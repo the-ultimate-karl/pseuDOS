@@ -199,7 +199,6 @@ Once you have installed pseuDOS to a virtual drive using `flash`, boot directly 
 | `del` / `rm` | `[-rf] <path>` | Removes files or directories (`-rf` enables recursive deletion). |
 | `fs` | `[drive_no]` | Displays active VFS statistics, boot hardware devpath, and partition health. |
 | `attached-drives`| `[--internal\|--external\|--all]` | Lists all detected storage drives, connection buses, and capacities. |
-| `switch-target` | `<--internal\|--external>` | Toggles default storage target views. |
 | `flash` | — | Interactive GPT & FAT32 partitioner and bare-metal OS self-installer. |
 | `screenres` | `[width height]` | Queries or dynamically switches GOP graphical display resolutions. |
 | `cpu` | — | Displays CPU vendor, brand string, topology, and architectural feature flags. |

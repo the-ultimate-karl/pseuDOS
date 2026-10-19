@@ -22,7 +22,7 @@ static size_t g_syscall_flash_pos = 0;
 static size_t g_syscall_flash_cap = 0;
 
 static void flash_install_progress(const char *step_name, int is_ok) {
-    if (console_get_fb_output()) {
+    if (!g_syscall_flash_log && console_get_fb_output()) {
         console_printf("flash: %s [%s]\n", step_name, is_ok ? "ok" : "failed");
     }
     if (g_syscall_flash_log && g_syscall_flash_pos + 128 < g_syscall_flash_cap) {
@@ -77,6 +77,15 @@ static int is_protected_path(const char *path) {
     while (*path == ' ' || *path == '/' || *path == '\\') path++;
     if (strncasecmp(path, "efi", 3) == 0 && (path[3] == '\0' || path[3] == '/' || path[3] == '\\')) return 1;
     if (strncasecmp(path, "protected", 9) == 0 && (path[9] == '\0' || path[9] == '/' || path[9] == '\\')) return 1;
+    const char *p = path;
+    while (*p) {
+        if (*p == '/' || *p == '\\') {
+            const char *next = p + 1;
+            if (strncasecmp(next, "efi", 3) == 0 && (next[3] == '\0' || next[3] == '/' || next[3] == '\\')) return 1;
+            if (strncasecmp(next, "protected", 9) == 0 && (next[9] == '\0' || next[9] == '/' || next[9] == '\\')) return 1;
+        }
+        p++;
+    }
     return 0;
 }
 
@@ -226,6 +235,56 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             if (!validate_user_buffer(buf, count, curr->privilege_level)) return -EFAULT;
 
             if (fd == 1 || fd == 2) {
+                if (curr->tty != 0 && curr->tty != tty_get_active() && !console_get_fb_output()) {
+                    while (curr->tty != tty_get_active() && !console_get_fb_output()) {
+                        pit_sleep_ms(20);
+                    }
+                }
+
+                /* Check if this is a system service logging line: e.g. "[service] message\n" */
+                if (count > 4 && buf[0] == '[') {
+                    const char *close_bracket = NULL;
+                    size_t scan_limit = (count < 24) ? count : 24;
+                    for (size_t s = 1; s < scan_limit; s++) {
+                        if (buf[s] == ']') {
+                            close_bracket = &buf[s];
+                            break;
+                        }
+                    }
+                    if (close_bracket && (close_bracket[1] == ' ' || close_bracket[1] == '\t')) {
+                        char tag[16];
+                        size_t tlen = (size_t)(close_bracket - (buf + 1));
+                        if (tlen < sizeof(tag)) {
+                            memcpy(tag, buf + 1, tlen);
+                            tag[tlen] = '\0';
+                            char *t = trim(tag);
+                            if (strcmp(t, "autoinit") == 0 || strcmp(t, "gman") == 0 ||
+                                strcmp(t, "ntfs") == 0 || strcmp(t, "lack") == 0 ||
+                                strcmp(t, "ninds") == 0 || strcmp(t, "splash") == 0 ||
+                                strcmp(t, "gshss") == 0 || strcmp(t, "bshss") == 0) {
+                                const char *msg_start = close_bracket + 2;
+                                while (*msg_start == ' ' || *msg_start == '\t') msg_start++;
+                                size_t msg_len = (size_t)((buf + count) - msg_start);
+                                char msg[128];
+                                if (msg_len >= sizeof(msg)) msg_len = sizeof(msg) - 1;
+                                memcpy(msg, msg_start, msg_len);
+                                msg[msg_len] = '\0';
+                                while (msg_len > 0 && (msg[msg_len - 1] == '\n' || msg[msg_len - 1] == '\r')) {
+                                    msg[--msg_len] = '\0';
+                                }
+                                int level = KLOG_INFO;
+                                if (strstr(msg, "FATAL") || strstr(msg, "CRITICAL") || strstr(msg, "ERROR")) {
+                                    level = KLOG_ERR;
+                                } else if (strstr(msg, "WARNING") || strstr(msg, "WARN")) {
+                                    level = KLOG_WARN;
+                                }
+                                klog(level, t, "%s", msg);
+                                return (int64_t)count;
+                            }
+                        }
+                    }
+                }
+
                 for (size_t i = 0; i < count; i++) {
                     console_putc(buf[i]);
                 }
@@ -516,7 +575,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
                 }
                 int res = gpt_fat32_format_and_install(dev, flash_install_progress);
                 if (res == 0) {
-                    vfs_refresh_mounts_dir();
+                    vfs_refresh_device_mount(dev);
                 } else if (g_syscall_flash_log && g_syscall_flash_cap > g_syscall_flash_pos) {
                     flash_format_error_screen(g_syscall_flash_log + g_syscall_flash_pos,
                                               g_syscall_flash_cap - g_syscall_flash_pos,
@@ -559,8 +618,17 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
         case SYS_ATTACHED_DRIVES:
             return run_captured_str(cmd_attached_drives, (const char *)a1, (char *)a2, (size_t)a3, curr->privilege_level);
 
-        case SYS_SWITCH_TARGET:
-            return run_captured_str(cmd_switch_target, (const char *)a1, (char *)a2, (size_t)a3, curr->privilege_level);
+        case SYS_KLOG: {
+            int level = (int)a1;
+            const char *sub = (const char *)a2;
+            const char *msg = (const char *)a3;
+            if (sub && !validate_user_str(sub, 32, curr->privilege_level)) return -EFAULT;
+            if (!msg || !validate_user_str(msg, 256, curr->privilege_level)) return -EFAULT;
+            const char *tag = sub;
+            if (!tag || tag[0] == '\0') tag = curr->name;
+            klog(level, tag, "%s", msg);
+            return 0;
+        }
 
         case SYS_SCREENRES:
             return run_captured_str(cmd_screenres, (const char *)a1, (char *)a2, (size_t)a3, curr->privilege_level);
@@ -668,6 +736,9 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             return (int64_t)sys_shm_close((int)a1);
 
         case SYS_TTY_GET:
+            if (a1 == 1) {
+                return (int64_t)curr->tty;
+            }
             return (int64_t)tty_get_active();
 
         case SYS_TTY_SET:
@@ -702,10 +773,25 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             return (int64_t)vfs_umount_target(tgt, log_buf, log_sz);
         }
 
+        case SYS_COPYFILE: {
+            const char *src = (const char *)a1;
+            const char *dst = (const char *)a2;
+            if (!validate_user_str(src, 256, curr->privilege_level) ||
+                !validate_user_str(dst, 256, curr->privilege_level)) return -EFAULT;
+            vfs_node_t *dst_node = vfs_find_node(dst);
+            if ((is_protected_path(dst) || (dst_node && dst_node->is_protected)) && curr->privilege_level != PRIV_KERNEL) {
+                return -EPERM;
+            }
+            int res = vfs_copy_file(src, dst);
+            return (res == 0) ? 0 : -EIO;
+        }
+
         case SYS_PANIC: {
             const char *reason = (const char *)a1;
             int is_init_panic = (reason && validate_user_str(reason, 256, curr->privilege_level) &&
-                                 strstr(reason, "unexpected second instance") != NULL);
+                                 (strstr(reason, "unexpected second instance") != NULL ||
+                                  strstr(reason, "insufficient memory") != NULL ||
+                                  strstr(reason, "unable to start") != NULL));
             if (curr->privilege_level != PRIV_KERNEL && !is_init_panic) {
                 return -EPERM;
             }

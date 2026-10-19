@@ -280,7 +280,11 @@ class QemuAgentSession:
         else:
             if not self.iso_path.exists():
                 raise FileNotFoundError(f"ISO not found: {self.iso_path}. Run .\\build.ps1 first.")
-            args += ["-cdrom", str(self.iso_path), "-boot", "order=d,menu=off"]
+            args += [
+                "-drive", f"file={self.iso_path},media=cdrom,if=none,id=cdrom0",
+                "-device", "ide-cd,drive=cdrom0,bootindex=0",
+                "-boot", "order=d,menu=off",
+            ]
 
         # Core VM settings
         args += [
@@ -348,7 +352,7 @@ class QemuAgentSession:
             args,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
 
         # Arm automatic safety watchdog so QEMU can never hang indefinitely
@@ -373,8 +377,11 @@ class QemuAgentSession:
                 time.sleep(0.1)
 
         if self.sock is None:
+            err = ""
+            if self.proc and self.proc.poll() is not None and self.proc.stderr:
+                err = self.proc.stderr.read().decode("utf-8", errors="replace")
             self.stop()
-            raise RuntimeError("Failed to connect to QEMU Monitor TCP socket.")
+            raise RuntimeError(f"Failed to connect to QEMU Monitor TCP socket. QEMU stderr: {err}")
 
         return self
 
@@ -588,6 +595,7 @@ def _run_cli() -> int:
     parser.add_argument("--usb-hid", action="store_true", help="Attach xHCI USB mouse & keyboard")
     parser.add_argument("--boot-from", type=str, default="iso", help="Boot media: iso, sata, nvme, usb, usb2")
     parser.add_argument("--cmdline", type=str, default="", help="Kernel fw_cfg command line")
+    parser.add_argument("--memory", type=int, default=512, help="Guest RAM in MB")
     parser.add_argument("--timeout", type=float, default=90.0, help="Max lifetime watchdog in seconds")
     parser.add_argument("--type", dest="type_cmds", action="append", default=[], help="Type text (supports \\n)")
     parser.add_argument("--key", dest="key_cmds", action="append", default=[], help="Send raw QEMU key")
@@ -598,6 +606,7 @@ def _run_cli() -> int:
     args = parser.parse_args()
 
     with QemuAgentSession(
+        memory_mb=args.memory,
         sata=args.sata,
         nvme=args.nvme,
         usb=args.usb,

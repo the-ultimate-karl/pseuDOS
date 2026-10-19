@@ -221,7 +221,7 @@ static void render_notepad(void) {
 
     /* Status message on right of status bar */
     if (g_status_msg[0] != '\0') {
-        gfx_draw_string(g_client.pixels, win_w, win_h, win_w - 200, sb_y + 2, g_status_msg, 0x00008000, 0, 1);
+        gfx_draw_string(g_client.pixels, win_w, win_h, win_w - 200, sb_y + 2, g_status_msg, COLOR_TEXT, 0, 1);
     }
 
     /* File Dropdown Menu */

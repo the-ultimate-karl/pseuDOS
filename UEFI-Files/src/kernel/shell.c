@@ -34,7 +34,6 @@ static void cmd_help(void) {
     console_puts("proctest          :     test preemptive multitasking with concurrent tasks\n");
     console_puts("syscalltest       :     test x86_64 syscall interface and privileges\n");
     console_puts("screenres         :     adjust or display screen resolution\n");
-    console_puts("switch-target     :     switch storage target (--internal | --external)\n");
     console_puts("attached-drives   :     list attached storage drives (--internal | --external | --all)\n");
     console_puts("flash             :     install pseuDOS onto a selected mass storage drive\n");
     console_puts("grub              :     display GRUB 2 chainloader config & setup\n");
@@ -48,26 +47,6 @@ static void cmd_help(void) {
     console_puts("shutdown          :     perform bare-metal ACPI system power-off\n");
     console_puts("halt              :     halt CPU execution\n");
     console_puts("===========================\n");
-}
-
-void cmd_switch_target(const char *arg) {
-    if (!arg || arg[0] == '\0') {
-        TargetFilterMode cur = storage_get_target_mode();
-        console_printf("active storage target: %s\n", cur == TARGET_MODE_INTERNAL ? "internal storage devices only" : "external USB devices only");
-        console_puts("usage: switch-target [--internal | --external]\n");
-        return;
-    }
-
-    if (strcmp(arg, "--internal") == 0) {
-        storage_set_target_mode(TARGET_MODE_INTERNAL);
-        console_puts("switch-target: active storage target switched to internal devices only\n");
-    } else if (strcmp(arg, "--external") == 0) {
-        storage_set_target_mode(TARGET_MODE_EXTERNAL);
-        console_puts("switch-target: active storage target switched to external USB devices only\n");
-    } else {
-        console_printf("switch-target: unknown parameter '%s'\n", arg);
-        console_puts("usage: switch-target [--internal | --external]\n");
-    }
 }
 
 void cmd_attached_drives(const char *arg) {
@@ -127,17 +106,15 @@ static void install_progress_handler(const char *step_name, int is_ok) {
 void cmd_flash(const char *arg) {
     (void)arg;
 
-    console_puts("flash: searching for attached internal mass storage devices... ");
+    console_puts("flash: searching for attached mass storage devices... ");
     uint32_t count = storage_get_device_count();
 
     StorageDevice *matching[32];
     uint32_t match_count = 0;
-    int is_external_view = 0;
 
-    /* Check internal drives first */
-    for (uint32_t i = 0; i < count; i++) {
+    for (uint32_t i = 0; i < count && match_count < 32; i++) {
         StorageDevice *dev = storage_get_device(i);
-        if (dev && (dev->type == STORAGE_TYPE_INTERNAL_SATA || dev->type == STORAGE_TYPE_INTERNAL_NVME)) {
+        if (dev) {
             matching[match_count++] = dev;
         }
     }
@@ -145,38 +122,22 @@ void cmd_flash(const char *arg) {
     if (match_count > 0) {
         console_puts("done\n");
         console_puts("flash: identifying mass storage devices... done\n");
-        console_puts("flash: displaying options for internal mass storage devices\n\n");
+        console_puts("flash: displaying detected mass storage devices\n\n");
     } else {
         console_puts("none found\n");
-        console_puts("flash: querying universal serial bus (usb) for any connected mass storage devices... ");
-
-        for (uint32_t i = 0; i < count; i++) {
-            StorageDevice *dev = storage_get_device(i);
-            if (dev && dev->type == STORAGE_TYPE_EXTERNAL_USB) {
-                matching[match_count++] = dev;
-            }
-        }
-
-        if (match_count > 0) {
-            console_puts("done\n");
-            console_puts("flash: identifying mass storage devices... done\n");
-            console_puts("flash: displaying options for external mass storage devices\n\n");
-            is_external_view = 1;
-        } else {
-            console_puts("none found\n");
-            console_puts("flash: error: no mass storage devices detected on system!\n");
-            return;
-        }
+        console_puts("flash: error: no mass storage devices detected on system!\n");
+        return;
     }
 
-    console_puts("                                [pseuDOS Installation]\n");
-    console_puts("==========================================================================\n");
+    console_puts("                                            [pseuDOS Installation]\n");
+    console_puts("==============================================================================================================\n");
     console_puts("choose the mass storage device you want to install pseuDOS on:\n\n");
-    console_puts("[NO]    |    [DEVICE_NAME]                      |    [SIZE]\n");
-    console_puts("--------+---------------------------------------+------------\n");
+    console_puts("[NO]  |  [TYPE]    |  [DEVICE_NAME]                         |  [SIZE]    |  [BUS_SPEED]\n");
+    console_puts("------+------------+----------------------------------------+------------+------------------------------------\n");
 
     for (uint32_t i = 0; i < match_count; i++) {
-        console_printf("%-7u |    %-34s |    %s\n", i + 1, matching[i]->name, matching[i]->size_str);
+        console_printf("%-5u |  %-9s |  %-38s |  %-9s |  %s\n",
+            i + 1, matching[i]->type_str, matching[i]->name, matching[i]->size_str, matching[i]->bus_speed);
     }
     console_puts("\n");
 
@@ -207,7 +168,7 @@ void cmd_flash(const char *arg) {
     }
 
     /* USB 3.1 Gen 1 minimum speed verification */
-    if (is_external_view || selected_dev->type == STORAGE_TYPE_EXTERNAL_USB) {
+    if (selected_dev->type == STORAGE_TYPE_EXTERNAL_USB) {
         if (selected_dev->usb_version < 0x0310) {
             console_puts("ATTENTION! you are attempting to install pseuDOS to an external universal serial bus drive that does not meet the minimum requirement of USB 3.1 Gen 1. it is highly recommended to use a faster drive to make sure installation does not crawl, and to ensure boot times are at max.\n");
             console_puts("are you sure you want to do this?\n(y/N) ");
@@ -1036,7 +997,7 @@ static void cmd_grub(void) {
     console_puts("=================================================================\n");
     console_puts("EFI Bootloader Targets:\n");
     console_puts("  /EFI/pseuDOS/BOOTX64.EFI\n");
-    console_puts("  /EFI/pseuDOS/pseudos.efi\n\n");
+    console_puts("  /EFI/pseuDOS/silo.efi\n\n");
     console_puts("GRUB 2 Menuentry Snippet (/etc/grub.d/40_custom or /boot/grub/grub.cfg):\n");
     console_puts("  menuentry \"pseuDOS x86_64\" {\n");
     console_puts("      insmod fat\n");
@@ -1083,8 +1044,8 @@ void shell_run(const BootInfo *boot_info) {
     char prompt_buf[512];
     char prompt_path[256];
 
-    console_puts("pseuDOS kernel v0.7.1-gui (x86_64 uefi / bare-metal)\n");
-    console_puts("what's new (kernel version 0.7.1-gui):\n");
+    console_puts("pseuDOS kernel v0.7.2-gui (x86_64 uefi / bare-metal)\n");
+    console_puts("what's new (kernel version 0.7.2-gui):\n");
     console_puts("- fast text-buffer console scrolling & 64-bit memory copy routines (memcpy/memmove/memset)\n");
     console_puts("- dynamic PE32+ base relocation engine in bootloader (.reloc DIR64 / HIGHLOW)\n");
     console_puts("- full 256-vector assembly ISR dispatch table with CPU exception stack normalization\n");
@@ -1127,8 +1088,6 @@ void shell_run(const BootInfo *boot_info) {
             cmd_help();
         } else if (strcmp(cmd, "screenres") == 0) {
             cmd_screenres(arg);
-        } else if (strcmp(cmd, "switch-target") == 0) {
-            cmd_switch_target(arg);
         } else if (strcmp(cmd, "attached-drives") == 0) {
             cmd_attached_drives(arg);
         } else if (strcmp(cmd, "flash") == 0) {

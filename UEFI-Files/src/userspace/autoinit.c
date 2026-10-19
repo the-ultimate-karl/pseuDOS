@@ -60,7 +60,7 @@ void autoinit_main(void) {
 
         if (is_cli_mode) {
             target_path[0] = '\0';
-            const char *cli_path = "/protected/crit/xshss.exe";
+            const char *cli_path = "/protected/crit/bshss.exe";
             size_t k = 0;
             while (cli_path[k] && k < sizeof(target_path) - 1) {
                 target_path[k] = cli_path[k];
@@ -83,7 +83,7 @@ void autoinit_main(void) {
         int64_t child_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)target_path, 1, 0, 0, 0);
         if (child_pid <= 0) {
             if (is_cli_mode) {
-                puts("[autoinit] WARNING: failed to spawn xshss.exe, trying /protected/apps/shell.exe\n");
+                puts("[autoinit] WARNING: failed to spawn bshss.exe, trying /protected/apps/shell.exe\n");
                 child_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/apps/shell.exe", 1, 0, 0, 0);
             } else {
                 /* Try default gman.exe if target_path was different */
@@ -92,8 +92,8 @@ void autoinit_main(void) {
                     child_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/gui/superglue.exe", 1, 0, 0, 0);
                 }
                 if (child_pid <= 0) {
-                    puts("[autoinit] WARNING: failed to spawn gman.exe, falling back to xshss.exe\n");
-                    child_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/crit/xshss.exe", 1, 0, 0, 0);
+                    puts("[autoinit] WARNING: failed to spawn gman.exe, falling back to bshss.exe\n");
+                    child_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/crit/bshss.exe", 1, 0, 0, 0);
                 }
             }
             if (child_pid <= 0) {

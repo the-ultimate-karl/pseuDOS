@@ -53,8 +53,10 @@ if __name__ == "__main__":
     files_to_pack = [
         # System Core & Init
         ("/EFI/BOOT/BOOTX64.EFI", os.path.join(bin_dir, "BOOTX64.EFI")),
+        ("/EFI/BOOT/recovery.efi", os.path.join(bin_dir, "recovery.efi")),
+        ("/EFI/pseuDOS/recovery.efi", os.path.join(bin_dir, "recovery.efi")),
         ("/protected/krnl/autoinit.exe", os.path.join(bin_dir, "autoinit.exe")),
-        ("/protected/crit/xshss.exe", os.path.join(bin_dir, "xshss.exe")),
+        ("/protected/crit/bshss.exe", os.path.join(bin_dir, "bshss.exe")),
         
         # Display Server & Window Manager Stack
         ("/protected/gui/gman.exe", os.path.join(bin_dir, "gman.exe")),

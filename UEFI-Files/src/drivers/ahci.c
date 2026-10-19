@@ -3,6 +3,7 @@
 #include "io.h"
 #include "lib.h"
 #include "vmm.h"
+#include "klog.h"
 
 /* PCI Configuration I/O Ports */
 #define PCI_CONFIG_ADDRESS 0xCF8
@@ -394,6 +395,8 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     if (det != 3 || ipm != 1) return; /* Device not present and active */
     if (port->sig != SATA_SIG_ATA) return; /* Only SATA hard drives and SSDs */
 
+    klog_info("AHCI Port %u: SATA device connected, initializing...", port_num);
+
     /* Clear any pending port interrupts or errors */
     port->is = (uint32_t)-1;
     port->serr = (uint32_t)-1;
@@ -458,6 +461,8 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
 
     char model[41];
     memset(model, 0, sizeof(model));
+    char serial[21];
+    memset(serial, 0, sizeof(serial));
 
     uint64_t total_sectors = 0;
 
@@ -470,6 +475,15 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
         }
         model[40] = '\0';
         trim(model);
+
+        /* Extract ATA Serial String (Words 10-19, bytes swapped) */
+        for (int i = 0; i < 10; i++) {
+            uint16_t word = ident_buf[10 + i];
+            serial[i * 2] = (char)(word >> 8);
+            serial[i * 2 + 1] = (char)(word & 0xFF);
+        }
+        serial[20] = '\0';
+        trim(serial);
 
         /* Extract 48-bit LBA sector count */
         total_sectors = ((uint64_t)ident_buf[103] << 48) |
@@ -484,7 +498,9 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
         total_sectors = 1024000; /* 500 MiB safe fallback */
     }
 
-    if (model[0] == '\0') {
+    if (strstr(model, "QEMU") != NULL) {
+        strcpy(model, "Virtual QEMU SATA Block Device");
+    } else if (model[0] == '\0') {
         strcpy(model, "SATA Drive");
     }
 
@@ -522,7 +538,12 @@ static void probe_sata_port(HbaMem *hba, uint8_t port_num, uint8_t bus, uint8_t 
     storage_format_size(dev.total_sectors * 512, dev.size_str, sizeof(dev.size_str));
     snprintf(dev.devpath, sizeof(dev.devpath), "PciRoot(0x0)/Pci(0x%X,0x%X)/Sata(0x%X,0x0,0x0)", slot, func, port_num);
 
+    klog_info("AHCI Port %u: ATA device '%s' (serial=%s, speed=%s)",
+              port_num, model, serial[0] ? serial : "none", dev.bus_speed);
+
     storage_register_device(&dev);
+    klog_info("AHCI Port %u: registered storage device '%s' (%s, path=%s)",
+              port_num, dev.name, dev.size_str, dev.devpath);
 }
 
 void ahci_init(void) {
@@ -566,6 +587,15 @@ void ahci_init(void) {
                     hba->ghc |= HBA_GHC_AE; /* Enable AHCI Mode */
 
                     uint32_t pi = hba->pi;
+                    uint32_t cap = hba->cap;
+                    uint32_t vs = hba->vs;
+                    uint8_t n_ports = (cap & 0x1F) + 1;
+                    uint8_t n_slots = ((cap >> 8) & 0x1F) + 1;
+
+                    klog_info("AHCI: controller initialized: mmio=0x%llX (virt=0x%llX), pci=%u:%u.%u, ports=%u, slots=%u, ver=%u.%u",
+                              (unsigned long long)abar_phys, (unsigned long long)abar_virt,
+                              bus, slot, func, n_ports, n_slots, (vs >> 16) & 0xFFFF, vs & 0xFFFF);
+
                     for (uint8_t p = 0; p < 32; p++) {
                         if (pi & (1 << p)) {
                             probe_sata_port(hba, p, (uint8_t)bus, slot, func);

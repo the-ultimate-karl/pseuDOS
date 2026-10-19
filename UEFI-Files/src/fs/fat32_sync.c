@@ -190,16 +190,6 @@ static uint32_t alloc_free_cluster(void) {
                 if (cluster_idx >= 2 && (entries[i] & 0x0FFFFFFF) == 0) {
                     /* Allocate cluster */
                     set_fat_entry(cluster_idx, 0x0FFFFFFF);
-
-                    /* Zero the allocated cluster */
-                    uint32_t c_sz = get_clus_buf_size();
-                    uint8_t *zero_buf = (uint8_t *)kmalloc(c_sz);
-                    if (zero_buf) {
-                        memset(zero_buf, 0, c_sz);
-                        write_cluster(cluster_idx, zero_buf);
-                        kfree(zero_buf);
-                    }
-
                     update_fsinfo_free_clusters(-1);
                     s_next_alloc_cluster = cluster_idx + 1;
                     return cluster_idx;
@@ -869,7 +859,6 @@ int fat32_sync_write_file_bytes(const char *path, const void *data, size_t size,
 
     uint32_t clusters_needed = (new_size + c_sz - 1) / c_sz;
     if (clusters_needed == 0) clusters_needed = 1;
-    if (clusters_needed > 2048) clusters_needed = 2048;
 
     if (file_cluster < 2) {
         file_cluster = alloc_free_cluster();
@@ -879,7 +868,7 @@ int fat32_sync_write_file_bytes(const char *path, const void *data, size_t size,
         }
     }
 
-    uint32_t *chain = (uint32_t *)kmalloc(2048 * sizeof(uint32_t));
+    uint32_t *chain = (uint32_t *)kmalloc(clusters_needed * sizeof(uint32_t));
     uint8_t *data_buf = (uint8_t *)kmalloc(c_sz);
     if (!chain || !data_buf) {
         if (chain) kfree(chain);
@@ -1177,6 +1166,7 @@ static int load_fat32_dir_recursive_depth(uint32_t dir_cluster, const char *vfs_
                     /* Read file content into memory across FAT cluster chain (within safety budget) */
                     int skip_body = (strcasecmp(entry_name, "vpkernel") == 0 ||
                                      strcasecmp(entry_name, "BOOTX64.EFI") == 0 ||
+                                     strcasecmp(entry_name, "recovery.efi") == 0 ||
                                      strcasecmp(entry_name, "EFIBOOT.IMG") == 0);
                     if (!skip_body &&
                         entries[i].file_size > 0 &&
@@ -1272,7 +1262,7 @@ int fat32_mount_to_path(StorageDevice *dev, const char *mount_path) {
 
     g_fat32_loading = 1;
     vfs_mkdir(mount_path);
-    klog_info("fat32: reading volume files into '%s' (root_clus=%u)...", mount_path, g_sync_root_cluster);
+    klog_info("FAT32 Filesystem: reading volume files into '%s' (root_clus=%u)...", mount_path, g_sync_root_cluster);
     if (load_fat32_dir_recursive(g_sync_root_cluster, mount_path) != 0) {
         klog_err("fat32: failed to read root directory from volume on '%s'", mount_path);
         g_fat32_loading = 0;
@@ -1289,7 +1279,7 @@ int fat32_mount_to_path(StorageDevice *dev, const char *mount_path) {
         return -1;
     }
     g_fat32_loading = 0;
-    klog_info("fat32: finished loading '%s'", mount_path);
+    klog_info("FAT32 Filesystem: finished loading '%s'", mount_path);
 
     /* Register mounted FAT32 volume in g_fat32_mounts for write-through sync */
     int slot = -1;

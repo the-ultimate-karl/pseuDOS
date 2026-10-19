@@ -40,7 +40,7 @@ void kernel_main(BootInfo *boot_info) {
 
     /* 3. Initialize Kernel Logging Subsystem (klog ring buffer) */
     klog_init();
-    boot_log("OK", "initializing pseuDOS kernel v0.7.1-gui");
+    boot_log("OK", "initializing pseuDOS kernel v0.7.2-gui");
 
     /* 4. Initialize Custom 64-bit GDT & Task State Segment (TSS) */
     gdt_init();
@@ -51,6 +51,33 @@ void kernel_main(BootInfo *boot_info) {
 
     /* 6. Initialize Physical Memory Manager (Bitmap Page Allocator) */
     pmm_init(&boot_info->mem, boot_info);
+
+    /* Verify adequate physical memory to boot the operating system */
+    size_t total_pages = pmm_get_total_pages();
+    size_t free_pages = pmm_get_free_pages();
+    uint64_t total_mb = (total_pages * 4096ULL) / (1024ULL * 1024ULL);
+    uint64_t free_mb = (free_pages * 4096ULL) / (1024ULL * 1024ULL);
+
+    int is_cli_mode = 0;
+    if (boot_info && boot_info->cmdline[0] != '\0') {
+        if (strstr(boot_info->cmdline, "ui=cli") != NULL ||
+            strstr(boot_info->cmdline, "cli") != NULL ||
+            strstr(boot_info->cmdline, "nogui") != NULL ||
+            strstr(boot_info->cmdline, "ui=text") != NULL) {
+            is_cli_mode = 1;
+        }
+    }
+
+    uint64_t min_ram_nominal = is_cli_mode ? 64 : 256;
+    uint64_t min_ram_threshold = is_cli_mode ? 56 : 240; /* Allow for UEFI/BIOS memory map reservations */
+    uint64_t min_free_required = is_cli_mode ? 16 : 48;
+
+    if (total_mb < min_ram_threshold || free_mb < min_free_required) {
+        boot_log("FATAL", "insufficient physical memory: %lu MB detected (%lu MB free), %lu MB required",
+                 total_mb, free_mb, min_ram_nominal);
+        keyboard_init();
+        panic_insufficient_memory(total_mb, min_ram_nominal);
+    }
 
     /* 7. Initialize Virtual Memory Manager & 4-Level Higher-Half Paging */
     vmm_init(boot_info);
@@ -89,8 +116,7 @@ void kernel_main(BootInfo *boot_info) {
     /* 14. Initialize Process Manager & Preemptive Scheduler */
     process_init();
     scheduler_init();
-    scheduler_start();
-    boot_log("OK", "preemptive round-robin scheduler armed (~100 Hz)");
+    boot_log("OK", "preemptive round-robin scheduler initialized (~100 Hz)");
 
     /* 15. Launch Userland Init Subsystem (autoinit.bin as PID 1) */
     const char *autoinit_path = (boot_info && boot_info->autoinit_path[0] != '\0')
@@ -104,6 +130,8 @@ void kernel_main(BootInfo *boot_info) {
         shell_init(boot_info);
         shell_run(boot_info);
     } else {
+        boot_log("OK", "preemptive scheduler armed, transferring execution to init");
+        scheduler_start();
         /* PID 0 transitions into kernel idle loop */
         while (1) {
             __asm__ volatile ("hlt");

@@ -42,7 +42,7 @@
 #define SYS_PCI              38
 #define SYS_DEVPATH          39
 #define SYS_ATTACHED_DRIVES  40
-#define SYS_SWITCH_TARGET    41
+#define SYS_KLOG             41
 #define SYS_SCREENRES        42
 #define SYS_PROCTEST         43
 #define SYS_HALT             44
@@ -69,6 +69,7 @@
 #define SYS_TTY_SET          65
 #define SYS_MOUNT            66
 #define SYS_UMOUNT           67
+#define SYS_COPYFILE         68
 #define SYS_PANIC            99
 
 /* VFS Node Types for SYS_STAT */
@@ -93,7 +94,7 @@ typedef struct {
 typedef struct {
     char name[64];
     char type_str[16];
-    char bus_speed[32];
+    char bus_speed[64];
     char size_str[32];
     char devpath[160];
     uint32_t type;

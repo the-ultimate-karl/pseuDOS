@@ -63,6 +63,7 @@ int vfs_write_file(const char *path, const char *text, int append);
 int vfs_write_file_bytes(const char *path, const void *data, size_t size, int append);
 int vfs_read_file(const char *path, char *buffer, size_t max_len);
 int vfs_read_file_offset(const char *path, char *buffer, size_t max_len, size_t offset);
+int vfs_copy_file(const char *src_path, const char *dst_path);
 int vfs_remove_node_ex(const char *path, int recursive, int force);
 int vfs_remove_node(const char *path);
 int vfs_chdir(const char *path);
@@ -78,10 +79,12 @@ void devpath_set_mode(devpath_mode_t mode);
 devpath_mode_t devpath_get_mode(void);
 
 /* VFS Mount Subsystem */
+typedef struct StorageDevice StorageDevice;
 int vfs_mount_device(const char *source, const char *target, const char *fstype, char *out_log, size_t out_cap);
 int vfs_umount_target(const char *target, char *out_log, size_t out_cap);
 int vfs_list_mounts(char *out_buf, size_t out_cap);
 int vfs_auto_mount_all(char *out_log, size_t out_cap);
 void vfs_refresh_mounts_dir(void);
+void vfs_refresh_device_mount(StorageDevice *target_dev);
 
 #endif /* FS_H */

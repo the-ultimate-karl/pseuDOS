@@ -36,18 +36,34 @@ LDFLAGS_BOOT = -nostdlib \
 
 LDFLAGS_KERNEL = -nostdlib \
                  -m i386pep \
-                 --subsystem 10 \
+                 --subsystem native \
                  --image-base 0x10000000 \
                  --file-alignment 0x1000 \
                  --section-alignment 0x1000 \
                  -e kernel_main
 
-LDFLAGS_USER = -nostdlib \
-               -m i386pep \
-               --subsystem 10 \
-               --image-base 0x00400000 \
-               --file-alignment 0x1000 \
-               --section-alignment 0x1000
+LDFLAGS_USER_NATIVE = -nostdlib \
+                      -m i386pep \
+                      --subsystem native \
+                      --image-base 0x00400000 \
+                      --file-alignment 0x1000 \
+                      --section-alignment 0x1000
+
+LDFLAGS_USER_CUI = -nostdlib \
+                   -m i386pep \
+                   --subsystem console \
+                   --image-base 0x00400000 \
+                   --file-alignment 0x1000 \
+                   --section-alignment 0x1000
+
+LDFLAGS_USER_GUI = -nostdlib \
+                   -m i386pep \
+                   --subsystem windows \
+                   --image-base 0x00400000 \
+                   --file-alignment 0x1000 \
+                   --section-alignment 0x1000
+
+LDFLAGS_USER = $(LDFLAGS_USER_GUI)
 
 BOOT_SRCS = src/boot/bootloader.c \
             src/boot/errtext.c \
@@ -93,7 +109,7 @@ KERNEL_SRCS = src/kernel/kernel.c \
               src/drivers/acpi.c
 
 USER_SRCS = src/userspace/autoinit.c \
-            src/userspace/xshss.c \
+            src/userspace/bshss.c \
             src/userspace/gman.c \
             src/userspace/superglue.c \
             src/userspace/ntfs.c \
@@ -122,10 +138,11 @@ ALL_OBJS = $(sort $(BOOT_OBJS) $(KERNEL_OBJS) $(USER_OBJS))
 ALL_DEPS = $(ALL_OBJS:.o=.d)
 
 TARGET_EFI = bin/BOOTX64.EFI
+TARGET_RECOVERY = bin/recovery.efi
 TARGET_KERNEL = bin/vpkernel
 
 TARGET_AUTOINIT = bin/autoinit.exe
-TARGET_XSHSS = bin/xshss.exe
+TARGET_BSHSS = bin/bshss.exe
 TARGET_GMAN = bin/gman.exe
 TARGET_SUPERGLUE = bin/superglue.exe
 TARGET_NTFS = bin/ntfs.exe
@@ -143,7 +160,7 @@ TARGET_FILEMGR = bin/filemgr.exe
 TARGET_VIEW = bin/view.exe
 
 TARGET_USER_EXES = $(TARGET_AUTOINIT) \
-                   $(TARGET_XSHSS) \
+                   $(TARGET_BSHSS) \
                    $(TARGET_GMAN) \
                    $(TARGET_SUPERGLUE) \
                    $(TARGET_NTFS) \
@@ -172,25 +189,29 @@ TARGET_INITRAMFS = bin/initramfs.img
 
 iso: $(TARGET_ISO)
 
-$(TARGET_INITRAMFS): $(TARGET_USER_EXES) $(TARGET_EFI)
+$(TARGET_INITRAMFS): $(TARGET_USER_EXES) $(TARGET_EFI) $(TARGET_RECOVERY)
 	@$(MKDIR_P) bin
 	$(PYTHON) scripts/make_initramfs.py
 
-$(TARGET_ISO): $(TARGET_EFI) $(TARGET_KERNEL) $(TARGET_USER_EXES) $(TARGET_INITRAMFS)
+$(TARGET_ISO): $(TARGET_EFI) $(TARGET_RECOVERY) $(TARGET_KERNEL) $(TARGET_USER_EXES) $(TARGET_INITRAMFS)
 	@$(MKDIR_P) build
-	$(PYTHON) scripts/make_iso.py --efi $(TARGET_EFI) --kernel $(TARGET_KERNEL) --initramfs $(TARGET_INITRAMFS) --iso $(TARGET_ISO)
+	$(PYTHON) scripts/make_iso.py --efi $(TARGET_EFI) --recovery $(TARGET_RECOVERY) --kernel $(TARGET_KERNEL) --initramfs $(TARGET_INITRAMFS) --iso $(TARGET_ISO)
 
 $(TARGET_EFI): $(BOOT_OBJS)
 	@$(MKDIR_P) bin
 	$(LD) $(LDFLAGS_BOOT) -o $@ $^
 
+$(TARGET_RECOVERY): bin/recovery/recovery.o bin/lib/string.o bin/lib/guid.o
+	@$(MKDIR_P) bin
+	$(LD) $(LDFLAGS_BOOT) -o $@ $^
+
 $(TARGET_AUTOINIT): bin/userspace/autoinit.o
 	@$(MKDIR_P) bin
-	$(LD) $(LDFLAGS_USER) -e autoinit_main -o $@ $^
+	$(LD) $(LDFLAGS_USER_NATIVE) -e autoinit_main -o $@ $^
 
-$(TARGET_XSHSS): bin/userspace/xshss.o
+$(TARGET_BSHSS): bin/userspace/bshss.o
 	@$(MKDIR_P) bin
-	$(LD) $(LDFLAGS_USER) -e xshss_main -o $@ $^
+	$(LD) $(LDFLAGS_USER_CUI) -e bshss_main -o $@ $^
 
 $(TARGET_GMAN): bin/userspace/gman.o
 	@$(MKDIR_P) bin
@@ -264,11 +285,11 @@ bin/kernel/autoinit_payload.o: $(TARGET_AUTOINIT)
 	$(CC) -c bin/kernel/autoinit_payload.s -o $@
 	@$(PYTHON) -c "import os; os.remove('bin/kernel/autoinit_payload.s') if os.path.exists('bin/kernel/autoinit_payload.s') else None"
 
-bin/kernel/xshss_payload.o: $(TARGET_XSHSS)
+bin/kernel/bshss_payload.o: $(TARGET_BSHSS)
 	@$(MKDIR_P) bin/kernel
-	$(PYTHON) -c "with open('bin/kernel/xshss_payload.s', 'w') as f: f.write('.section .rodata\n.global g_payload_xshss_data\n.global g_payload_xshss_size\ng_payload_xshss_data:\n    .incbin \"$(subst \,/,$<)\"\ng_payload_xshss_end:\ng_payload_xshss_size:\n    .quad g_payload_xshss_end - g_payload_xshss_data\n')"
-	$(CC) -c bin/kernel/xshss_payload.s -o $@
-	@$(PYTHON) -c "import os; os.remove('bin/kernel/xshss_payload.s') if os.path.exists('bin/kernel/xshss_payload.s') else None"
+	$(PYTHON) -c "with open('bin/kernel/bshss_payload.s', 'w') as f: f.write('.section .rodata\n.global g_payload_bshss_data\n.global g_payload_bshss_size\ng_payload_bshss_data:\n    .incbin \"$(subst \,/,$<)\"\ng_payload_bshss_end:\ng_payload_bshss_size:\n    .quad g_payload_bshss_end - g_payload_bshss_data\n')"
+	$(CC) -c bin/kernel/bshss_payload.s -o $@
+	@$(PYTHON) -c "import os; os.remove('bin/kernel/bshss_payload.s') if os.path.exists('bin/kernel/bshss_payload.s') else None"
 
 bin/kernel/gman_payload.o: $(TARGET_GMAN)
 	@$(MKDIR_P) bin/kernel

@@ -10,15 +10,10 @@ typedef enum {
     STORAGE_TYPE_EXTERNAL_USB
 } StorageDeviceType;
 
-typedef enum {
-    TARGET_MODE_INTERNAL,
-    TARGET_MODE_EXTERNAL
-} TargetFilterMode;
-
 typedef struct StorageDevice {
     char name[64];           /* Model / Product name */
     char type_str[16];       /* "NVMe", "SATA", "USB" */
-    char bus_speed[32];      /* "PCIe 3.0 x4", "SATA 6.0 Gbps", "USB 3.1 Gen 1", "USB 2.0 High-Speed" */
+    char bus_speed[64];      /* "PCIe 3.0 x4", "SATA 6.0 Gbps", "USB 3.1 Gen 1", "USB 2.0 High-Speed" */
     char size_str[32];       /* "250 GB", "1 TB", "32 GB", "10 GB" */
     char devpath[160];       /* Absolute Hardware Device Path */
     StorageDeviceType type;
@@ -43,9 +38,6 @@ void storage_format_size(uint64_t bytes, char *buf, size_t buf_size);
 void storage_flush_all(void);
 void storage_shutdown_all(void);
 
-/* Target Filter Mode (Internal vs External) */
-TargetFilterMode storage_get_target_mode(void);
-void storage_set_target_mode(TargetFilterMode mode);
 
 /* Individual Driver Probing APIs */
 void ahci_init(void);
@@ -144,9 +136,10 @@ StorageDevice *storage_get_boot_device(const char *boot_devpath, int *out_drive_
 
 /* Embedded Installer Payloads */
 const uint8_t *payload_get_bootloader(size_t *out_size);
+const uint8_t *payload_get_recovery(size_t *out_size);
 const uint8_t *payload_get_kernel(size_t *out_size);
 const uint8_t *payload_get_autoinit(size_t *out_size);
-const uint8_t *payload_get_xshss(size_t *out_size);
+const uint8_t *payload_get_bshss(size_t *out_size);
 const uint8_t *payload_get_gman(size_t *out_size);
 const uint8_t *payload_get_superglue(size_t *out_size);
 const uint8_t *payload_get_ntfs(size_t *out_size);
@@ -162,5 +155,7 @@ const uint8_t *payload_get_paint(size_t *out_size);
 const uint8_t *payload_get_clock(size_t *out_size);
 const uint8_t *payload_get_filemgr(size_t *out_size);
 const uint8_t *payload_get_view(size_t *out_size);
+const uint8_t *payload_get_initramfs(size_t *out_size);
+const uint8_t *payload_get_by_path(const char *path, size_t *out_size);
 
 #endif /* STORAGE_H */

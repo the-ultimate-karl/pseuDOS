@@ -275,6 +275,14 @@ typedef VOID (EFIAPI *EFI_RESET_SYSTEM)(
     VOID *ResetData
 );
 
+typedef EFI_STATUS (EFIAPI *EFI_SET_VARIABLE)(
+    CHAR16 *VariableName,
+    EFI_GUID *VendorGuid,
+    UINT32 Attributes,
+    UINTN DataSize,
+    VOID *Data
+);
+
 typedef struct _EFI_RUNTIME_SERVICES {
     EFI_TABLE_HEADER        Hdr;
     VOID                    *GetTime;
@@ -285,7 +293,7 @@ typedef struct _EFI_RUNTIME_SERVICES {
     VOID                    *ConvertPointer;
     VOID                    *GetVariable;
     VOID                    *GetNextVariableName;
-    VOID                    *SetVariable;
+    EFI_SET_VARIABLE        SetVariable;
     VOID                    *GetNextHighMonotonicCount;
     EFI_RESET_SYSTEM        ResetSystem;
 } EFI_RUNTIME_SERVICES;
@@ -408,6 +416,20 @@ typedef EFI_STATUS (EFIAPI *EFI_HANDLE_PROTOCOL)(
     VOID **Interface
 );
 
+typedef enum {
+    AllHandles,
+    ByRegisterNotify,
+    ByProtocol
+} EFI_LOCATE_SEARCH_TYPE;
+
+typedef EFI_STATUS (EFIAPI *EFI_LOCATE_HANDLE)(
+    EFI_LOCATE_SEARCH_TYPE SearchType,
+    const EFI_GUID *Protocol,
+    VOID *SearchKey,
+    UINTN *BufferSize,
+    EFI_HANDLE *Buffer
+);
+
 typedef EFI_STATUS (EFIAPI *EFI_LOCATE_PROTOCOL)(
     const EFI_GUID *Protocol,
     VOID *Registration,
@@ -471,6 +493,13 @@ typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(
     UINTN MapKey
 );
 
+typedef EFI_STATUS (EFIAPI *EFI_EXIT)(
+    EFI_HANDLE ImageHandle,
+    EFI_STATUS ExitStatus,
+    UINTN ExitDataSize,
+    CHAR16 *ExitData
+);
+
 typedef struct _EFI_BOOT_SERVICES {
     EFI_TABLE_HEADER                Hdr;
     VOID                            *RaiseTPL;
@@ -492,12 +521,12 @@ typedef struct _EFI_BOOT_SERVICES {
     EFI_HANDLE_PROTOCOL             HandleProtocol;
     VOID                            *VoidReserved;
     VOID                            *RegisterProtocolNotify;
-    VOID                            *LocateHandle;
+    EFI_LOCATE_HANDLE               LocateHandle;
     VOID                            *LocateDevicePath;
     VOID                            *InstallConfigurationTable;
     EFI_IMAGE_LOAD                  LoadImage;
     EFI_IMAGE_START                 StartImage;
-    VOID                            *Exit;
+    EFI_EXIT                        Exit;
     VOID                            *UnloadImage;
     EFI_EXIT_BOOT_SERVICES          ExitBootServices;
     VOID                            *GetNextMonotonicCount;

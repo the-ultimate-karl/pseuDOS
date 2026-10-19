@@ -326,7 +326,7 @@ static void draw_background(void) {
         }
         int wx = (int)g_screen_width - 320;
         int wy = (int)g_screen_height - 80;
-        gfx_draw_string(g_bg_client.pixels, g_screen_width, g_screen_height, wx, wy, "pseuDOS v0.7.1", COLOR_WHITE, 0, 1);
+        gfx_draw_string(g_bg_client.pixels, g_screen_width, g_screen_height, wx, wy, "pseuDOS v0.7.2", COLOR_WHITE, 0, 1);
         gfx_draw_string(g_bg_client.pixels, g_screen_width, g_screen_height, wx, wy + 20, "Graphical Shell Subsystem", COLOR_BTN_LIGHT, 0, 1);
     }
 

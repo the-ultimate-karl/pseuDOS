@@ -11,8 +11,9 @@ typedef enum {
     /* Mapped from Python ImportError: cannot mount kernel image */
     ERR_KERNEL_MOUNT_FAILED,
 
-    /* Mapped from Python ModuleNotFoundError: No such file or directory */
-    ERR_KERNEL_NOT_FOUND,
+    /* Boot configuration error */
+    ERR_BOOTCONFIG,
+#define ERR_KERNEL_NOT_FOUND ERR_BOOTCONFIG
 
     /* Boot configuration text file (boot.cfg) missing or invalid */
     ERR_BOOTCFG_NOT_FOUND,
@@ -32,6 +33,11 @@ typedef enum {
 } boot_error_t;
 
 typedef boot_error_t BootErrorCode;
+
+/*
+ * Save bootloader image handle for loading recovery applications
+ */
+void set_boot_image_handle(EFI_HANDLE image_handle);
 
 /*
  * Print formatted bootloader error diagnostic to UEFI Console and UART COM1,

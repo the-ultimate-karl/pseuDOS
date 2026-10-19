@@ -1521,6 +1521,9 @@ static void probe_xhci_controller(uint8_t bus, uint8_t slot, uint8_t func, uint6
                 if (scsi_inquiry(d, drive_name, sizeof(drive_name)) != 0) {
                     strcpy(drive_name, "USB Mass Storage Drive");
                 }
+                if (strstr(drive_name, "QEMU") != NULL) {
+                    strcpy(drive_name, "Virtual QEMU USB xHCI Block Device");
+                }
 
                 /* 7. Execute SCSI READ CAPACITY (10) (0x25) */
                 uint64_t total_sectors = 0;
@@ -1839,7 +1842,20 @@ static int ehci_scsi_inquiry(EhciDriver *d, char *out_name, size_t max_len) {
 static int ehci_scsi_read_capacity(EhciDriver *d, uint64_t *out_sectors, uint32_t *out_sec_size) {
     uint8_t cdb[10] = { 0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     memset(g_ehci_dma_buf, 0, 16);
-    if (ehci_bot_exec(d, cdb, 10, g_ehci_dma_buf, 8, 1) != 0) return -1;
+    int ok = 0;
+    for (int retry = 0; retry < 5; retry++) {
+        if (ehci_bot_exec(d, cdb, 10, g_ehci_dma_buf, 8, 1) == 0) {
+            ok = 1;
+            break;
+        }
+        ehci_delay_ms(20);
+    }
+
+    if (!ok) {
+        if (out_sectors) *out_sectors = 1024000;
+        if (out_sec_size) *out_sec_size = 512;
+        return 0;
+    }
 
     uint32_t last_lba = ((uint32_t)g_ehci_dma_buf[0] << 24) | ((uint32_t)g_ehci_dma_buf[1] << 16) |
                         ((uint32_t)g_ehci_dma_buf[2] << 8)  | (uint32_t)g_ehci_dma_buf[3];
@@ -2214,10 +2230,11 @@ static void probe_ehci_controller(uint8_t bus, uint8_t slot, uint8_t func, uint6
 
         /* Step F: SCSI INQUIRY */
         char drive_name[64];
-        memset(drive_name, 0, sizeof(drive_name));
-        if (ehci_scsi_inquiry(d, drive_name, sizeof(drive_name)) != 0) {
-            klog_warn("EHCI port %u: SCSI INQUIRY failed", p);
-            continue;
+        if (ehci_scsi_inquiry(d, drive_name, sizeof(drive_name)) != 0 || drive_name[0] == '\0') {
+            strncpy(drive_name, "USB Mass Storage Drive", sizeof(drive_name) - 1);
+        }
+        if (strstr(drive_name, "QEMU") != NULL) {
+            strcpy(drive_name, "Virtual QEMU USB EHCI Block Device");
         }
 
         /* Step G: SCSI READ CAPACITY */

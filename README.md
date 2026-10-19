@@ -4,7 +4,7 @@
 
 [![Architecture: x86_64](https://img.shields.io/badge/Architecture-x86__64-blue.svg)](#)
 [![Firmware: UEFI 64-bit](https://img.shields.io/badge/Firmware-UEFI%20Class%203-brightgreen.svg)](#)
-[![Version: v0.7.1-gui](https://img.shields.io/badge/Version-v0.7.1--gui-orange.svg)](#)
+[![Version: v0.7.2-gui](https://img.shields.io/badge/Version-v0.7.2--gui-orange.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](#)
 
 pseuDOS is a freestanding, 64-bit operating system engineered from scratch for modern x86_64 personal computers. It boots natively from UEFI firmware, transitions to long mode without legacy BIOS dependencies, and provides preemptive round-robin multitasking, fast x86_64 syscalls, a modular userspace boot chain (`autoinit` -> `xshss`), custom bare-metal drivers for NVMe PCIe SSDs, AHCI SATA drives, xHCI/EHCI USB storage, ACPI hardware power management, and dynamic FAT32 filesystem synchronization.
@@ -238,7 +238,6 @@ Once you have installed pseuDOS to a virtual drive using `flash`, boot directly 
 | `flash` | — | Interactive GPT partitioner, FAT32 ESP formatter, and OS installer. |
 | `fs` | `[drive_no\|--drives]` | Displays active VFS statistics, storage devpath, and partition health. |
 | `attached-drives`| `[--all]` | Lists all detected storage drives, connection buses, and capacities. |
-| `switch-target` | `<--int\|--ext>` | Toggles default mass-storage target views. |
 | `screenres` | `[width height]` | Queries or dynamically switches GOP graphical display resolutions. |
 | `cpu` | — | Displays CPU vendor, brand string, topology, and architectural feature flags. |
 | `mem` | — | Displays physical RAM regions, memory types, and kernel heap consumption. |

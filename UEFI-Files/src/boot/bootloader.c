@@ -144,6 +144,130 @@ static void ascii_to_unicode(const char *src, CHAR16 *dst, size_t max_len) {
     dst[i] = 0;
 }
 
+static void uint_to_str(UINT32 val, char *dst, size_t max_len) {
+    char tmp[16];
+    int idx = 0;
+    if (val == 0) {
+        tmp[idx++] = '0';
+    } else {
+        while (val > 0 && idx < 15) {
+            tmp[idx++] = (char)('0' + (val % 10));
+            val /= 10;
+        }
+    }
+    size_t out = 0;
+    while (idx > 0 && out + 1 < max_len) {
+        dst[out++] = tmp[--idx];
+    }
+    dst[out] = '\0';
+}
+
+static int parse_resolution_str(const char *str, UINT32 *out_w, UINT32 *out_h) {
+    if (!str || !*str) return 0;
+    while (*str == ' ' || *str == '\t') str++;
+    UINT32 w = 0, h = 0;
+    while (*str >= '0' && *str <= '9') {
+        w = w * 10 + (*str - '0');
+        str++;
+    }
+    if (*str != 'x' && *str != 'X') return 0;
+    str++;
+    while (*str >= '0' && *str <= '9') {
+        h = h * 10 + (*str - '0');
+        str++;
+    }
+    if (w < 640 || h < 480) return 0;
+    *out_w = w;
+    *out_h = h;
+    return 1;
+}
+
+static void apply_gop_resolution(EFI_SYSTEM_TABLE *SystemTable, EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, BootInfo *boot_info, const char *res_str) {
+    if (!gop || !gop->Mode || !boot_info || !res_str || !*res_str) return;
+
+    if (strcmp(res_str, "auto") == 0 || strcmp(res_str, "default") == 0) {
+        return;
+    }
+
+    UINT32 req_w = 0, req_h = 0;
+    int is_max = (strcmp(res_str, "max") == 0 || strcmp(res_str, "highest") == 0);
+    int is_parsed = parse_resolution_str(res_str, &req_w, &req_h);
+
+    if (!is_max && !is_parsed) return;
+
+    UINT32 target_mode = 0xFFFFFFFF;
+    UINT64 max_pixels = 0;
+
+    for (UINT32 m = 0; m < gop->Mode->MaxMode; m++) {
+        UINTN size_of_info = 0;
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
+        EFI_STATUS st = gop->QueryMode(gop, m, &size_of_info, &info);
+        if (!EFI_ERROR(st) && info) {
+            if (is_max) {
+                UINT64 pix = (UINT64)info->HorizontalResolution * (UINT64)info->VerticalResolution;
+                if (pix > max_pixels) {
+                    max_pixels = pix;
+                    target_mode = m;
+                    req_w = info->HorizontalResolution;
+                    req_h = info->VerticalResolution;
+                }
+            } else if (info->HorizontalResolution == req_w && info->VerticalResolution == req_h) {
+                target_mode = m;
+                break;
+            }
+        }
+    }
+
+    if (target_mode == 0xFFFFFFFF) {
+        boot_msg(SystemTable, "[silo] requested resolution '");
+        boot_msg(SystemTable, res_str);
+        boot_msg(SystemTable, "' not available in UEFI GOP; keeping current mode\n");
+        return;
+    }
+
+    if (target_mode != gop->Mode->Mode) {
+        boot_msg(SystemTable, "[silo] configuring requested GOP resolution (");
+        char numbuf[16];
+        uint_to_str(req_w, numbuf, sizeof(numbuf));
+        boot_msg(SystemTable, numbuf);
+        boot_msg(SystemTable, "x");
+        uint_to_str(req_h, numbuf, sizeof(numbuf));
+        boot_msg(SystemTable, numbuf);
+        boot_msg(SystemTable, ")... ");
+
+        EFI_STATUS st = gop->SetMode(gop, target_mode);
+        if (!EFI_ERROR(st)) {
+            boot_msg(SystemTable, "[ok]\n");
+            if (SystemTable->ConOut && SystemTable->ConOut->QueryMode && SystemTable->ConOut->SetMode && SystemTable->ConOut->Mode) {
+                INT32 best_text_mode = SystemTable->ConOut->Mode->Mode;
+                UINTN max_text_cols = 0;
+                for (INT32 tm = 0; tm < SystemTable->ConOut->Mode->MaxMode; tm++) {
+                    UINTN cols = 0, rows = 0;
+                    if (!EFI_ERROR(SystemTable->ConOut->QueryMode(SystemTable->ConOut, (UINTN)tm, &cols, &rows))) {
+                        if (cols > max_text_cols) {
+                            max_text_cols = cols;
+                            best_text_mode = tm;
+                        }
+                    }
+                }
+                if (max_text_cols > 0 && best_text_mode != SystemTable->ConOut->Mode->Mode) {
+                    SystemTable->ConOut->SetMode(SystemTable->ConOut, (UINTN)best_text_mode);
+                }
+            }
+        } else {
+            boot_msg(SystemTable, "[fallback]\n");
+        }
+    }
+
+    /* Refresh boot_info framebuffer parameters to reflect current GOP mode */
+    boot_info->fb.physical_base = gop->Mode->FrameBufferBase;
+    boot_info->fb.buffer_size = gop->Mode->FrameBufferSize;
+    boot_info->fb.width = gop->Mode->Info->HorizontalResolution;
+    boot_info->fb.height = gop->Mode->Info->VerticalResolution;
+    boot_info->fb.pixels_per_scanline = gop->Mode->Info->PixelsPerScanLine;
+    boot_info->fb.pixel_format = (gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor) ? FB_FORMAT_BGR : FB_FORMAT_RGB;
+}
+
 static void cmdline_append(char *dst, const char *src, size_t max_len) {
     if (!dst || !src || max_len == 0) return;
     size_t dlen = strlen(dst);
@@ -160,6 +284,7 @@ static void cmdline_append(char *dst, const char *src, size_t max_len) {
 
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     uart_init();
+    set_boot_image_handle(ImageHandle);
 
     if (!SystemTable || !SystemTable->BootServices) {
         error_boot(NULL, ERR_GENERIC_BOOT_FAILURE, "SystemTable or BootServices pointer is null");
@@ -169,14 +294,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         SystemTable->ConOut->ClearScreen(SystemTable->ConOut);
     }
 
-    boot_msg(SystemTable, "\n[bootmgfw] pseuDOS 64-bit UEFI Boot Manager v1.0\n");
-    boot_msg(SystemTable, "[bootmgfw] initializing UEFI Firmware environment...\n");
+    boot_msg(SystemTable, "\n[silo] Simple Loader (SiLo) v1.0\n");
+    boot_msg(SystemTable, "[silo] initializing UEFI firmware environment...\n");
 
     /* 1. Validate System Table */
-    boot_msg(SystemTable, "[bootmgfw] validating UEFI system table and boot services... [ok]\n");
+    boot_msg(SystemTable, "[silo] validating UEFI system table and boot services... [ok]\n");
 
     /* 2. Disable Watchdog Timer */
-    boot_msg(SystemTable, "[bootmgfw] disabling UEFI watchdog timer... ");
+    boot_msg(SystemTable, "[silo] disabling UEFI watchdog timer... ");
     if (SystemTable->BootServices->SetWatchdogTimer) {
         SystemTable->BootServices->SetWatchdogTimer(0, 0, 0, NULL);
         boot_msg(SystemTable, "[ok]\n");
@@ -185,7 +310,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
 
     /* 3. Query CPUID for Long Mode */
-    boot_msg(SystemTable, "[bootmgfw] querying CPUID for x86_64 long mode support... ");
+    boot_msg(SystemTable, "[silo] querying CPUID for x86_64 long mode support... ");
     if (!check_cpu_features()) {
         boot_msg(SystemTable, "[failed]\n");
         error_boot(SystemTable, ERR_UNSUPPORTED_CPU, "x86_64 long mode (64-bit) feature flag not present in CPUID");
@@ -193,7 +318,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_msg(SystemTable, "[ok]\n");
 
     /* 4. Locate and Configure GOP Video Mode (1920x1080 True Color) */
-    boot_msg(SystemTable, "[bootmgfw] initializing Graphics Output Protocol (GOP)... ");
+    boot_msg(SystemTable, "[silo] initializing Graphics Output Protocol (GOP)... ");
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
     EFI_STATUS status = SystemTable->BootServices->LocateProtocol(
         &gEfiGraphicsOutputProtocolGuid,
@@ -245,9 +370,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
 
     if (in_vm) {
-        boot_msg(SystemTable, "[bootmgfw] hypervisor detected: configuring optimal GOP video mode... ");
+        boot_msg(SystemTable, "[silo] hypervisor detected: configuring optimal GOP video mode... ");
     } else {
-        boot_msg(SystemTable, "[bootmgfw] bare metal detected: configuring optimal 1080p GOP video mode... ");
+        boot_msg(SystemTable, "[silo] hardware detected: configuring optimal 1080p GOP video mode... ");
     }
     status = gop->SetMode(gop, best_mode);
     if (!EFI_ERROR(status)) {
@@ -287,10 +412,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_info.fb.pixels_per_scanline = gop->Mode->Info->PixelsPerScanLine;
     boot_info.fb.pixel_format = (gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor) ? FB_FORMAT_BGR : FB_FORMAT_RGB;
 
-    /* 6. Pre-allocate 128 MB Kernel Heap (prefer < 4GB for DMA safety) */
-    boot_msg(SystemTable, "[bootmgfw] pre-allocating 128 MB kernel heap pages... ");
+    /* 6. Pre-allocate Kernel Heap (prefer 64 MB, fallback to 32 MB / 16 MB if memory constrained) */
+    boot_msg(SystemTable, "[silo] pre-allocating kernel heap pages... ");
     EFI_PHYSICAL_ADDRESS heap_buffer = 0xFFFFFFFFULL;
-    UINTN heap_pages = 32768; /* 128 MB */
+    UINTN heap_pages = 16384; /* 64 MB */
     status = SystemTable->BootServices->AllocatePages(
         AllocateMaxAddress,
         EfiLoaderData,
@@ -306,17 +431,55 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             &heap_buffer
         );
     }
+    if (EFI_ERROR(status) || heap_buffer == 0) {
+        heap_pages = 8192; /* 32 MB */
+        heap_buffer = 0xFFFFFFFFULL;
+        status = SystemTable->BootServices->AllocatePages(
+            AllocateMaxAddress,
+            EfiLoaderData,
+            heap_pages,
+            &heap_buffer
+        );
+        if (EFI_ERROR(status) || heap_buffer == 0) {
+            heap_buffer = 0;
+            status = SystemTable->BootServices->AllocatePages(
+                AllocateAnyPages,
+                EfiLoaderData,
+                heap_pages,
+                &heap_buffer
+            );
+        }
+    }
+    if (EFI_ERROR(status) || heap_buffer == 0) {
+        heap_pages = 4096; /* 16 MB */
+        heap_buffer = 0xFFFFFFFFULL;
+        status = SystemTable->BootServices->AllocatePages(
+            AllocateMaxAddress,
+            EfiLoaderData,
+            heap_pages,
+            &heap_buffer
+        );
+        if (EFI_ERROR(status) || heap_buffer == 0) {
+            heap_buffer = 0;
+            status = SystemTable->BootServices->AllocatePages(
+                AllocateAnyPages,
+                EfiLoaderData,
+                heap_pages,
+                &heap_buffer
+            );
+        }
+    }
 
     if (EFI_ERROR(status) || heap_buffer == 0) {
         boot_msg(SystemTable, "[failed]\n");
-        error_boot(SystemTable, ERR_MEMORY_MAP_EXHAUSTED, "failed to allocate 128 MB kernel heap memory");
+        error_boot(SystemTable, ERR_MEMORY_MAP_EXHAUSTED, "failed to allocate kernel heap memory");
     }
     boot_info.mem.heap_physical_start = heap_buffer;
     boot_info.mem.heap_size_bytes = heap_pages * 4096;
     boot_msg(SystemTable, "[ok]\n");
 
     /* 7. Detect Boot Storage Media Handle */
-    boot_msg(SystemTable, "[bootmgfw] detecting boot storage media handle... ");
+    boot_msg(SystemTable, "[silo] detecting boot storage media handle... ");
     EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
     status = SystemTable->BootServices->HandleProtocol(
         ImageHandle,
@@ -401,7 +564,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_info.boot_file_path[0] = '\0';
 
     /* 8. Mount Boot Partition Filesystem Volume */
-    boot_msg(SystemTable, "[bootmgfw] mounting boot partition filesystem volume... ");
+    boot_msg(SystemTable, "[silo] mounting boot partition filesystem volume... ");
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = NULL;
     status = SystemTable->BootServices->HandleProtocol(
         loaded_image->DeviceHandle,
@@ -423,10 +586,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_msg(SystemTable, "[ok]\n");
 
     /* 9. Check and Parse Boot Manager Configuration */
-    boot_msg(SystemTable, "[bootmgfw] checking boot configuration... ");
+    boot_msg(SystemTable, "[silo] checking boot configuration... ");
 
     char cfg_kernel_path[128] = "";
     char cfg_initramfs_path[128] = "";
+    char cfg_resolution[32] = "";
     boot_info.autoinit_path[0] = '\0';
     boot_info.shell_path[0] = '\0';
     boot_info.cmdline[0] = '\0';
@@ -444,55 +608,69 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         status = root_dir->Open(root_dir, &cfg_file, (CHAR16 *)bootcfg_path3, EFI_FILE_MODE_READ, 0);
     }
 
+    int used_builtin_defaults = 0;
+    (void)used_builtin_defaults;
     if (EFI_ERROR(status) || !cfg_file) {
-        boot_msg(SystemTable, "[failed]\n");
-        error_boot(SystemTable, ERR_BOOTCFG_NOT_FOUND, "boot configuration not found (\\protected\\bootmgr\\boot.cfg required)");
-    }
+        boot_msg(SystemTable, "[using defaults]\n");
+        used_builtin_defaults = 1;
+        strncpy(cfg_kernel_path, "\\protected\\krnl\\vpkernel", sizeof(cfg_kernel_path) - 1);
+        strncpy(cfg_initramfs_path, "\\protected\\krnl\\initramfs.img", sizeof(cfg_initramfs_path) - 1);
+        strncpy(boot_info.autoinit_path, "\\protected\\krnl\\autoinit.exe", sizeof(boot_info.autoinit_path) - 1);
+        strncpy(boot_info.shell_path, "\\protected\\gui\\gman.exe", sizeof(boot_info.shell_path) - 1);
+        strncpy(boot_info.cmdline, "quiet devpath=hardware boot=live", sizeof(boot_info.cmdline) - 1);
+    } else {
+        char cfg_buf[2048];
+        UINTN cfg_read_size = sizeof(cfg_buf) - 1;
+        status = cfg_file->Read(cfg_file, &cfg_read_size, cfg_buf);
+        cfg_file->Close(cfg_file);
 
-    char cfg_buf[2048];
-    UINTN cfg_read_size = sizeof(cfg_buf) - 1;
-    status = cfg_file->Read(cfg_file, &cfg_read_size, cfg_buf);
-    cfg_file->Close(cfg_file);
+        if (EFI_ERROR(status) || cfg_read_size == 0) {
+            boot_msg(SystemTable, "[using defaults]\n");
+            used_builtin_defaults = 1;
+            strncpy(cfg_kernel_path, "\\protected\\krnl\\vpkernel", sizeof(cfg_kernel_path) - 1);
+            strncpy(cfg_initramfs_path, "\\protected\\krnl\\initramfs.img", sizeof(cfg_initramfs_path) - 1);
+            strncpy(boot_info.autoinit_path, "\\protected\\krnl\\autoinit.exe", sizeof(boot_info.autoinit_path) - 1);
+            strncpy(boot_info.shell_path, "\\protected\\gui\\gman.exe", sizeof(boot_info.shell_path) - 1);
+            strncpy(boot_info.cmdline, "quiet devpath=hardware boot=live", sizeof(boot_info.cmdline) - 1);
+        } else {
+            cfg_buf[cfg_read_size] = '\0';
+            char *line = cfg_buf;
+            while (*line) {
+                while (*line == ' ' || *line == '\t' || *line == '\r' || *line == '\n') line++;
+                if (*line == '\0') break;
+                char *line_end = line;
+                while (*line_end && *line_end != '\r' && *line_end != '\n') line_end++;
+                char orig_end = *line_end;
+                *line_end = '\0';
 
-    if (EFI_ERROR(status) || cfg_read_size == 0) {
-        boot_msg(SystemTable, "[failed]\n");
-        error_boot(SystemTable, ERR_BOOTCFG_NOT_FOUND, "boot.cfg is empty or unreadable");
-    }
-
-    cfg_buf[cfg_read_size] = '\0';
-    char *line = cfg_buf;
-    while (*line) {
-        while (*line == ' ' || *line == '\t' || *line == '\r' || *line == '\n') line++;
-        if (*line == '\0') break;
-        char *line_end = line;
-        while (*line_end && *line_end != '\r' && *line_end != '\n') line_end++;
-        char orig_end = *line_end;
-        *line_end = '\0';
-
-        if (*line != '#') {
-            char *eq = strchr(line, '=');
-            if (eq) {
-                *eq = '\0';
-                char *key = trim(line);
-                char *val = trim(eq + 1);
-                if (strcmp(key, "kernel") == 0) {
-                    strncpy(cfg_kernel_path, val, sizeof(cfg_kernel_path) - 1);
-                } else if (strcmp(key, "initramfs") == 0) {
-                    strncpy(cfg_initramfs_path, val, sizeof(cfg_initramfs_path) - 1);
-                } else if (strcmp(key, "autoinit") == 0) {
-                    strncpy(boot_info.autoinit_path, val, sizeof(boot_info.autoinit_path) - 1);
-                } else if (strcmp(key, "shell") == 0) {
-                    strncpy(boot_info.shell_path, val, sizeof(boot_info.shell_path) - 1);
-                } else if (strcmp(key, "cmdline") == 0) {
-                    strncpy(boot_info.cmdline, val, sizeof(boot_info.cmdline) - 1);
+                if (*line != '#') {
+                    char *eq = strchr(line, '=');
+                    if (eq) {
+                        *eq = '\0';
+                        char *key = trim(line);
+                        char *val = trim(eq + 1);
+                        if (strcmp(key, "kernel") == 0) {
+                            strncpy(cfg_kernel_path, val, sizeof(cfg_kernel_path) - 1);
+                        } else if (strcmp(key, "initramfs") == 0) {
+                            strncpy(cfg_initramfs_path, val, sizeof(cfg_initramfs_path) - 1);
+                        } else if (strcmp(key, "autoinit") == 0) {
+                            strncpy(boot_info.autoinit_path, val, sizeof(boot_info.autoinit_path) - 1);
+                        } else if (strcmp(key, "shell") == 0) {
+                            strncpy(boot_info.shell_path, val, sizeof(boot_info.shell_path) - 1);
+                        } else if (strcmp(key, "cmdline") == 0) {
+                            strncpy(boot_info.cmdline, val, sizeof(boot_info.cmdline) - 1);
+                        } else if (strcmp(key, "resolution") == 0 || strcmp(key, "default_resolution") == 0 || strcmp(key, "res") == 0) {
+                            strncpy(cfg_resolution, val, sizeof(cfg_resolution) - 1);
+                        }
+                    }
                 }
-            }
-        }
 
-        if (orig_end == '\0') break;
-        line = line_end + 1;
+                if (orig_end == '\0') break;
+                line = line_end + 1;
+            }
+            boot_msg(SystemTable, "[ok]\n");
+        }
     }
-    boot_msg(SystemTable, "[ok]\n");
 
     /* boot.cfg MUST specify kernel= */
     if (cfg_kernel_path[0] == '\0') {
@@ -524,7 +702,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
         if (opt_buf[0] != '\0') {
             cmdline_append(boot_info.cmdline, opt_buf, sizeof(boot_info.cmdline));
-            boot_msg(SystemTable, "[bootmgfw] appended UEFI LoadOptions: ");
+            boot_msg(SystemTable, "[silo] appended UEFI LoadOptions: ");
             boot_msg(SystemTable, opt_buf);
             boot_msg(SystemTable, "\n");
         }
@@ -548,7 +726,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 fw_buf[r] = '\0';
                 if (fw_buf[0] != '\0') {
                     cmdline_append(boot_info.cmdline, fw_buf, sizeof(boot_info.cmdline));
-                    boot_msg(SystemTable, "[bootmgfw] appended QEMU fw_cfg cmdline: ");
+                    boot_msg(SystemTable, "[silo] appended QEMU fw_cfg cmdline: ");
                     boot_msg(SystemTable, fw_buf);
                     boot_msg(SystemTable, "\n");
                 }
@@ -573,7 +751,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                         for (uint32_t k = 0; k < fsize; k++) fbuf[k] = (char)inb(0x511);
                         fbuf[fsize] = '\0';
                         cmdline_append(boot_info.cmdline, fbuf, sizeof(boot_info.cmdline));
-                        boot_msg(SystemTable, "[bootmgfw] appended QEMU fw_cfg opt/cmdline: ");
+                        boot_msg(SystemTable, "[silo] appended QEMU fw_cfg opt/cmdline: ");
                         boot_msg(SystemTable, fbuf);
                         boot_msg(SystemTable, "\n");
                         break;
@@ -583,9 +761,33 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
 
+    /* 9d. Check command line for resolution override: res=WxH, resolution=WxH, or video=WxH */
+    if (boot_info.cmdline[0] != '\0') {
+        const char *cmd_res = strstr(boot_info.cmdline, "res=");
+        if (!cmd_res) cmd_res = strstr(boot_info.cmdline, "resolution=");
+        if (!cmd_res) cmd_res = strstr(boot_info.cmdline, "video=");
+        if (cmd_res) {
+            const char *eq = strchr(cmd_res, '=');
+            if (eq) {
+                eq++;
+                size_t ri = 0;
+                while (eq[ri] && eq[ri] != ' ' && eq[ri] != '\t' && ri < sizeof(cfg_resolution) - 1) {
+                    cfg_resolution[ri] = eq[ri];
+                    ri++;
+                }
+                cfg_resolution[ri] = '\0';
+            }
+        }
+    }
+
+    /* Apply configured resolution if requested in boot.cfg or cmdline */
+    if (cfg_resolution[0] != '\0') {
+        apply_gop_resolution(SystemTable, gop, &boot_info, cfg_resolution);
+    }
+
     /* 10. Load Kernel Image specified in boot.cfg */
-    boot_msg(SystemTable, "[bootmgfw] looking for kernel image...\n");
-    boot_msg(SystemTable, "[bootmgfw] loading kernel from boot.cfg: ");
+    boot_msg(SystemTable, "[silo] looking for kernel image...\n");
+    boot_msg(SystemTable, "[silo] loading kernel from boot.cfg: ");
     boot_msg(SystemTable, cfg_kernel_path);
     boot_msg(SystemTable, "... ");
 
@@ -595,14 +797,37 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     status = root_dir->Open(root_dir, &kernel_file, cfg_kernel_path16, EFI_FILE_MODE_READ, 0);
 
     if (EFI_ERROR(status) || !kernel_file) {
+        /* Probe fallback kernel paths before failing */
+        const char *k_fallbacks[] = {
+            "\\protected\\krnl\\vpkernel",
+            "\\protected\\bin\\vpkernel",
+            "\\boot\\vpkernel",
+            "\\vpkernel",
+            NULL
+        };
+        for (int k = 0; k_fallbacks[k]; k++) {
+            CHAR16 fb16[128];
+            ascii_to_unicode(k_fallbacks[k], fb16, sizeof(fb16) / sizeof(CHAR16));
+            status = root_dir->Open(root_dir, &kernel_file, fb16, EFI_FILE_MODE_READ, 0);
+            if (!EFI_ERROR(status) && kernel_file) {
+                strncpy(cfg_kernel_path, k_fallbacks[k], sizeof(cfg_kernel_path) - 1);
+                boot_msg(SystemTable, "[found fallback: ");
+                boot_msg(SystemTable, cfg_kernel_path);
+                boot_msg(SystemTable, "] ");
+                break;
+            }
+        }
+    }
+
+    if (EFI_ERROR(status) || !kernel_file) {
         boot_msg(SystemTable, "[failed]\n");
-        error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "kernel image specified in boot.cfg not found");
+        error_boot(SystemTable, ERR_BOOTCONFIG, "kernel image specified in boot.cfg not found");
     }
     strcpy(boot_info.boot_file_path, cfg_kernel_path);
     boot_msg(SystemTable, "[ok]\n");
 
     /* 11. Dynamically Query Kernel File Size */
-    boot_msg(SystemTable, "[bootmgfw] querying kernel image file size... ");
+    boot_msg(SystemTable, "[silo] querying kernel image file size... ");
     UINT8 info_buf[sizeof(EFI_FILE_INFO) + 256];
     UINTN info_size = sizeof(info_buf);
     UINT64 actual_file_size = 0;
@@ -634,7 +859,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_msg(SystemTable, "[ok]\n");
 
     /* 12. Read Kernel Binary into Temporary Buffer */
-    boot_msg(SystemTable, "[bootmgfw] allocating memory for kernel loading... ");
+    boot_msg(SystemTable, "[silo] allocating memory for kernel loading... ");
     EFI_PHYSICAL_ADDRESS temp_file_buffer = 0xFFFFFFFFULL;
     status = SystemTable->BootServices->AllocatePages(
         AllocateMaxAddress,
@@ -656,14 +881,28 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         boot_msg(SystemTable, "[failed]\n");
         error_boot(SystemTable, ERR_MEMORY_MAP_EXHAUSTED, "failed to allocate memory pages for kernel loading");
     }
+    boot_msg(SystemTable, "[ok]\n");
 
+    /* 12a. Read Kernel Binary into Temporary Buffer */
+    boot_msg(SystemTable, "[silo] reading kernel binary into memory... ");
     UINTN read_size = actual_file_size;
     status = kernel_file->Read(kernel_file, &read_size, (VOID *)(uintptr_t)temp_file_buffer);
     kernel_file->Close(kernel_file);
 
+    if (EFI_ERROR(status)) {
+        boot_msg(SystemTable, "[failed]\n");
+        error_boot(SystemTable, ERR_STORAGE_DEVICE_IO, "failed to read kernel binary from storage media");
+    }
+
+    if (read_size < actual_file_size) {
+        boot_msg(SystemTable, "[truncated]\n");
+        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "kernel binary truncated on storage media (read fewer bytes than file size)");
+    }
+    boot_msg(SystemTable, "[ok]\n");
+
     /* 12b. Attempt to load initramfs from boot.cfg if specified */
     if (cfg_initramfs_path[0] != '\0') {
-        boot_msg(SystemTable, "[bootmgfw] loading initramfs from boot.cfg: ");
+        boot_msg(SystemTable, "[silo] loading initramfs from boot.cfg: ");
         boot_msg(SystemTable, cfg_initramfs_path);
         boot_msg(SystemTable, "... ");
         CHAR16 cfg_initramfs_path16[128];
@@ -671,7 +910,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         EFI_FILE_PROTOCOL *ramfs_file = NULL;
         status = root_dir->Open(root_dir, &ramfs_file, cfg_initramfs_path16, EFI_FILE_MODE_READ, 0);
         if (!EFI_ERROR(status) && ramfs_file) {
-            boot_msg(SystemTable, "[ok]\n");
             UINTN r_info_size = sizeof(info_buf);
             UINTN ramfs_file_size = 0;
             if (!EFI_ERROR(ramfs_file->GetInfo(ramfs_file, &gEfiFileInfoGuid, &r_info_size, info_buf))) {
@@ -685,32 +923,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                     if (!EFI_ERROR(ramfs_file->Read(ramfs_file, &r_read, (VOID *)(uintptr_t)ramfs_buf))) {
                         boot_info.initramfs_base = (uint64_t)ramfs_buf;
                         boot_info.initramfs_size = (uint64_t)r_read;
-                        boot_msg(SystemTable, "[bootmgfw] loaded initramfs into memory [ok]\n");
                     }
                 }
             }
             ramfs_file->Close(ramfs_file);
+            boot_msg(SystemTable, "[ok]\n");
         } else {
             boot_msg(SystemTable, "[failed]\n");
-            error_boot(SystemTable, ERR_KERNEL_NOT_FOUND, "initramfs image specified in boot.cfg not found");
+            error_boot(SystemTable, ERR_BOOTCONFIG, "initramfs image specified in boot.cfg not found");
         }
     }
 
     root_dir->Close(root_dir);
 
-    if (EFI_ERROR(status)) {
-        boot_msg(SystemTable, "[failed]\n");
-        error_boot(SystemTable, ERR_STORAGE_DEVICE_IO, "failed to read kernel binary from storage media");
-    }
-
-    if (read_size < actual_file_size) {
-        boot_msg(SystemTable, "[truncated]\n");
-        error_boot(SystemTable, ERR_KERNEL_INTEGRITY, "kernel binary truncated on storage media (read fewer bytes than file size)");
-    }
-    boot_msg(SystemTable, "[ok]\n");
-
     /* 13. Map PE Sections and Allocate Execution Memory */
-    boot_msg(SystemTable, "[bootmgfw] mapping kernel PE sections and allocating memory... ");
+    boot_msg(SystemTable, "[silo] mapping kernel PE sections and allocating memory... ");
     EFI_PHYSICAL_ADDRESS kernel_buffer = 0;
     UINT8 *raw_file = (UINT8 *)(uintptr_t)temp_file_buffer;
 
@@ -872,7 +1099,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_msg(SystemTable, "[ok]\n");
 
     /* 11. Locate ACPI RSDP in Configuration Table */
-    boot_msg(SystemTable, "[bootmgfw] discovering ACPI RSDP table pointer... ");
+    boot_msg(SystemTable, "[silo] discovering ACPI RSDP table pointer... ");
     for (UINTN i = 0; i < SystemTable->NumberOfTableEntries; i++) {
         if (guid_cmp(&SystemTable->ConfigurationTable[i].VendorGuid, &gEfiAcpi20TableGuid) ||
             guid_cmp(&SystemTable->ConfigurationTable[i].VendorGuid, &gEfiAcpi10TableGuid)) {
@@ -945,7 +1172,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_info.mem.map_buffer = (uint64_t)map_buf_phys;
 
     /* 13. Fetch Memory Map and Call ExitBootServices() */
-    boot_msg(SystemTable, "[bootmgfw] exiting UEFI Boot Services (ExitBootServices)...\n");
+    boot_msg(SystemTable, "[silo] exiting UEFI Boot Services (ExitBootServices)...\n");
 
     UINTN map_size = map_pages * 4096;
     UINTN map_key = 0;
@@ -985,8 +1212,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
 
-    uart_puts("[bootmgfw] successfully exited UEFI Boot Services!\n");
-    uart_puts("[bootmgfw] transferring control to bare-metal pseuDOS kernel...\n");
+    uart_puts("[silo] successfully exited UEFI Boot Services!\n");
+    uart_puts("[silo] transferring control to kernel...\n");
 
     /* 14. Jump to Bare-Metal Kernel Entry */
     uint8_t *raw = (uint8_t *)(uintptr_t)kernel_buffer;

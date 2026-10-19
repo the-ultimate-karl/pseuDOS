@@ -444,7 +444,7 @@ static void env_init(void) {
     env_set("HOSTNAME", "pseuDOS");
     env_set("PWD", "/");
     env_set("HOME", "/home/user");
-    env_set("SHELL", "/protected/crit/xshss.bin");
+    env_set("SHELL", "/protected/crit/bshss.exe");
 }
 
 static void cmd_env(void) {
@@ -694,7 +694,7 @@ static void cmd_uname(const char *arg) {
 /* Shell Commands */
 static void cmd_help(void) {
     puts("=================================================================\n");
-    puts(" pseuDOS Experimental Shell Subsystem (xshss)\n");
+    puts(" Basic Shell Subsystem (bshss)\n");
     puts("=================================================================\n");
     puts(" help                        : display available commands\n");
     puts(" echo <text>                 : print text to console\n");
@@ -725,7 +725,6 @@ static void cmd_help(void) {
     puts(" set / export [name=val]     : set or display shell environment variables\n");
     puts(" history                     : display command history\n");
     puts(" screenres [w h]             : adjust or display screen resolution\n");
-    puts(" switch-target [--int|--ext] : switch storage target\n");
     puts(" attached-drives [--all]     : list attached storage drives\n");
     puts(" cpu                         : display CPU model, vendor, and feature flags\n");
     puts(" mem                         : display physical memory map and statistics\n");
@@ -1144,22 +1143,48 @@ static int do_cp(const char *src, const char *dst, int verbose) {
     resolve_path(src, src_path, sizeof(src_path));
     resolve_path(dst, dst_path, sizeof(dst_path));
 
-    /* If destination is a directory, append src basename */
+    /* If destination is a directory or path ended with slash, append src basename */
     vfs_stat_t st_dst;
+    int is_dir = 0;
     if (syscall(SYS_STAT, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)&st_dst, 0, 0, 0) == 0) {
-        if (st_dst.type == VFS_TYPE_DIR) { /* Directory */
-            size_t len = strlen(dst_path);
-            if (len > 0 && dst_path[len - 1] != '/' && len + 1 < sizeof(dst_path)) {
-                dst_path[len] = '/';
-                dst_path[len + 1] = '\0';
-                len++;
-            }
-            const char *src_base = strrchr(src_path, '/');
-            if (!src_base) src_base = src_path;
-            else src_base++;
-            strncpy(dst_path + len, src_base, sizeof(dst_path) - len - 1);
-            dst_path[sizeof(dst_path) - 1] = '\0';
+        if (st_dst.type == VFS_TYPE_DIR) is_dir = 1;
+    }
+    size_t raw_len = strlen(dst);
+    if (raw_len > 0 && (dst[raw_len - 1] == '/' || dst[raw_len - 1] == '\\')) {
+        is_dir = 1;
+    }
+    if (is_dir) {
+        size_t len = strlen(dst_path);
+        if (len > 0 && dst_path[len - 1] != '/' && len + 1 < sizeof(dst_path)) {
+            dst_path[len] = '/';
+            dst_path[len + 1] = '\0';
+            len++;
         }
+        const char *src_base = strrchr(src_path, '/');
+        if (!src_base) src_base = src_path;
+        else src_base++;
+        strncpy(dst_path + len, src_base, sizeof(dst_path) - len - 1);
+        dst_path[sizeof(dst_path) - 1] = '\0';
+    }
+
+    /* Fast kernel single-pass copy */
+    int64_t cp_res = syscall(SYS_COPYFILE, (uint64_t)(uintptr_t)src_path, (uint64_t)(uintptr_t)dst_path, 0, 0, 0);
+    if (cp_res == 0) {
+        return 0;
+    }
+    if (cp_res == -EPERM) {
+        if (verbose) puts("cp: permission denied: destination is protected path, requires 'sudo' or KERNEL mode\n");
+        return -EPERM;
+    }
+    if (cp_res != -ENOSYS) {
+        if (verbose) {
+            puts("cp: cannot copy '");
+            puts(src);
+            puts("' to '");
+            puts(dst);
+            puts("'\n");
+        }
+        return -1;
     }
 
     char buf[2048];
@@ -1650,7 +1675,7 @@ static void cmd_grub(void) {
     puts("=================================================================\n");
     puts("EFI Bootloader Targets:\n");
     puts("  /EFI/pseuDOS/BOOTX64.EFI\n");
-    puts("  /EFI/pseuDOS/pseudos.efi\n\n");
+    puts("  /EFI/pseuDOS/silo.efi\n\n");
     puts("GRUB 2 Menuentry Snippet (/etc/grub.d/40_custom or /boot/grub/grub.cfg):\n");
     puts("  menuentry \"pseuDOS x86_64\" {\n");
     puts("      insmod fat\n");
@@ -1673,7 +1698,7 @@ static void cmd_flash(void) {
         return;
     }
 
-    puts("flash: searching for attached internal mass storage devices... ");
+    puts("flash: searching for attached mass storage devices... ");
     int64_t count = syscall(SYS_FLASH, FLASH_OP_GET_COUNT, 0, 0, 0, 0);
     if (count <= 0) {
         puts("none found\nflash: error: no mass storage devices detected on system!\n");
@@ -1682,63 +1707,51 @@ static void cmd_flash(void) {
 
     flash_dev_info_t matching[32];
     uint32_t match_count = 0;
-    int is_external_view = 0;
 
-    /* Check internal drives first */
     for (int i = 0; i < count && match_count < 32; i++) {
         flash_dev_info_t info;
         if (syscall(SYS_FLASH, FLASH_OP_GET_DEVICE, (uint64_t)i, (uint64_t)(uintptr_t)&info, 0, 0) == 0) {
-            if (info.type == 0 || info.type == 1) { /* SATA or NVME */
-                matching[match_count++] = info;
-            }
+            matching[match_count++] = info;
         }
     }
 
     if (match_count > 0) {
         puts("done\n");
         puts("flash: identifying mass storage devices... done\n");
-        puts("flash: displaying options for internal mass storage devices\n\n");
+        puts("flash: displaying detected mass storage devices\n\n");
     } else {
         puts("none found\n");
-        puts("flash: querying universal serial bus (usb) for any connected mass storage devices... ");
-
-        for (int i = 0; i < count && match_count < 32; i++) {
-            flash_dev_info_t info;
-            if (syscall(SYS_FLASH, FLASH_OP_GET_DEVICE, (uint64_t)i, (uint64_t)(uintptr_t)&info, 0, 0) == 0) {
-                if (info.type == 2) { /* USB */
-                    matching[match_count++] = info;
-                }
-            }
-        }
-
-        if (match_count > 0) {
-            puts("done\n");
-            puts("flash: identifying mass storage devices... done\n");
-            puts("flash: displaying options for external mass storage devices\n\n");
-            is_external_view = 1;
-        } else {
-            puts("none found\n");
-            puts("flash: error: no mass storage devices detected on system!\n");
-            return;
-        }
+        puts("flash: error: no mass storage devices detected on system!\n");
+        return;
     }
 
-    puts("                                [pseuDOS Installation]\n");
-    puts("==========================================================================\n");
+    puts("                                            [pseuDOS Installation]\n");
+    puts("==============================================================================================================\n");
     puts("choose the mass storage device you want to install pseuDOS on:\n\n");
-    puts("[NO]    |    [DEVICE_NAME]                      |    [SIZE]\n");
-    puts("--------+---------------------------------------+------------\n");
+    puts("[NO]  |  [TYPE]    |  [DEVICE_NAME]                         |  [SIZE]    |  [BUS_SPEED]\n");
+    puts("------+------------+----------------------------------------+------------+------------------------------------\n");
 
     for (uint32_t i = 0; i < match_count; i++) {
         print_num((uint64_t)(i + 1));
-        if (i + 1 < 10) puts("       |    ");
-        else puts("      |    ");
+        if (i + 1 < 10) puts("     |  ");
+        else puts("    |  ");
+
+        puts(matching[i].type_str);
+        size_t tlen = strlen(matching[i].type_str);
+        for (size_t s = tlen; s < 10; s++) putc(' ');
+        puts("|  ");
 
         puts(matching[i].name);
         size_t nlen = strlen(matching[i].name);
-        for (size_t s = nlen; s < 35; s++) putc(' ');
-        puts("|    ");
+        for (size_t s = nlen; s < 38; s++) putc(' ');
+        puts("|  ");
+
         puts(matching[i].size_str);
+        size_t slen = strlen(matching[i].size_str);
+        for (size_t s = slen; s < 10; s++) putc(' ');
+        puts("|  ");
+
+        puts(matching[i].bus_speed);
         puts("\n");
     }
     puts("\n");
@@ -1770,7 +1783,7 @@ static void cmd_flash(void) {
     }
 
     /* USB 3.1 Gen 1 minimum speed verification */
-    if (is_external_view || selected_dev.type == 2) {
+    if (selected_dev.type == 2) {
         if (selected_dev.usb_version < 0x0310) {
             puts("ATTENTION! you are attempting to install pseuDOS to an external universal serial bus drive that does not meet the minimum requirement of USB 3.1 Gen 1. it is highly recommended to use a faster drive to make sure installation does not crawl, and to ensure boot times are at max.\n");
             puts("are you sure you want to do this?\n(y/N) ");
@@ -1877,14 +1890,6 @@ static void cmd_attached_drives(const char *arg) {
     }
 }
 
-static void cmd_switch_target(const char *arg) {
-    g_sys_cmd_buf[0] = '\0';
-    int64_t res = syscall(SYS_SWITCH_TARGET, (uint64_t)(uintptr_t)(arg ? arg : ""), (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0);
-    if (res >= 0 && g_sys_cmd_buf[0] != '\0') {
-        puts(g_sys_cmd_buf);
-    }
-}
-
 static void cmd_screenres(const char *arg) {
     g_sys_cmd_buf[0] = '\0';
     int64_t res = syscall(SYS_SCREENRES, (uint64_t)(uintptr_t)(arg ? arg : ""), (uint64_t)(uintptr_t)g_sys_cmd_buf, sizeof(g_sys_cmd_buf), 0, 0);
@@ -1976,7 +1981,7 @@ static int is_singleton_app(const char *name) {
             strcmp(tmp, "lack") == 0 ||
             strcmp(tmp, "ninds") == 0 ||
             strcmp(tmp, "gshss") == 0 ||
-            strcmp(tmp, "xshss") == 0);
+            strcmp(tmp, "bshss") == 0);
 }
 
 static int is_app_running(const char *name) {
@@ -2278,8 +2283,6 @@ static void execute_command_internal(char *cmd_line) {
         cmd_devpath(arg);
     } else if (strcmp(cmd, "attached-drives") == 0) {
         cmd_attached_drives(arg);
-    } else if (strcmp(cmd, "switch-target") == 0) {
-        cmd_switch_target(arg);
     } else if (strcmp(cmd, "screenres") == 0) {
         cmd_screenres(arg);
     } else if (strcmp(cmd, "proctest") == 0) {
@@ -2366,12 +2369,10 @@ static void execute_command_internal(char *cmd_line) {
                strcmp(cmd, "superglue") == 0 || strcmp(cmd, "superglue.exe") == 0 ||
                strcmp(cmd, "/protected/gui/superglue.exe") == 0) {
         puts("launching pseuDOS desktop environment (gman.exe)...\n");
-        /* Relinquish TTY1 so input goes exclusively to GUI desktop (ntfs.exe) */
-        syscall(SYS_TTY_SET, 3, 0, 0, 0, 0);
-        int64_t gpid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/gui/gman.exe", 1, 0, 0, 0);
+        /* Spawn gman.exe explicitly on TTY1 (GUI desktop session) */
+        int64_t gpid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/gui/gman.exe", 1, 1, 0, 0);
         if (gpid <= 0) {
             puts("gui: failed to launch /protected/gui/gman.exe\n");
-            syscall(SYS_TTY_SET, 1, 0, 0, 0, 0);
         } else {
             puts("gui: desktop environment launched (PID ");
             print_num((uint64_t)gpid);
@@ -2381,7 +2382,6 @@ static void execute_command_internal(char *cmd_line) {
                 syscall(SYS_SLEEP, 200, 0, 0, 0, 0);
             }
             puts("gui: desktop session ended, returning to shell.\n");
-            syscall(SYS_TTY_SET, 1, 0, 0, 0, 0);
         }
     } else {
         execute_external_command(cmd, arg, as_root);
@@ -2392,14 +2392,14 @@ static void execute_command_internal(char *cmd_line) {
     }
 }
 
-void xshss_main(void) {
+void bshss_main(void) {
     env_init();
 
-    int64_t my_tty = syscall(SYS_TTY_GET, 0, 0, 0, 0, 0);
+    int64_t my_tty = syscall(SYS_TTY_GET, 1, 0, 0, 0, 0);
     if (my_tty == 3) {
-        puts("[  xhss  ] started (tty3)\n");
+        puts("[  bshss ] started (tty3)\n");
     } else {
-        puts("[  xhss  ] started (console)\n");
+        puts("[  bshss ] started (console)\n");
     }
     puts("shell started\n");
     puts("type 'help' for a list of commands.\n\n");

@@ -57,14 +57,14 @@ void gman_main(void) {
     puts("[gman] launching /protected/gui/gshss.exe...\n");
     int64_t gshss_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/gui/gshss.exe", 0, 0, 0, 0);
     if (gshss_pid <= 0) {
-        puts("[gman] WARNING: failed to spawn gshss.exe, falling back to xshss.exe\n");
-        int64_t xshss_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/crit/xshss.exe", 0, 0, 0, 0);
-        if (xshss_pid <= 0) {
+        puts("[gman] WARNING: failed to spawn gshss.exe, falling back to bshss.exe\n");
+        int64_t bshss_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/crit/bshss.exe", 0, 0, 0, 0);
+        if (bshss_pid <= 0) {
             puts("[gman] CRITICAL: unable to start userland processes\n");
             syscall(SYS_PANIC, (uint64_t)(uintptr_t)"unable to start userland processes", 0, 0, 0, 0);
             while (1) syscall(SYS_SLEEP, 1000, 0, 0, 0, 0);
         }
-        gshss_pid = xshss_pid;
+        gshss_pid = bshss_pid;
     }
 
     puts("[gman] pseuDOS desktop session successfully orchestrated\n");
@@ -74,10 +74,11 @@ void gman_main(void) {
     int64_t shell_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/apps/shell.exe", 0, 0, 0, 0);
 
     /* 7. Launch background text console shell on TTY3 */
-    puts("[gman] launching /protected/crit/xshss.exe on tty3...\n");
-    int64_t xshss_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/crit/xshss.exe", 0, 3, 0, 0);
+    puts("[gman] launching /protected/crit/bshss.exe on tty3...\n");
+    int64_t bshss_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/crit/bshss.exe", 0, 3, 0, 0);
 
     /* 8. Supervise session processes */
+    int lack_fail_count = 0;
     while (1) {
         /* Check if ntfs.exe died */
         if (ntfs_pid > 0 && syscall(SYS_WAITPID, (uint64_t)ntfs_pid, 0, 0, 0, 0) != 0) {
@@ -103,6 +104,12 @@ void gman_main(void) {
         } else {
             /* Check if lack.exe died */
             if (lack_pid > 0 && syscall(SYS_WAITPID, (uint64_t)lack_pid, 0, 0, 0, 0) != 0) {
+                lack_fail_count++;
+                if (lack_fail_count >= 3) {
+                    puts("[gman] FATAL: compositor failed repeatedly, insufficient memory\n");
+                    syscall(SYS_PANIC, (uint64_t)(uintptr_t)"insufficient memory: display compositor failed to allocate canvas", 0, 0, 0, 0);
+                    while (1) syscall(SYS_SLEEP, 1000, 0, 0, 0, 0);
+                }
                 puts("[gman] lack.exe (compositor) terminated; respawning...\n");
                 lack_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/gui/lack.exe", 0, 0, 0, 0);
             }
@@ -119,9 +126,9 @@ void gman_main(void) {
                 gshss_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/gui/gshss.exe", 0, 0, 0, 0);
             }
 
-            /* Check if xshss.exe on tty3 died */
-            if (xshss_pid > 0 && syscall(SYS_WAITPID, (uint64_t)xshss_pid, 0, 0, 0, 0) != 0) {
-                xshss_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/crit/xshss.exe", 0, 3, 0, 0);
+            /* Check if bshss.exe on tty3 died */
+            if (bshss_pid > 0 && syscall(SYS_WAITPID, (uint64_t)bshss_pid, 0, 0, 0, 0) != 0) {
+                bshss_pid = syscall(SYS_EXEC, (uint64_t)(uintptr_t)"/protected/crit/bshss.exe", 0, 3, 0, 0);
             }
         }
         syscall(SYS_SLEEP, 50, 0, 0, 0, 0);

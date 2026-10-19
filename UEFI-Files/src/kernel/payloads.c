@@ -17,6 +17,12 @@ const uint8_t *payload_get_bootloader(size_t *out_size) {
     return get_vfs_payload_content("/EFI/BOOT/BOOTX64.EFI", out_size);
 }
 
+const uint8_t *payload_get_recovery(size_t *out_size) {
+    const uint8_t *p = get_vfs_payload_content("/EFI/BOOT/recovery.efi", out_size);
+    if (!p) p = get_vfs_payload_content("/EFI/pseuDOS/recovery.efi", out_size);
+    return p;
+}
+
 const uint8_t *payload_get_kernel(size_t *out_size) {
     if (g_boot_info_global && g_boot_info_global->kernel_raw_file_base && g_boot_info_global->kernel_raw_file_size) {
         if (out_size) *out_size = (size_t)g_boot_info_global->kernel_raw_file_size;
@@ -33,8 +39,8 @@ const uint8_t *payload_get_autoinit(size_t *out_size) {
     return get_vfs_payload_content("/protected/krnl/autoinit.exe", out_size);
 }
 
-const uint8_t *payload_get_xshss(size_t *out_size) {
-    return get_vfs_payload_content("/protected/crit/xshss.exe", out_size);
+const uint8_t *payload_get_bshss(size_t *out_size) {
+    return get_vfs_payload_content("/protected/crit/bshss.exe", out_size);
 }
 
 const uint8_t *payload_get_gman(size_t *out_size) {
@@ -95,5 +101,17 @@ const uint8_t *payload_get_filemgr(size_t *out_size) {
 
 const uint8_t *payload_get_view(size_t *out_size) {
     return get_vfs_payload_content("/protected/apps/view.exe", out_size);
+}
+
+const uint8_t *payload_get_initramfs(size_t *out_size) {
+    if (g_boot_info_global && g_boot_info_global->initramfs_base && g_boot_info_global->initramfs_size) {
+        if (out_size) *out_size = (size_t)g_boot_info_global->initramfs_size;
+        return (const uint8_t *)(uintptr_t)g_boot_info_global->initramfs_base;
+    }
+    return get_vfs_payload_content("/protected/krnl/initramfs.img", out_size);
+}
+
+const uint8_t *payload_get_by_path(const char *path, size_t *out_size) {
+    return get_vfs_payload_content(path, out_size);
 }
 

@@ -1,6 +1,7 @@
 #include "pmm.h"
 #include "lib.h"
 #include "drivers.h"
+#include "panic.h"
 
 /* UEFI Memory Descriptor Structure */
 typedef struct {
@@ -77,6 +78,7 @@ void pmm_init(const MemoryMapInfo *mem, const BootInfo *boot_info) {
     /* 2. Allocate Bitmap from dynamic kernel heap */
     g_pmm_bitmap = (uint8_t *)kmalloc(bitmap_size_bytes);
     if (!g_pmm_bitmap) {
+        panic_insufficient_memory(0, 256);
         return;
     }
 

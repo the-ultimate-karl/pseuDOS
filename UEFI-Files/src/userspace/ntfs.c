@@ -551,12 +551,14 @@ void ntfs_main(void) {
                             if (slot >= 0) {
                                 uint32_t wid = g_next_window_id++;
                                 size_t shm_bytes = (size_t)msg.width * (size_t)msg.height * 4;
+                                uint32_t scr_w = g_screen_width > 0 ? g_screen_width : 1280;
+                                uint32_t scr_h = g_screen_height > 0 ? g_screen_height : 720;
                                 if (msg.flags & NTFS_WIN_BACKGROUND) {
-                                    shm_bytes = 2560ULL * 1440ULL * 4;
+                                    shm_bytes = (size_t)scr_w * (size_t)scr_h * 4;
                                 } else if (msg.flags & NTFS_WIN_TASKBAR) {
-                                    shm_bytes = 2560ULL * 64ULL * 4;
-                                } else if (!(msg.flags & NTFS_WIN_SPLASH)) {
-                                    size_t max_bytes = 2560ULL * 1440ULL * 4;
+                                    shm_bytes = (size_t)scr_w * 64ULL * 4;
+                                } else if (!(msg.flags & (NTFS_WIN_SPLASH | NTFS_WIN_FRAMELESS | NTFS_WIN_FIXED_SIZE))) {
+                                    size_t max_bytes = (size_t)scr_w * (size_t)scr_h * 4;
                                     if (shm_bytes < max_bytes) {
                                         shm_bytes = max_bytes;
                                     }
@@ -573,6 +575,9 @@ void ntfs_main(void) {
                                 shm_name[4 + digits] = '\0';
 
                                 int win_shm = (int)syscall(SYS_SHM_CREATE, (uint64_t)(uintptr_t)shm_name, shm_bytes, 0, 0, 0);
+                                if (win_shm < 0) {
+                                    puts("[ntfs] WARN: SYS_SHM_CREATE failed for window, insufficient memory\n");
+                                }
 
                                 g_windows[slot].active = 1;
                                 g_windows[slot].id = wid;

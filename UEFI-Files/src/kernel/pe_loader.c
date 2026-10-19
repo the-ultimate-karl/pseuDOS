@@ -167,7 +167,7 @@ static int is_singleton_process(const char *name) {
             strcmp(tmp, "lack") == 0 ||
             strcmp(tmp, "ninds") == 0 ||
             strcmp(tmp, "gshss") == 0 ||
-            strcmp(tmp, "xshss") == 0);
+            strcmp(tmp, "bshss") == 0);
 }
 
 process_t *pe_spawn_process(const char *name, const char *path, process_privilege_t priv) {
@@ -194,7 +194,7 @@ process_t *pe_spawn_process(const char *name, const char *path, process_privileg
         else proc_name = norm_path;
     }
 
-    /* Check for duplicate singleton instances (ntfs.exe, lack.exe, ninds.exe, gshss.exe, xshss.exe) */
+    /* Check for duplicate singleton instances (ntfs.exe, lack.exe, ninds.exe, gshss.exe, bshss.exe) */
     if (is_singleton_process(proc_name) || is_singleton_process(norm_path)) {
         if (process_is_running(proc_name ? proc_name : norm_path)) {
             klog_warn("PE spawn: singleton process '%s' is already running; launch denied", proc_name ? proc_name : norm_path);

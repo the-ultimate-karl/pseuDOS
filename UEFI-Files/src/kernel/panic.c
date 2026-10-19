@@ -244,3 +244,12 @@ void kernel_panic(const char *reason, const panic_context_t *ctx) {
         }
     }
 }
+
+void panic_insufficient_memory(uint64_t detected_mb, uint64_t required_mb) {
+    char reason_buf[128];
+    snprintf(reason_buf, sizeof(reason_buf),
+             "insufficient physical memory: %lu MB detected, %lu MB required",
+             detected_mb, required_mb);
+
+    kernel_panic(reason_buf, NULL);
+}

@@ -43,6 +43,10 @@ size_t console_get_capture_length(void) {
     return g_console_capture_len;
 }
 
+uint32_t console_get_cursor_x(void) {
+    return g_cursor_x;
+}
+
 void console_set_fb_output(int enable) {
     g_fb_output_enabled = enable;
 }

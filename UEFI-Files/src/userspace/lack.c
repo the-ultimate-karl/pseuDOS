@@ -4,6 +4,7 @@
 #include "ipc.h"
 #include "shm.h"
 #include "ntfs_protocol.h"
+#include "bootinfo.h"
 
 static size_t strlen(const char *s) {
     size_t len = 0;
@@ -14,6 +15,15 @@ static size_t strlen(const char *s) {
 static void puts(const char *str) {
     if (!str) return;
     syscall(SYS_WRITE, 1, (uint64_t)(uintptr_t)str, strlen(str), 0, 0);
+}
+
+static void u32_to_str(uint32_t val, char *buf) {
+    if (val == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
+    char tmp[16]; int ti = 0;
+    while (val > 0) { tmp[ti++] = '0' + (val % 10); val /= 10; }
+    int i = 0;
+    while (ti > 0) buf[i++] = tmp[--ti];
+    buf[i] = '\0';
 }
 
 static void *memset(void *s, int c, size_t n) {
@@ -47,6 +57,8 @@ static uint32_t g_screen_width = 1280;
 static uint32_t g_screen_height = 720;
 static uint32_t *g_canvas = NULL;
 static int g_canvas_shm_id = -1;
+static size_t g_allocated_canvas_bytes = 0;
+static int g_canvas_gen = 1;
 
 
 /* Window surfaces table */
@@ -306,9 +318,28 @@ void lack_main(void) {
         }
     }
 
-    /* 3. Allocate shared composition canvas (double buffered pre-sized to 2560x1440) */
-    size_t canvas_bytes = 2560ULL * 1440ULL * 4;
-    g_canvas_shm_id = (int)syscall(SYS_SHM_CREATE, (uint64_t)(uintptr_t)"shm:lack_canvas", canvas_bytes * 2, 0, 0, 0);
+    /* 3. Allocate shared composition canvas (double buffered based on screen resolution) */
+    uint32_t c_w = g_screen_width > 0 ? g_screen_width : 1280;
+    uint32_t c_h = g_screen_height > 0 ? g_screen_height : 720;
+
+    BootInfo bi;
+    uint64_t ram_mb = 512;
+    if (syscall(SYS_GET_BOOTINFO, (uint64_t)(uintptr_t)&bi, 0, 0, 0, 0) == 0 && bi.mem.total_memory_bytes > 0) {
+        ram_mb = bi.mem.total_memory_bytes / (1024 * 1024);
+    }
+
+    /* If memory permits, pre-size canvas so common resolution changes (720p <-> 1080p) don't need reallocations */
+    if (ram_mb >= 512) {
+        if (c_w < 1920) c_w = 1920;
+        if (c_h < 1080) c_h = 1080;
+    } else if (ram_mb >= 256) {
+        if (c_w < 1280) c_w = 1280;
+        if (c_h < 720) c_h = 720;
+    }
+
+    g_allocated_canvas_bytes = (size_t)c_w * (size_t)c_h * 4 * 2;
+    char shm_name[32] = "shm:lack_canvas_1";
+    g_canvas_shm_id = (int)syscall(SYS_SHM_CREATE, (uint64_t)(uintptr_t)shm_name, g_allocated_canvas_bytes, 0, 0, 0);
     if (g_canvas_shm_id < 0) {
         puts("[lack] ERROR: could not allocate shm:lack_canvas\n");
         syscall(SYS_EXIT, 1, 0, 0, 0, 0);
@@ -477,7 +508,33 @@ void lack_main(void) {
                         g_screen_width = msg.width;
                         g_screen_height = msg.height;
 
-                        /* Pre-sized canvas (2560x1440) remains valid across resolution changes */
+                        size_t needed_bytes = (size_t)g_screen_width * (size_t)g_screen_height * 4 * 2;
+                        if (needed_bytes > g_allocated_canvas_bytes) {
+                            g_canvas_gen++;
+                            char new_shm_name[32] = "shm:lack_canvas_";
+                            u32_to_str((uint32_t)g_canvas_gen, &new_shm_name[16]);
+
+                            int new_shm_id = (int)syscall(SYS_SHM_CREATE, (uint64_t)(uintptr_t)new_shm_name, needed_bytes, 0, 0, 0);
+                            if (new_shm_id >= 0) {
+                                uint32_t *new_canvas = (uint32_t *)(uintptr_t)syscall(SYS_SHM_MAP, new_shm_id, 0, SHM_READ | SHM_WRITE, 0, 0);
+                                if (new_canvas) {
+                                    if (g_canvas) syscall(SYS_SHM_UNMAP, (uint64_t)(uintptr_t)g_canvas, 0, 0, 0, 0);
+                                    if (g_canvas_shm_id > 0) syscall(SYS_SHM_CLOSE, g_canvas_shm_id, 0, 0, 0, 0);
+
+                                    g_canvas = new_canvas;
+                                    g_canvas_shm_id = new_shm_id;
+                                    g_allocated_canvas_bytes = needed_bytes;
+
+                                    /* Re-register new canvas with display server (ntfs) */
+                                    ntfs_msg_t reg_msg;
+                                    memset(&reg_msg, 0, sizeof(reg_msg));
+                                    reg_msg.type = NTFS_MSG_REGISTER_ROLE;
+                                    reg_msg.flags = NTFS_ROLE_COMPOSITOR;
+                                    reg_msg.shm_id = (uint32_t)g_canvas_shm_id;
+                                    syscall(SYS_SEND, sock, (uint64_t)(uintptr_t)&reg_msg, sizeof(reg_msg), 0, 0);
+                                }
+                            }
+                        }
 
                         /* Update any background or taskbar surface geometry */
                         for (int i = 0; i < MAX_WINDOWS; i++) {

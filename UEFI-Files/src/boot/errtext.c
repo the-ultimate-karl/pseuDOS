@@ -2,6 +2,12 @@
 #include "io.h"
 #include "lib.h"
 
+static EFI_HANDLE g_boot_image_handle = NULL;
+
+void set_boot_image_handle(EFI_HANDLE image_handle) {
+    g_boot_image_handle = image_handle;
+}
+
 static int g_err_uart_checked = 0;
 static int g_err_uart_present = 0;
 
@@ -59,6 +65,130 @@ static void uefi_puts(EFI_SYSTEM_TABLE *SystemTable, const char *str) {
     }
 }
 
+static void ascii_to_unicode(const char *src, CHAR16 *dst, size_t max_len) {
+    size_t i = 0;
+    if (!src || !dst || max_len == 0) return;
+    while (src[i] != '\0' && i + 1 < max_len) {
+        dst[i] = (CHAR16)(unsigned char)src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
+/*
+ * Chainload recovery.efi from the boot filesystem
+ */
+static EFI_STATUS launch_recovery_console(EFI_SYSTEM_TABLE *SystemTable) {
+    if (!SystemTable || !SystemTable->BootServices || !g_boot_image_handle) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    EFI_LOADED_IMAGE_PROTOCOL *loaded = NULL;
+    EFI_STATUS st = SystemTable->BootServices->HandleProtocol(
+        g_boot_image_handle,
+        &gEfiLoadedImageProtocolGuid,
+        (VOID **)&loaded
+    );
+    if (EFI_ERROR(st) || !loaded || !loaded->DeviceHandle) {
+        return EFI_NOT_FOUND;
+    }
+
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = NULL;
+    st = SystemTable->BootServices->HandleProtocol(
+        loaded->DeviceHandle,
+        &gEfiSimpleFileSystemProtocolGuid,
+        (VOID **)&sfs
+    );
+    if (EFI_ERROR(st) || !sfs) {
+        return EFI_NOT_FOUND;
+    }
+
+    EFI_FILE_PROTOCOL *root = NULL;
+    st = sfs->OpenVolume(sfs, &root);
+    if (EFI_ERROR(st) || !root) {
+        return EFI_NOT_FOUND;
+    }
+
+    /* Check candidate recovery application paths on the ESP */
+    const char *paths[] = {
+        "\\EFI\\BOOT\\recovery.efi",
+        "\\EFI\\pseuDOS\\recovery.efi",
+        "\\protected\\bootmgr\\recovery.efi",
+        "\\recovery.efi",
+        NULL
+    };
+
+    EFI_FILE_PROTOCOL *rec_file = NULL;
+    for (int i = 0; paths[i]; i++) {
+        CHAR16 u16[128];
+        ascii_to_unicode(paths[i], u16, sizeof(u16)/sizeof(CHAR16));
+        st = root->Open(root, &rec_file, u16, EFI_FILE_MODE_READ, 0);
+        if (!EFI_ERROR(st) && rec_file) {
+            break;
+        }
+    }
+
+    if (!rec_file) {
+        root->Close(root);
+        return EFI_NOT_FOUND;
+    }
+
+    /* Read recovery.efi into memory buffer */
+    UINT8 info_buf[sizeof(EFI_FILE_INFO) + 256];
+    UINTN sz = sizeof(info_buf);
+    st = rec_file->GetInfo(rec_file, &gEfiFileInfoGuid, &sz, info_buf);
+    if (EFI_ERROR(st)) {
+        rec_file->Close(rec_file);
+        root->Close(root);
+        return st;
+    }
+
+    UINTN fsize = (UINTN)((EFI_FILE_INFO *)info_buf)->FileSize;
+    if (fsize == 0) {
+        rec_file->Close(rec_file);
+        root->Close(root);
+        return EFI_LOAD_ERROR;
+    }
+
+    VOID *file_buf = NULL;
+    st = SystemTable->BootServices->AllocatePool(EfiLoaderData, fsize, &file_buf);
+    if (EFI_ERROR(st) || !file_buf) {
+        rec_file->Close(rec_file);
+        root->Close(root);
+        return st;
+    }
+
+    UINTN r_bytes = fsize;
+    st = rec_file->Read(rec_file, &r_bytes, file_buf);
+    rec_file->Close(rec_file);
+    root->Close(root);
+
+    if (EFI_ERROR(st) || r_bytes != fsize) {
+        SystemTable->BootServices->FreePool(file_buf);
+        return EFI_LOAD_ERROR;
+    }
+
+    /* Load and start image from memory buffer */
+    EFI_HANDLE rec_handle = NULL;
+    st = SystemTable->BootServices->LoadImage(
+        FALSE,
+        g_boot_image_handle,
+        NULL,
+        file_buf,
+        fsize,
+        &rec_handle
+    );
+
+    if (!EFI_ERROR(st) && rec_handle) {
+        UINTN exit_data_size = 0;
+        CHAR16 *exit_data = NULL;
+        st = SystemTable->BootServices->StartImage(rec_handle, &exit_data_size, &exit_data);
+    }
+
+    SystemTable->BootServices->FreePool(file_buf);
+    return st;
+}
+
 static void print_both(EFI_SYSTEM_TABLE *SystemTable, const char *str) {
     if (SystemTable && SystemTable->ConOut) {
         uefi_puts(SystemTable, str);
@@ -92,17 +222,51 @@ static void print_spaces(EFI_SYSTEM_TABLE *SystemTable, UINTN count) {
     }
 }
 
-static void print_divider(EFI_SYSTEM_TABLE *SystemTable, UINTN left_pad, UINTN width) {
-    if (left_pad > 0) print_spaces(SystemTable, left_pad);
-    char buf[128];
-    while (width > 0) {
-        size_t n = width > (sizeof(buf) - 1) ? (sizeof(buf) - 1) : width;
-        memset(buf, '=', n);
-        buf[n] = '\0';
-        print_both(SystemTable, buf);
-        width -= n;
+static void draw_white_bar(EFI_SYSTEM_TABLE *SystemTable, UINTN row, const char *left_text, const char *center_text, const char *right_text, UINTN cols) {
+    char bar[256];
+    if (cols > sizeof(bar) - 1) cols = sizeof(bar) - 1;
+    memset(bar, ' ', cols);
+    bar[cols] = '\0';
+
+    if (center_text) {
+        size_t len = strlen(center_text);
+        if (len < cols) {
+            size_t start = (cols - len) / 2;
+            memcpy(bar + start, center_text, len);
+        }
     }
-    print_both(SystemTable, "\n");
+    if (left_text) {
+        size_t len = strlen(left_text);
+        if (len + 2 < cols) {
+            memcpy(bar + 2, left_text, len);
+        }
+    }
+    if (right_text) {
+        size_t len = strlen(right_text);
+        if (len + 2 < cols) {
+            size_t start = cols - len - 2;
+            memcpy(bar + start, right_text, len);
+        }
+    }
+
+    if (SystemTable && SystemTable->ConOut) {
+        if (SystemTable->ConOut->SetCursorPosition) {
+            SystemTable->ConOut->SetCursorPosition(SystemTable->ConOut, 0, row);
+        }
+        if (SystemTable->ConOut->SetAttribute) {
+            /* 0x70 = Black text on White / Light Gray background */
+            SystemTable->ConOut->SetAttribute(SystemTable->ConOut, 0x70);
+        }
+        uefi_puts(SystemTable, bar);
+        if (SystemTable->ConOut->SetAttribute) {
+            /* 0x0F = Bright White text on Black background */
+            SystemTable->ConOut->SetAttribute(SystemTable->ConOut, 0x0F);
+        }
+    }
+
+    uart_puts("\033[30;47m");
+    uart_puts(bar);
+    uart_puts("\033[37;40m\r\n");
 }
 
 static void print_padded_line(EFI_SYSTEM_TABLE *SystemTable, UINTN left_pad, const char *str) {
@@ -147,11 +311,17 @@ static void clear_screen(EFI_SYSTEM_TABLE *SystemTable) {
 
     /* 3. Reset UEFI text console state and position cursor to top-left (0, 0) */
     if (SystemTable && SystemTable->ConOut) {
-        if (SystemTable->ConOut->SetCursorPosition) {
-            SystemTable->ConOut->SetCursorPosition(SystemTable->ConOut, 0, 0);
+        if (SystemTable->ConOut->SetAttribute) {
+            SystemTable->ConOut->SetAttribute(SystemTable->ConOut, 0x0F);
         }
         if (SystemTable->ConOut->ClearScreen) {
             SystemTable->ConOut->ClearScreen(SystemTable->ConOut);
+        }
+        if (SystemTable->ConOut->SetCursorPosition) {
+            SystemTable->ConOut->SetCursorPosition(SystemTable->ConOut, 0, 0);
+        }
+        if (SystemTable->ConOut->EnableCursor) {
+            SystemTable->ConOut->EnableCursor(SystemTable->ConOut, FALSE);
         }
     }
 
@@ -218,30 +388,30 @@ static void print_wrapped_padded(EFI_SYSTEM_TABLE *SystemTable, UINTN left_pad, 
 static const char *get_error_diagnostic(BootErrorCode code) {
     switch (code) {
         case ERR_KERNEL_MOUNT_FAILED:
-            return "bootmgfw unable to mount boot device filesystem";
-        case ERR_KERNEL_NOT_FOUND:
-            return "bootmgfw failed to find kernel binary";
+            return "silo unable to mount boot device filesystem";
+        case ERR_BOOTCONFIG:
+            return "silo encountered an error with the boot configuration data";
         case ERR_BOOTCFG_NOT_FOUND:
-            return "bootmgfw failed to find or parse boot configuration (boot.cfg)";
+            return "silo failed to find or parse boot configuration (boot.cfg)";
         case ERR_KERNEL_INTEGRITY:
-            return "bootmgfw cannot verify integrity of the kernel";
+            return "silo cannot verify integrity of the kernel";
         case ERR_MEMORY_MAP_EXHAUSTED:
-            return "bootmgfw physical memory allocation failed or memory map exhausted";
+            return "silo physical memory allocation failed or memory map exhausted";
         case ERR_GOP_INIT_FAILED:
-            return "bootmgfw failed to initialize Graphics Output Protocol (GOP) display mode";
+            return "silo failed to initialize Graphics Output Protocol (GOP) display mode";
         case ERR_UNSUPPORTED_CPU:
-            return "bootmgfw CPU does not meet minimum architecture requirements";
+            return "silo CPU does not meet minimum architecture requirements";
         case ERR_ACPI_RSDP_NOT_FOUND:
-            return "bootmgfw ACPI RSDP descriptor table not found in UEFI configuration tables";
+            return "silo ACPI RSDP descriptor table not found in UEFI configuration tables";
         case ERR_EXIT_BOOT_SERVICES_FAILED:
-            return "bootmgfw failed to exit UEFI Boot Services";
+            return "silo failed to exit UEFI Boot Services";
         case ERR_SECURE_BOOT_VIOLATION:
-            return "bootmgfw UEFI Secure Boot signature verification failed for boot image";
+            return "silo UEFI Secure Boot signature verification failed for boot image";
         case ERR_STORAGE_DEVICE_IO:
-            return "bootmgfw fatal read error encountered from block storage device controller";
+            return "silo fatal read error encountered from block storage device controller";
         case ERR_GENERIC_BOOT_FAILURE:
         default:
-            return "bootmgfw unhandled fatal bootloader exception";
+            return "silo unhandled fatal bootloader exception";
     }
 }
 
@@ -250,8 +420,6 @@ static const char *get_default_detail(BootErrorCode code) {
         case ERR_KERNEL_NOT_FOUND:
         case ERR_BOOTCFG_NOT_FOUND:
             return "No such file or directory";
-        case ERR_KERNEL_INTEGRITY:
-            return "might be corrupted";
         case ERR_UNSUPPORTED_CPU:
             return "x86_64 Long Mode missing";
         case ERR_EXIT_BOOT_SERVICES_FAILED:
@@ -261,90 +429,198 @@ static const char *get_default_detail(BootErrorCode code) {
     }
 }
 
+static const char *get_error_status_string(BootErrorCode code) {
+    switch (code) {
+        case ERR_KERNEL_MOUNT_FAILED:       return "ERR_KERNEL_MOUNT_FAILED";
+        case ERR_BOOTCONFIG:                return "ERR_BOOTCONFIG";
+        case ERR_BOOTCFG_NOT_FOUND:         return "ERR_BOOTCFG_NOT_FOUND";
+        case ERR_KERNEL_INTEGRITY:          return "ERR_KERNEL_INTEGRITY";
+        case ERR_MEMORY_MAP_EXHAUSTED:      return "ERR_MEMORY_MAP_EXHAUSTED";
+        case ERR_GOP_INIT_FAILED:           return "ERR_GOP_INIT_FAILED";
+        case ERR_UNSUPPORTED_CPU:           return "ERR_UNSUPPORTED_CPU";
+        case ERR_ACPI_RSDP_NOT_FOUND:       return "ERR_ACPI_RSDP_NOT_FOUND";
+        case ERR_EXIT_BOOT_SERVICES_FAILED: return "ERR_EXIT_BOOT_SERVICES_FAILED";
+        case ERR_SECURE_BOOT_VIOLATION:     return "ERR_SECURE_BOOT_VIOLATION";
+        case ERR_STORAGE_DEVICE_IO:         return "ERR_STORAGE_DEVICE_IO";
+        case ERR_GENERIC_BOOT_FAILURE:
+        default:                            return "ERR_GENERIC_BOOT_FAILURE";
+    }
+}
+
+static void exit_to_uefi_firmware(EFI_SYSTEM_TABLE *SystemTable) {
+    if (!SystemTable) return;
+
+    /* Request UEFI Firmware UI (BIOS/Setup configuration) on reboot via OsIndications */
+    if (SystemTable->RuntimeServices && SystemTable->RuntimeServices->SetVariable) {
+        EFI_GUID global_guid = { 0x8BE4DF61, 0x93CA, 0x11D2, { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C } };
+        UINT64 os_ind = 1; /* EFI_OS_INDICATIONS_BOOT_TO_FW_UI */
+        const CHAR16 var_name[] = { 'O', 's', 'I', 'n', 'd', 'i', 'c', 'a', 't', 'i', 'o', 'n', 's', 0 };
+        UINT32 attrs = 0x00000001 | 0x00000002 | 0x00000004; /* NV | BS | RT */
+        SystemTable->RuntimeServices->SetVariable(
+            (CHAR16 *)var_name,
+            &global_guid,
+            attrs,
+            sizeof(UINT64),
+            &os_ind
+        );
+    }
+
+    /* Restore normal console attribute and clear screen */
+    if (SystemTable->ConOut) {
+        SystemTable->ConOut->SetAttribute(SystemTable->ConOut, 0x07);
+        SystemTable->ConOut->ClearScreen(SystemTable->ConOut);
+    }
+
+    /* Try exiting cleanly back to the UEFI Boot Manager / firmware */
+    if (SystemTable->BootServices && SystemTable->BootServices->Exit && g_boot_image_handle) {
+        SystemTable->BootServices->Exit(g_boot_image_handle, EFI_ABORTED, 0, NULL);
+    }
+
+    /* Fallback: cold reboot into firmware UI */
+    if (SystemTable->RuntimeServices && SystemTable->RuntimeServices->ResetSystem) {
+        SystemTable->RuntimeServices->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+    }
+}
+
 void error_boot(EFI_SYSTEM_TABLE *SystemTable, BootErrorCode code, const char *details) {
-    /* Clear full screen so only the error screen appears */
-    clear_screen(SystemTable);
+    while (1) {
+        /* Clear full screen so only the error screen appears */
+        clear_screen(SystemTable);
 
-    UINTN cols = 80, rows = 25;
-    get_screen_geometry(SystemTable, &cols, &rows);
+        UINTN cols = 80, rows = 25;
+        get_screen_geometry(SystemTable, &cols, &rows);
 
-    UINTN box_width = 86;
-    if (cols < box_width) {
-        box_width = cols > 4 ? cols - 2 : cols;
-    }
-    UINTN left_padding = (cols > box_width) ? (cols - box_width) / 2 : 0;
+        UINTN left_padding = 4;
+        if (cols > 90) {
+            left_padding = 6;
+        }
 
-    /* Total vertical lines in error block: ~17 lines */
-    UINTN total_lines = 17;
-    UINTN top_padding = (rows > total_lines) ? (rows - total_lines) / 2 : 0;
+        /* 1. Draw Top White Bar across row 1 */
+        draw_white_bar(SystemTable, 1, NULL, "[silo]", NULL, cols);
 
-    for (UINTN i = 0; i < top_padding; i++) {
+        /* 2. Position cursor for body text at row 3 */
+        if (SystemTable && SystemTable->ConOut && SystemTable->ConOut->SetCursorPosition) {
+            SystemTable->ConOut->SetCursorPosition(SystemTable->ConOut, 0, 3);
+        }
         print_both(SystemTable, "\n");
-    }
 
-    /* Centered [bootmgfw] header */
-    UINTN header_pad = left_padding + ((box_width > 10) ? (box_width - 10) / 2 : 0);
-    print_spaces(SystemTable, header_pad);
-    print_both(SystemTable, "[bootmgfw]\n");
-    print_divider(SystemTable, left_padding, box_width);
-
-    /* Explanatory text */
-    print_padded_line(SystemTable, left_padding, "pseuDOS Boot Loader failed to start. A recent hardware or software change might be the");
-    print_padded_line(SystemTable, left_padding, "cause. To fix the problem:");
-    print_both(SystemTable, "\n");
-
-    /* Step-by-step recovery instructions */
-    print_padded_line(SystemTable, left_padding, "1. Insert your pseuDOS installation media and restart your computer.");
-    print_padded_line(SystemTable, left_padding, "2. Type 'flash' into the command line and hit enter.");
-    print_padded_line(SystemTable, left_padding, "3. Reinstall the entire operating system.");
-    print_both(SystemTable, "\n");
-
-    /* Info diagnostic section */
-    if (code == ERR_KERNEL_NOT_FOUND) {
-        print_padded_line(SystemTable, left_padding, "Info: bootmgfw failed to find kernel binary specified in boot.cfg:");
-        print_padded_line(SystemTable, left_padding, (details && details[0]) ? details : "No such file or directory");
+        /* Explanatory text */
+        print_padded_line(SystemTable, left_padding, "pseuDOS failed to start. A recent hardware or software change might be the");
+        print_padded_line(SystemTable, left_padding, "cause. To fix the problem:");
         print_both(SystemTable, "\n");
-    } else if (code == ERR_BOOTCFG_NOT_FOUND) {
-        print_padded_line(SystemTable, left_padding, "Info: bootmgfw failed to locate boot configuration (\\protected\\bootmgr\\boot.cfg):");
-        print_padded_line(SystemTable, left_padding, (details && details[0]) ? details : "No such file or directory");
+
+        /* Step-by-step recovery instructions (indented by 4 spaces) */
+        print_padded_line(SystemTable, left_padding + 4, "1. Press 'R' to launch the SiLo Recovery Console to inspect and repair settings.");
+        print_padded_line(SystemTable, left_padding + 4, "2. Or insert installation media, restart, and run 'flash' to reinstall.");
         print_both(SystemTable, "\n");
-    } else {
-        if (left_padding > 0) print_spaces(SystemTable, left_padding);
-        print_both(SystemTable, "Info: ");
-        const char *diag = get_error_diagnostic(code);
-        print_both(SystemTable, diag);
-        if (details && details[0] != '\0') {
-            print_both(SystemTable, ":\n");
-            print_wrapped_padded(SystemTable, left_padding, details, (int)box_width);
-            print_both(SystemTable, "\n\n");
+
+        /* Info diagnostic section */
+        char status_line[64];
+        snprintf(status_line, sizeof(status_line), "Status: %s", get_error_status_string(code));
+        print_padded_line(SystemTable, left_padding, status_line);
+
+        UINTN info_indent = left_padding + 6; /* 6 characters for "Info: " */
+
+        if (code == ERR_BOOTCONFIG) {
+            print_padded_line(SystemTable, left_padding, "Info: silo encountered an error with the boot configuration data:");
+            print_padded_line(SystemTable, info_indent, (details && details[0]) ? details : "No such file or directory");
+            print_both(SystemTable, "\n");
+        } else if (code == ERR_BOOTCFG_NOT_FOUND) {
+            print_padded_line(SystemTable, left_padding, "Info: silo failed to locate boot configuration (\\protected\\bootmgr\\boot.cfg):");
+            print_padded_line(SystemTable, info_indent, (details && details[0]) ? details : "No such file or directory");
+            print_both(SystemTable, "\n");
+        } else if (code == ERR_KERNEL_INTEGRITY) {
+            print_padded_line(SystemTable, left_padding, "Info: silo cannot verify integrity of the kernel:");
+            print_padded_line(SystemTable, info_indent, (details && details[0]) ? details : "corrupted executable image");
+            print_both(SystemTable, "\n");
         } else {
-            const char *def_det = get_default_detail(code);
-            if (def_det) {
-                if (code == ERR_KERNEL_INTEGRITY) {
-                    print_both(SystemTable, ". ");
-                    print_both(SystemTable, def_det);
-                    print_both(SystemTable, "\n\n");
-                } else {
+            if (left_padding > 0) print_spaces(SystemTable, left_padding);
+            print_both(SystemTable, "Info: ");
+            const char *diag = get_error_diagnostic(code);
+            print_both(SystemTable, diag);
+            if (details && details[0] != '\0') {
+                print_both(SystemTable, ":\n");
+                print_wrapped_padded(SystemTable, info_indent, details, (int)(cols - info_indent - left_padding));
+                print_both(SystemTable, "\n\n");
+            } else {
+                const char *def_det = get_default_detail(code);
+                if (def_det) {
                     print_both(SystemTable, " (");
                     print_both(SystemTable, def_det);
                     print_both(SystemTable, ")\n\n");
+                } else {
+                    print_both(SystemTable, "\n\n");
                 }
-            } else {
-                print_both(SystemTable, "\n\n");
             }
         }
-    }
 
-    /* Footer message */
-    print_padded_line(SystemTable, left_padding, "Please re-check your hardware configuration, boot media, and firmware settings.");
-    print_padded_line(SystemTable, left_padding, "System halted!");
-    print_both(SystemTable, "\n");
-    print_divider(SystemTable, left_padding, box_width);
-    print_both(SystemTable, "\n");
+        /* Footer message */
+        print_padded_line(SystemTable, left_padding, "Please re-check your hardware configuration, boot media, and firmware settings.");
+        print_both(SystemTable, "\n");
 
-    /* Halt CPU execution */
-    __asm__ volatile ("cli");
-    while (1) {
-        __asm__ volatile ("hlt");
+        /* 3. Draw Bottom White Bar at row (rows - 2) */
+        UINTN bottom_row = (rows > 2) ? (rows - 2) : (rows - 1);
+        draw_white_bar(SystemTable, bottom_row, "ENTER=Continue", "R=Recovery", "ESC=Exit", cols);
+
+        /* 4. Interactive Key Handling: Wait for ENTER, R, or ESC */
+        int should_redraw = 0;
+        if (SystemTable && SystemTable->ConIn && SystemTable->ConIn->ReadKeyStroke) {
+            EFI_INPUT_KEY key;
+            while (1) {
+                EFI_STATUS st = SystemTable->ConIn->ReadKeyStroke(SystemTable->ConIn, &key);
+                if (!EFI_ERROR(st)) {
+                    if (key.UnicodeChar == (CHAR16)'r' || key.UnicodeChar == (CHAR16)'R') {
+                        EFI_STATUS rec_st = launch_recovery_console(SystemTable);
+                        if (rec_st == EFI_ALREADY_STARTED) {
+                            if (SystemTable->RuntimeServices && SystemTable->RuntimeServices->ResetSystem) {
+                                SystemTable->RuntimeServices->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+                            }
+                        }
+                        should_redraw = 1;
+                        break;
+                    } else if (key.UnicodeChar == (CHAR16)'\r' || key.UnicodeChar == (CHAR16)'\n') {
+                        if (SystemTable->RuntimeServices && SystemTable->RuntimeServices->ResetSystem) {
+                            SystemTable->RuntimeServices->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+                        }
+                        break;
+                    } else if (key.ScanCode == 0x17 || key.UnicodeChar == 0x1B) {
+                        /* ESC: Exit to UEFI Firmware Settings / Boot Manager */
+                        exit_to_uefi_firmware(SystemTable);
+                        break;
+                    }
+                }
+                if (is_err_uart_present() && (inb(0x3F8 + 5) & 0x01)) {
+                    uint8_t c = inb(0x3F8);
+                    if (c == 'r' || c == 'R') {
+                        EFI_STATUS rec_st = launch_recovery_console(SystemTable);
+                        if (rec_st == EFI_ALREADY_STARTED) {
+                            if (SystemTable->RuntimeServices && SystemTable->RuntimeServices->ResetSystem) {
+                                SystemTable->RuntimeServices->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+                            }
+                        }
+                        should_redraw = 1;
+                        break;
+                    } else if (c == '\r' || c == '\n') {
+                        if (SystemTable->RuntimeServices && SystemTable->RuntimeServices->ResetSystem) {
+                            SystemTable->RuntimeServices->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+                        }
+                        break;
+                    } else if (c == 0x1B) {
+                        /* ESC: Exit to UEFI Firmware Settings / Boot Manager */
+                        exit_to_uefi_firmware(SystemTable);
+                        break;
+                    }
+                }
+            }
+        }
+        if (should_redraw) {
+            continue;
+        }
+
+        /* Halt CPU execution fallback */
+        __asm__ volatile ("cli");
+        while (1) {
+            __asm__ volatile ("hlt");
+        }
     }
 }

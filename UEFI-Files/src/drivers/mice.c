@@ -1,4 +1,5 @@
 #include "mice.h"
+#include "drivers.h"
 #include "io.h"
 #include "lib.h"
 #include "klog.h"
@@ -247,115 +248,187 @@ static void i2c_hid_send_cmd(I2cHidTouchpad *tp, uint16_t opcode) {
     dw_i2c_write_read(tp->base, tp->slave_addr, cmd, 4, NULL, 0);
 }
 
+static int dw_i2c_probe_touchpad_on_bus(uintptr_t base, uint64_t phys_base, const char *bus_name) {
+    uint32_t comp_type = dw_readl(base, DW_IC_COMP_TYPE);
+    if (comp_type != DW_IC_COMP_TYPE_VALUE) {
+        return 0;
+    }
+
+    uint8_t fw_tar = (uint8_t)(dw_readl(base, DW_IC_TAR) & 0x7F);
+    klog_info("%s: DesignWare I2C controller detected at 0x%llx (FW TAR=0x%02x, EN=%u)",
+              bus_name, (unsigned long long)phys_base,
+              fw_tar, dw_readl(base, DW_IC_ENABLE) & 1U);
+
+    static const uint8_t cand_addrs[] = { 0x18, 0x2C, 0x15, 0x10, 0x40, 0x4C, 0x38, 0x20, 0x30 };
+    static const uint16_t cand_regs[] = { 0x0001, 0x0020, 0x0000, 0x0025 };
+
+    uint8_t probe_list[16];
+    int probe_count = 0;
+    if (fw_tar >= 0x08 && fw_tar <= 0x77 && fw_tar != 0x55) {
+        probe_list[probe_count++] = fw_tar;
+    }
+    for (size_t a = 0; a < sizeof(cand_addrs); a++) {
+        int dup = 0;
+        for (int k = 0; k < probe_count; k++) {
+            if (probe_list[k] == cand_addrs[a]) dup = 1;
+        }
+        if (!dup && probe_count < 16) probe_list[probe_count++] = cand_addrs[a];
+    }
+
+    for (int a = 0; a < probe_count; a++) {
+        uint8_t addr = probe_list[a];
+        for (size_t r = 0; r < sizeof(cand_regs) / sizeof(cand_regs[0]); r++) {
+            uint16_t dreg = cand_regs[r];
+            uint8_t wbuf[2] = { (uint8_t)(dreg & 0xFF), (uint8_t)(dreg >> 8) };
+            uint8_t desc[30];
+            memset(desc, 0, sizeof(desc));
+
+            if (dw_i2c_write_read(base, addr, wbuf, 2, desc, 30) == 0) {
+                uint16_t desc_len = *(uint16_t *)&desc[0];
+                uint16_t bcd_ver  = *(uint16_t *)&desc[2];
+                uint16_t rep_len  = *(uint16_t *)&desc[4];
+                uint16_t rep_reg  = *(uint16_t *)&desc[6];
+                uint16_t inp_reg  = *(uint16_t *)&desc[8];
+                uint16_t max_inp  = *(uint16_t *)&desc[10];
+                uint16_t cmd_reg  = *(uint16_t *)&desc[14];
+                uint16_t dat_reg  = *(uint16_t *)&desc[16];
+                uint16_t vid      = *(uint16_t *)&desc[18];
+                uint16_t pid      = *(uint16_t *)&desc[20];
+
+                if (desc_len == 0x001E && bcd_ver == 0x0100 && max_inp >= 4 && max_inp <= 256) {
+                    g_i2c_tp.active = 1;
+                    g_i2c_tp.base = base;
+                    g_i2c_tp.slave_addr = addr;
+                    g_i2c_tp.hid_desc_reg = dreg;
+                    g_i2c_tp.report_desc_len = rep_len;
+                    g_i2c_tp.report_desc_reg = rep_reg;
+                    g_i2c_tp.input_reg = inp_reg;
+                    g_i2c_tp.max_input_len = max_inp;
+                    g_i2c_tp.cmd_reg = cmd_reg;
+                    g_i2c_tp.data_reg = dat_reg;
+                    g_i2c_tp.vid = vid;
+                    g_i2c_tp.pid = pid;
+                    g_i2c_tp.mouse_report_id = 1;
+                    g_i2c_tp.ptp_report_id = 4;
+
+                    /* Send SET_POWER(ON = 0x0800) to wake touchpad */
+                    i2c_hid_send_cmd(&g_i2c_tp, 0x0800);
+                    for (int dly = 0; dly < 15000; dly++) io_wait();
+
+                    /* Inspect Report Descriptor (up to 128B) to check if Mouse report uses 16-bit X/Y */
+                    if (rep_len > 0) {
+                        uint16_t r_fetch = rep_len > 128 ? 128 : rep_len;
+                        uint8_t rw[2] = { (uint8_t)(rep_reg & 0xFF), (uint8_t)(rep_reg >> 8) };
+                        uint8_t rbuf[128];
+                        memset(rbuf, 0, sizeof(rbuf));
+                        if (dw_i2c_write_read(base, addr, rw, 2, rbuf, r_fetch) == 0) {
+                            int in_mouse = 0;
+                            for (uint16_t ri = 0; ri + 1 < r_fetch; ri++) {
+                                if (rbuf[ri] == 0x05 && rbuf[ri + 1] == 0x01 &&
+                                    ri + 3 < r_fetch && rbuf[ri + 2] == 0x09 &&
+                                    (rbuf[ri + 3] == 0x02 || rbuf[ri + 3] == 0x01)) {
+                                    in_mouse = 1;
+                                } else if (rbuf[ri] == 0x05 && rbuf[ri + 1] == 0x0D) {
+                                    in_mouse = 0;
+                                }
+                                if (in_mouse && rbuf[ri] == 0x85) {
+                                    g_i2c_tp.mouse_report_id = rbuf[ri + 1];
+                                }
+                                if (in_mouse && rbuf[ri] == 0x75 && rbuf[ri + 1] == 0x10) {
+                                    g_i2c_tp.mouse_xy_16bit = 1;
+                                }
+                            }
+                        }
+                    }
+
+                    klog_info("%s: I2C-HID Touchpad active at 0x%02x (VID=%04x PID=%04x max_in=%u cmd=0x%04x 16b=%u)",
+                              bus_name, addr, vid, pid, max_inp, cmd_reg, g_i2c_tp.mouse_xy_16bit);
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 static void i2c_hid_init(void) {
     memset(&g_i2c_tp, 0, sizeof(g_i2c_tp));
 
-    /* Map AMD FCH DesignWare I2C0..I2C5 MMIO pages (0xFEDC2000 .. 0xFEDC7FFF) */
+    /* 1. Probe Intel Serial IO I2C Controllers via PCI (Dell G7 7588, XPS, ThinkPad, etc.) */
+    for (uint16_t bus = 0; bus < 4 && !g_i2c_tp.active; bus++) {
+        for (uint8_t slot = 0; slot < 32 && !g_i2c_tp.active; slot++) {
+            for (uint8_t func = 0; func < 8 && !g_i2c_tp.active; func++) {
+                uint16_t vendor_id = pci_read_config_16((uint8_t)bus, slot, func, 0x00);
+                if (vendor_id != 0x8086) continue;
+
+                uint16_t device_id = pci_read_config_16((uint8_t)bus, slot, func, 0x02);
+                uint32_t class_reg = pci_read_config_32((uint8_t)bus, slot, func, 0x08);
+                uint8_t base_class = (uint8_t)(class_reg >> 24);
+                uint8_t sub_class  = (uint8_t)(class_reg >> 16);
+
+                /* Intel Serial IO I2C: Class 0x0C, Subclass 0x80 OR known Intel I2C device IDs */
+                int is_intel_i2c = (base_class == 0x0C && sub_class == 0x80);
+                if (!is_intel_i2c) {
+                    /* Check Coffee Lake / Cannon Lake-H (0xA368..0xA36B on Dell G7 7588) and common Intel I2C IDs */
+                    if ((device_id >= 0xA368 && device_id <= 0xA36B) ||
+                        (device_id >= 0x9D60 && device_id <= 0x9D65) ||
+                        (device_id >= 0xA160 && device_id <= 0xA162) ||
+                        (device_id >= 0x02E8 && device_id <= 0x02EB) ||
+                        (device_id >= 0x06E8 && device_id <= 0x06EB) ||
+                        (device_id >= 0x34E8 && device_id <= 0x34EB) ||
+                        (device_id >= 0x43E8 && device_id <= 0x43EB) ||
+                        (device_id >= 0x51E8 && device_id <= 0x51EB) ||
+                        (device_id >= 0x7A48 && device_id <= 0x7A4B)) {
+                        is_intel_i2c = 1;
+                    }
+                }
+
+                if (!is_intel_i2c) continue;
+
+                /* Enable Memory Space and Bus Mastering */
+                uint16_t cmd = pci_read_config_16((uint8_t)bus, slot, func, 0x04);
+                pci_write_config_16((uint8_t)bus, slot, func, 0x04, cmd | 0x0006);
+
+                /* Read BAR0 for 32-bit or 64-bit MMIO base */
+                uint32_t bar0 = pci_read_config_32((uint8_t)bus, slot, func, 0x10);
+                if (bar0 == 0 || bar0 == 0xFFFFFFFF) continue;
+
+                uint64_t phys_base = (uint64_t)(bar0 & ~0xFULL);
+                if ((bar0 & 0x06) == 0x04) {
+                    uint32_t bar1 = pci_read_config_32((uint8_t)bus, slot, func, 0x14);
+                    phys_base |= ((uint64_t)bar1 << 32);
+                }
+                if (phys_base == 0) continue;
+
+                /* Map 4KB MMIO page */
+                uint64_t virt_base = KERNEL_VIRTUAL_BASE + phys_base;
+                vmm_map_pages(vmm_get_kernel_pml4(), virt_base, phys_base, 1, PTE_WRITABLE | PTE_PCD | PTE_PWT);
+                vmm_map_pages(vmm_get_kernel_pml4(), phys_base, phys_base, 1, PTE_WRITABLE | PTE_PCD | PTE_PWT);
+
+                char bus_name[32];
+                snprintf(bus_name, sizeof(bus_name), "Intel-I2C (%02x:%02x.%d)", bus, slot, func);
+                if (dw_i2c_probe_touchpad_on_bus(virt_base, phys_base, bus_name)) {
+                    return;
+                }
+            }
+        }
+    }
+
+    if (g_i2c_tp.active) return;
+
+    /* 2. Probe AMD FCH DesignWare I2C0..I2C5 MMIO pages (0xFEDC2000 .. 0xFEDC7FFF) */
     uint64_t fch_i2c_phys = 0xFEDC2000ULL;
     uint64_t fch_i2c_virt = KERNEL_VIRTUAL_BASE + fch_i2c_phys;
     vmm_map_pages(vmm_get_kernel_pml4(), fch_i2c_virt, fch_i2c_phys, 6, PTE_WRITABLE | PTE_PCD | PTE_PWT);
     vmm_map_pages(vmm_get_kernel_pml4(), fch_i2c_phys, fch_i2c_phys, 6, PTE_WRITABLE | PTE_PCD | PTE_PWT);
 
-    static const uint8_t cand_addrs[] = { 0x15, 0x2C, 0x10, 0x40, 0x4C, 0x38, 0x20 };
-    static const uint16_t cand_regs[] = { 0x0001, 0x0020 };
-
     for (int bus = 0; bus < 6; bus++) {
+        uint64_t cur_phys = fch_i2c_phys + (uint64_t)bus * 0x1000ULL;
         uintptr_t base = (uintptr_t)(fch_i2c_virt + (uint64_t)bus * 0x1000ULL);
-        uint32_t comp_type = dw_readl(base, DW_IC_COMP_TYPE);
-        if (comp_type != DW_IC_COMP_TYPE_VALUE) {
-            continue;
-        }
-
-        uint8_t fw_tar = (uint8_t)(dw_readl(base, DW_IC_TAR) & 0x7F);
-        klog_info("I2C%d: DesignWare APB I2C controller detected at 0x%llx (FW TAR=0x%02x, EN=%u)",
-                  bus, (unsigned long long)(fch_i2c_phys + (uint64_t)bus * 0x1000ULL),
-                  fw_tar, dw_readl(base, DW_IC_ENABLE) & 1U);
-
-        uint8_t probe_list[10];
-        int probe_count = 0;
-        if (fw_tar >= 0x08 && fw_tar <= 0x77 && fw_tar != 0x55) {
-            probe_list[probe_count++] = fw_tar;
-        }
-        for (size_t a = 0; a < sizeof(cand_addrs); a++) {
-            int dup = 0;
-            for (int k = 0; k < probe_count; k++) {
-                if (probe_list[k] == cand_addrs[a]) dup = 1;
-            }
-            if (!dup) probe_list[probe_count++] = cand_addrs[a];
-        }
-
-        for (int a = 0; a < probe_count; a++) {
-            uint8_t addr = probe_list[a];
-            for (size_t r = 0; r < 2; r++) {
-                uint16_t dreg = cand_regs[r];
-                uint8_t wbuf[2] = { (uint8_t)(dreg & 0xFF), (uint8_t)(dreg >> 8) };
-                uint8_t desc[30];
-                memset(desc, 0, sizeof(desc));
-
-                if (dw_i2c_write_read(base, addr, wbuf, 2, desc, 30) == 0) {
-                    uint16_t desc_len = *(uint16_t *)&desc[0];
-                    uint16_t bcd_ver  = *(uint16_t *)&desc[2];
-                    uint16_t rep_len  = *(uint16_t *)&desc[4];
-                    uint16_t rep_reg  = *(uint16_t *)&desc[6];
-                    uint16_t inp_reg  = *(uint16_t *)&desc[8];
-                    uint16_t max_inp  = *(uint16_t *)&desc[10];
-                    uint16_t cmd_reg  = *(uint16_t *)&desc[14];
-                    uint16_t dat_reg  = *(uint16_t *)&desc[16];
-                    uint16_t vid      = *(uint16_t *)&desc[18];
-                    uint16_t pid      = *(uint16_t *)&desc[20];
-
-                    if (desc_len == 0x001E && bcd_ver == 0x0100 && max_inp >= 4 && max_inp <= 256) {
-                        g_i2c_tp.active = 1;
-                        g_i2c_tp.base = base;
-                        g_i2c_tp.slave_addr = addr;
-                        g_i2c_tp.hid_desc_reg = dreg;
-                        g_i2c_tp.report_desc_len = rep_len;
-                        g_i2c_tp.report_desc_reg = rep_reg;
-                        g_i2c_tp.input_reg = inp_reg;
-                        g_i2c_tp.max_input_len = max_inp;
-                        g_i2c_tp.cmd_reg = cmd_reg;
-                        g_i2c_tp.data_reg = dat_reg;
-                        g_i2c_tp.vid = vid;
-                        g_i2c_tp.pid = pid;
-                        g_i2c_tp.mouse_report_id = 1;
-                        g_i2c_tp.ptp_report_id = 4;
-
-                        /* Send SET_POWER(ON = 0x0800) to wake touchpad */
-                        i2c_hid_send_cmd(&g_i2c_tp, 0x0800);
-                        for (int dly = 0; dly < 15000; dly++) io_wait();
-
-                        /* Inspect Report Descriptor (up to 128B) to check if Mouse report uses 16-bit X/Y */
-                        if (rep_len > 0) {
-                            uint16_t r_fetch = rep_len > 128 ? 128 : rep_len;
-                            uint8_t rw[2] = { (uint8_t)(rep_reg & 0xFF), (uint8_t)(rep_reg >> 8) };
-                            uint8_t rbuf[128];
-                            memset(rbuf, 0, sizeof(rbuf));
-                            if (dw_i2c_write_read(base, addr, rw, 2, rbuf, r_fetch) == 0) {
-                                int in_mouse = 0;
-                                for (uint16_t ri = 0; ri + 1 < r_fetch; ri++) {
-                                    if (rbuf[ri] == 0x05 && rbuf[ri + 1] == 0x01 &&
-                                        ri + 3 < r_fetch && rbuf[ri + 2] == 0x09 &&
-                                        (rbuf[ri + 3] == 0x02 || rbuf[ri + 3] == 0x01)) {
-                                        in_mouse = 1;
-                                    } else if (rbuf[ri] == 0x05 && rbuf[ri + 1] == 0x0D) {
-                                        in_mouse = 0;
-                                    }
-                                    if (in_mouse && rbuf[ri] == 0x85) {
-                                        g_i2c_tp.mouse_report_id = rbuf[ri + 1];
-                                    }
-                                    if (in_mouse && rbuf[ri] == 0x75 && rbuf[ri + 1] == 0x10) {
-                                        g_i2c_tp.mouse_xy_16bit = 1;
-                                    }
-                                }
-                            }
-                        }
-
-                        klog_info("I2C%d: I2C-HID Touchpad active at 0x%02x (VID=%04x PID=%04x max_in=%u cmd=0x%04x 16b=%u)",
-                                  bus, addr, vid, pid, max_inp, cmd_reg, g_i2c_tp.mouse_xy_16bit);
-                        return;
-                    }
-                }
-            }
+        char bus_name[16];
+        snprintf(bus_name, sizeof(bus_name), "AMD-I2C%d", bus);
+        if (dw_i2c_probe_touchpad_on_bus(base, cur_phys, bus_name)) {
+            return;
         }
     }
 }

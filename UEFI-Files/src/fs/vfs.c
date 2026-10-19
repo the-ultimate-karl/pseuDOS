@@ -320,7 +320,7 @@ int vfs_write_file_bytes(const char *path, const void *data, size_t size, int ap
     vfs_node_t *node = vfs_create_file(path);
     if (!node || node->type != VFS_NODE_FILE) return -1;
 
-    if (append && node->content) {
+    if (append && node->content && node->capacity > 0) {
         size_t new_size = node->size + size;
         if (new_size + 1 > node->capacity) {
             size_t new_cap = (new_size + 1 + 255) & ~255;
@@ -336,7 +336,8 @@ int vfs_write_file_bytes(const char *path, const void *data, size_t size, int ap
         node->content[node->size] = '\0';
     } else {
         if (!node->content || (size + 1) > node->capacity) {
-            if (node->content) kfree(node->content);
+            if (node->content && node->capacity > 0) kfree(node->content);
+            node->content = NULL;
             node->capacity = (size + 1 + 255) & ~255;
             node->content = (char *)kmalloc(node->capacity);
             if (!node->content) return -1;
@@ -453,15 +454,27 @@ int vfs_read_file_offset(const char *path, char *buffer, size_t max_len, size_t 
         }
     }
 
-    if (offset >= node->size) {
+    const char *content_src = node->content;
+    size_t content_size = node->size;
+    if (!content_src && (strcmp(norm_path, "/protected/krnl/vpkernel") == 0 ||
+                         strcmp(norm_path, "/EFI/pseuDOS/vpkernel") == 0)) {
+        size_t ksz = 0;
+        const uint8_t *kp = payload_get_kernel(&ksz);
+        if (kp && ksz > 0) {
+            content_src = (const char *)kp;
+            content_size = ksz;
+        }
+    }
+
+    if (offset >= content_size) {
         buffer[0] = '\0';
         return 0; /* EOF */
     }
 
-    size_t avail = node->size - offset;
+    size_t avail = content_size - offset;
     size_t to_read = (avail < max_len) ? avail : max_len;
-    if (to_read > 0 && node->content) {
-        memcpy(buffer, node->content + offset, to_read);
+    if (to_read > 0 && content_src) {
+        memcpy(buffer, content_src + offset, to_read);
     }
     if (to_read < max_len) {
         buffer[to_read] = '\0';
@@ -502,9 +515,21 @@ int vfs_read_file(const char *path, char *buffer, size_t max_len) {
         }
     }
 
-    size_t to_read = node->size < max_len - 1 ? node->size : max_len - 1;
-    if (to_read > 0 && node->content) {
-        memcpy(buffer, node->content, to_read);
+    const char *content_src = node->content;
+    size_t content_size = node->size;
+    if (!content_src && (strcmp(norm_path, "/protected/krnl/vpkernel") == 0 ||
+                         strcmp(norm_path, "/EFI/pseuDOS/vpkernel") == 0)) {
+        size_t ksz = 0;
+        const uint8_t *kp = payload_get_kernel(&ksz);
+        if (kp && ksz > 0) {
+            content_src = (const char *)kp;
+            content_size = ksz;
+        }
+    }
+
+    size_t to_read = content_size < max_len - 1 ? content_size : max_len - 1;
+    if (to_read > 0 && content_src) {
+        memcpy(buffer, content_src, to_read);
     }
     buffer[to_read] = '\0';
 
@@ -549,7 +574,7 @@ static void free_vfs_subtree(vfs_node_t *node) {
         child = next;
     }
 
-    if (node->content) {
+    if (node->content && node->capacity > 0) {
         kfree(node->content);
     }
     kfree(node);
@@ -746,6 +771,125 @@ static void vfs_mkdir_p(const char *path) {
     }
 }
 
+int vfs_copy_file(const char *src_path, const char *dst_path) {
+    if (!src_path || !dst_path) return -1;
+
+    char norm_src[256];
+    normalize_path(src_path, norm_src, sizeof(norm_src));
+
+    char norm_dst[256];
+    normalize_path(dst_path, norm_dst, sizeof(norm_dst));
+
+    /* If destination is an existing directory or ends with a slash, append source basename */
+    vfs_node_t *dst_target = vfs_find_node(norm_dst);
+    size_t raw_dst_len = strlen(dst_path);
+    int dst_has_slash = (raw_dst_len > 0 && (dst_path[raw_dst_len - 1] == '/' || dst_path[raw_dst_len - 1] == '\\'));
+    if ((dst_target && dst_target->type == VFS_NODE_DIRECTORY) || dst_has_slash) {
+        const char *base = strrchr(norm_src, '/');
+        base = base ? base + 1 : norm_src;
+        if (base[0] == '\0') return -1;
+        char combined[256];
+        if (strcmp(norm_dst, "/") == 0) {
+            snprintf(combined, sizeof(combined), "/%s", base);
+        } else {
+            snprintf(combined, sizeof(combined), "%s/%s", norm_dst, base);
+        }
+        normalize_path(combined, norm_dst, sizeof(norm_dst));
+    }
+
+    if (strcmp(norm_src, norm_dst) == 0) return 0; /* Same file */
+
+    const char *src_data = NULL;
+    size_t src_size = 0;
+    char *allocated_src = NULL;
+
+    /* Check special kernel binary source */
+    if (strcmp(norm_src, "/protected/krnl/vpkernel") == 0 ||
+        strcmp(norm_src, "/EFI/pseuDOS/vpkernel") == 0) {
+        size_t k_sz = 0;
+        const uint8_t *k = payload_get_kernel(&k_sz);
+        if (k && k_sz > 0) {
+            src_data = (const char *)k;
+            src_size = k_sz;
+        }
+    }
+
+    if (!src_data) {
+        vfs_node_t *src_node = vfs_find_node(norm_src);
+        if (!src_node || src_node->type != VFS_NODE_FILE) return -1;
+        src_size = src_node->size;
+        if (src_node->content) {
+            src_data = src_node->content;
+        } else if (fat32_has_mount_for_path(norm_src) && src_size > 0) {
+            allocated_src = (char *)kmalloc(src_size);
+            if (!allocated_src) return -1;
+            int rd = fat32_sync_read_file_bytes(norm_src, allocated_src, src_size);
+            if (rd < 0) {
+                kfree(allocated_src);
+                return -1;
+            }
+            src_data = allocated_src;
+            src_size = (size_t)rd;
+        } else {
+            src_data = "";
+            src_size = 0;
+        }
+    }
+
+    /* Ensure destination's parent directories exist */
+    char parent_path[256];
+    strncpy(parent_path, norm_dst, sizeof(parent_path) - 1);
+    parent_path[sizeof(parent_path) - 1] = '\0';
+    char *last_sl = strrchr(parent_path, '/');
+    if (last_sl && last_sl != parent_path) {
+        *last_sl = '\0';
+        vfs_mkdir_p(parent_path);
+    }
+
+    int sync_fat = vfs_should_sync_fat32(norm_dst);
+    if (sync_fat) {
+        int wr = fat32_sync_write_file_bytes(norm_dst, src_data, src_size, 0);
+        if (wr < 0) {
+            if (allocated_src) kfree(allocated_src);
+            return -1;
+        }
+
+        vfs_node_t *dn = vfs_find_node(norm_dst);
+        if (!dn) dn = vfs_create_file(norm_dst);
+        if (dn) {
+            dn->size = src_size;
+            if (strstr(norm_dst, "/protected") || strstr(norm_dst, "/EFI") || strstr(norm_dst, "/efi")) {
+                dn->is_protected = 1;
+            }
+            /* Only cache small files in memory to avoid exhausting RAM on large files (e.g. 23MB kernel) */
+            if (src_size <= 512 * 1024) {
+                if (dn->content && dn->capacity > 0) kfree(dn->content);
+                dn->capacity = (src_size + 1 + 255) & ~255;
+                dn->content = (char *)kmalloc(dn->capacity);
+                if (dn->content) {
+                    if (src_data && src_size > 0) memcpy(dn->content, src_data, src_size);
+                    dn->content[src_size] = '\0';
+                }
+            } else {
+                if (dn->content && dn->capacity > 0) {
+                    kfree(dn->content);
+                    dn->content = NULL;
+                    dn->capacity = 0;
+                }
+            }
+        }
+    } else {
+        int wr = vfs_write_file_bytes(norm_dst, src_data, src_size, 0);
+        if (wr < 0) {
+            if (allocated_src) kfree(allocated_src);
+            return -1;
+        }
+    }
+
+    if (allocated_src) kfree(allocated_src);
+    return 0;
+}
+
 int vfs_unpack_initramfs(const uint8_t *data, size_t size) {
     if (!data || size < 8) return -1;
     if (data[0] != 'P' || data[1] != 'R' || data[2] != 'A' || data[3] != 'M') {
@@ -796,7 +940,7 @@ int vfs_unpack_initramfs(const uint8_t *data, size_t size) {
     }
 
     g_vfs_sync_enabled = prev_sync;
-    klog_info("vfs: successfully unpacked %u files from initramfs archive", count);
+    klog_info("VFS: successfully unpacked %u files from initramfs archive", count);
     return 0;
 }
 
@@ -834,8 +978,8 @@ int vfs_init_initramfs(void) {
     vfs_write_file("/EFI/pseuDOS/os-release",
         "NAME=\"pseuDOS\"\n"
         "ID=pseudos\n"
-        "VERSION=\"0.7.1\"\n"
-        "PRETTY_NAME=\"pseuDOS v0.7.1 (x86_64 UEFI)\"\n"
+        "VERSION=\"0.7.2\"\n"
+        "PRETTY_NAME=\"pseuDOS v0.7.2 (x86_64 UEFI)\"\n"
         "HOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\n", 0);
 
     /* 3. Ensure all system directories exist */
@@ -845,6 +989,11 @@ int vfs_init_initramfs(void) {
     if (g_boot_info_global && g_boot_info_global->initramfs_base && g_boot_info_global->initramfs_size) {
         vfs_unpack_initramfs((const uint8_t *)(uintptr_t)g_boot_info_global->initramfs_base,
                              (size_t)g_boot_info_global->initramfs_size);
+        if (!vfs_find_node("/protected/krnl/initramfs.img")) {
+            vfs_write_file_bytes("/protected/krnl/initramfs.img",
+                                 (const uint8_t *)(uintptr_t)g_boot_info_global->initramfs_base,
+                                 (size_t)g_boot_info_global->initramfs_size, 0);
+        }
     }
 
     return 0;
@@ -876,21 +1025,14 @@ void vfs_ensure_system_payloads(void) {
     if (!dev_nl) dev_nl = vfs_create_file("/dev/null");
     if (dev_nl) dev_nl->size = 0;
 
-    /* 2. Create Protected system zones matching vfs.py & memfs.py */
+    /* 2. Create Protected system zones */
     vfs_node_t *prot = vfs_mkdir("/protected");
     if (prot) prot->is_protected = 1;
     vfs_mkdir("/protected/bootmgr");
     vfs_mkdir("/protected/crit");
     vfs_mkdir("/protected/krnl");
-    vfs_mkdir("/protected/krnl/essential");
     vfs_mkdir("/protected/gui");
     vfs_mkdir("/protected/apps");
-
-    vfs_node_t *cmds = vfs_mkdir("/commands");
-    if (cmds) cmds->is_protected = 1;
-
-    vfs_node_t *coreutils = vfs_mkdir("/coreutils");
-    if (coreutils) coreutils->is_protected = 1;
 
     /* Ensure boot config */
     if (!vfs_find_node("/protected/bootmgr/boot.cfg")) {
@@ -902,22 +1044,32 @@ void vfs_ensure_system_payloads(void) {
             "autoinit=\\protected\\krnl\\autoinit.exe\n"
             "shell=\\protected\\gui\\gman.exe\n"
             "cmdline=quiet devpath=hardware\n"
-            "default_resolution=1280x720\n"
+            "default_resolution=auto\n"
             "bootmgr_version=1.1.0\n", 0);
     }
 
-    /* 3. Deploy kernel metadata */
+    /* 3. Deploy kernel metadata and resident RAM image */
     size_t krnl_size = 0;
-    payload_get_kernel(&krnl_size);
+    const uint8_t *k_ptr = payload_get_kernel(&krnl_size);
     vfs_node_t *krnl_bin = vfs_find_node("/protected/krnl/vpkernel");
     if (!krnl_bin) {
         krnl_bin = vfs_create_file("/protected/krnl/vpkernel");
-        if (krnl_bin) krnl_bin->size = krnl_size;
+    }
+    if (krnl_bin && k_ptr && krnl_size > 0) {
+        krnl_bin->size = krnl_size;
+        krnl_bin->content = (char *)k_ptr;
+        krnl_bin->capacity = 0;
+        krnl_bin->is_protected = 1;
     }
     vfs_node_t *krnl_legacy = vfs_find_node("/EFI/pseuDOS/vpkernel");
     if (!krnl_legacy) {
         krnl_legacy = vfs_create_file("/EFI/pseuDOS/vpkernel");
-        if (krnl_legacy) krnl_legacy->size = krnl_size;
+    }
+    if (krnl_legacy && k_ptr && krnl_size > 0) {
+        krnl_legacy->size = krnl_size;
+        krnl_legacy->content = (char *)k_ptr;
+        krnl_legacy->capacity = 0;
+        krnl_legacy->is_protected = 1;
     }
 
     /* 4. Deploy userland and GUI payloads */
@@ -937,7 +1089,7 @@ void vfs_ensure_system_payloads(void) {
     } while(0)
 
     ENSURE_PAYLOAD("/protected/krnl/autoinit.exe", payload_get_autoinit);
-    ENSURE_PAYLOAD("/protected/crit/xshss.exe", payload_get_xshss);
+    ENSURE_PAYLOAD("/protected/crit/bshss.exe", payload_get_bshss);
     ENSURE_PAYLOAD("/protected/gui/gman.exe", payload_get_gman);
     ENSURE_PAYLOAD("/protected/gui/superglue.exe", payload_get_superglue);
     ENSURE_PAYLOAD("/protected/gui/ntfs.exe", payload_get_ntfs);
@@ -953,6 +1105,8 @@ void vfs_ensure_system_payloads(void) {
     ENSURE_PAYLOAD("/protected/apps/clock.exe", payload_get_clock);
     ENSURE_PAYLOAD("/protected/apps/filemgr.exe", payload_get_filemgr);
     ENSURE_PAYLOAD("/protected/apps/view.exe", payload_get_view);
+    ENSURE_PAYLOAD("/EFI/BOOT/recovery.efi", payload_get_recovery);
+    ENSURE_PAYLOAD("/EFI/pseuDOS/recovery.efi", payload_get_recovery);
 
     /* 5. Set default wallpaper configuration if missing */
     int prev_sync = g_vfs_sync_enabled;
@@ -994,7 +1148,7 @@ int vfs_mount_boot_media(const BootInfo *boot_info) {
     }
 
     if (is_live_boot) {
-        klog_info("vfs: booting live ISO media, initializing root ramfs");
+        klog_info("VFS: booting live ISO media, initializing root ramfs");
         int ret = vfs_init_initramfs();
         vfs_init_mounts(NULL, -1);
         vfs_refresh_mounts_dir();
@@ -1006,7 +1160,7 @@ int vfs_mount_boot_media(const BootInfo *boot_info) {
     StorageDevice *boot_dev = storage_get_boot_device(boot_info ? boot_info->hardware_devpath : NULL, &boot_drive_idx);
 
     if (boot_dev) {
-        klog_info("vfs: detected boot device '%s' (type=%d, path=%s)", boot_dev->name, boot_dev->type, boot_dev->devpath);
+        klog_info("VFS: detected boot device '%s' (type=%d, path=%s)", boot_dev->name, boot_dev->type, boot_dev->devpath);
     }
 
     if (boot_dev && (boot_dev->type == STORAGE_TYPE_INTERNAL_SATA ||
@@ -1015,7 +1169,7 @@ int vfs_mount_boot_media(const BootInfo *boot_info) {
         /* Mount physical FAT32 partition */
         extern int fat32_mount_disk(StorageDevice *dev);
         if (fat32_mount_disk(boot_dev) == 0) {
-            klog_info("vfs: successfully mounted persistent boot disk on /");
+            klog_info("VFS: successfully mounted persistent boot disk on /");
             /* Successfully mounted persistent disk - ensure all system payloads are available */
             vfs_ensure_system_payloads();
             if (boot_info && boot_info->initramfs_base && boot_info->initramfs_size) {
@@ -1255,6 +1409,18 @@ void vfs_refresh_mounts_dir(void) {
             snprintf(raw_marker, sizeof(raw_marker), "%s/.raw", mount_dir);
             vfs_write_file(raw_marker, "RAW / Unformatted\n", 0);
         } else {
+            /* Check if this volume is already mounted */
+            int already_mounted = 0;
+            for (int m = 0; m < MAX_MOUNTS; m++) {
+                if (g_mounts[m].active && strcmp(g_mounts[m].mount_path, mount_dir) == 0) {
+                    already_mounted = 1;
+                    break;
+                }
+            }
+            if (already_mounted) {
+                continue;
+            }
+
             /* Remove stale .raw marker if drive was just formatted */
             char raw_marker[80];
             snprintf(raw_marker, sizeof(raw_marker), "%s/.raw", mount_dir);
@@ -1266,36 +1432,115 @@ void vfs_refresh_mounts_dir(void) {
             fat32_mount_to_path(dev, mount_dir);
 
             /* Also record in g_mounts if not already present */
-            int found = 0;
             for (int m = 0; m < MAX_MOUNTS; m++) {
-                if (g_mounts[m].active && strcmp(g_mounts[m].mount_path, mount_dir) == 0) {
-                    found = 1;
+                if (!g_mounts[m].active) {
+                    g_mounts[m].active = 1;
+                    g_mounts[m].is_root = 0;
+                    g_mounts[m].is_raw = 0;
+                    g_mounts[m].drive_index = (int)i;
+                    g_mounts[m].dev_type = dev->type;
+                    snprintf(g_mounts[m].dev_name, sizeof(g_mounts[m].dev_name), "/dev/sd%c1", 'a' + i);
+                    strncpy(g_mounts[m].alt_name, dev_tag, sizeof(g_mounts[m].alt_name) - 1);
+                    strncpy(g_mounts[m].mount_path, mount_dir, sizeof(g_mounts[m].mount_path) - 1);
+                    strncpy(g_mounts[m].fs_type, info.fs_type, sizeof(g_mounts[m].fs_type) - 1);
+                    strncpy(g_mounts[m].label, info.vol_label, sizeof(g_mounts[m].label) - 1);
+                    g_mounts[m].total_bytes = info.total_bytes;
                     break;
-                }
-            }
-            if (!found) {
-                for (int m = 0; m < MAX_MOUNTS; m++) {
-                    if (!g_mounts[m].active) {
-                        g_mounts[m].active = 1;
-                        g_mounts[m].is_root = 0;
-                        g_mounts[m].is_raw = 0;
-                        g_mounts[m].drive_index = (int)i;
-                        g_mounts[m].dev_type = dev->type;
-                        snprintf(g_mounts[m].dev_name, sizeof(g_mounts[m].dev_name), "/dev/sd%c1", 'a' + i);
-                        strncpy(g_mounts[m].alt_name, dev_tag, sizeof(g_mounts[m].alt_name) - 1);
-                        strncpy(g_mounts[m].mount_path, mount_dir, sizeof(g_mounts[m].mount_path) - 1);
-                        strncpy(g_mounts[m].fs_type, info.fs_type, sizeof(g_mounts[m].fs_type) - 1);
-                        strncpy(g_mounts[m].label, info.vol_label, sizeof(g_mounts[m].label) - 1);
-                        g_mounts[m].total_bytes = info.total_bytes;
-                        break;
-                    }
                 }
             }
         }
     }
 }
 
+void vfs_refresh_device_mount(StorageDevice *target_dev) {
+    if (!target_dev) return;
+
+    vfs_mkdir("/mounts");
+    uint32_t count = storage_get_device_count();
+    int sata_idx = 0, nvme_idx = 0, usb_idx = 0;
+    int target_idx = -1;
+    char target_tag[32] = "";
+
+    for (uint32_t i = 0; i < count; i++) {
+        StorageDevice *dev = storage_get_device(i);
+        if (!dev) continue;
+
+        char dev_tag[32];
+        if (dev->type == STORAGE_TYPE_INTERNAL_SATA) {
+            snprintf(dev_tag, sizeof(dev_tag), "sata%d", sata_idx++);
+        } else if (dev->type == STORAGE_TYPE_INTERNAL_NVME) {
+            snprintf(dev_tag, sizeof(dev_tag), "nvme%dn1", nvme_idx++);
+        } else {
+            snprintf(dev_tag, sizeof(dev_tag), "usb%d", usb_idx++);
+        }
+
+        if (dev == target_dev) {
+            target_idx = (int)i;
+            strncpy(target_tag, dev_tag, sizeof(target_tag) - 1);
+            target_tag[sizeof(target_tag) - 1] = '\0';
+            break;
+        }
+    }
+
+    if (target_idx < 0) return;
+
+    char mount_dir[64];
+    snprintf(mount_dir, sizeof(mount_dir), "/mounts/%s", target_tag);
+    vfs_mkdir(mount_dir);
+
+    /* Unmount previous FAT32 write-through mount and clean VFS node */
+    extern void fat32_unmount_path(const char *mount_path);
+    fat32_unmount_path(mount_dir);
+    vfs_remove_node_ex(mount_dir, 1, 1);
+    vfs_mkdir(mount_dir);
+
+    /* Remove from g_mounts if already recorded */
+    for (int m = 0; m < MAX_MOUNTS; m++) {
+        if (g_mounts[m].active && strcmp(g_mounts[m].mount_path, mount_dir) == 0) {
+            g_mounts[m].active = 0;
+        }
+    }
+
+    StorageFsInfo info;
+    int has_fs = (storage_inspect_fs(target_dev, &info) == 0 && info.has_filesystem);
+    if (!has_fs) {
+        char raw_marker[80];
+        snprintf(raw_marker, sizeof(raw_marker), "%s/.raw", mount_dir);
+        vfs_write_file(raw_marker, "RAW / Unformatted\n", 0);
+        return;
+    }
+
+    char raw_marker[80];
+    snprintf(raw_marker, sizeof(raw_marker), "%s/.raw", mount_dir);
+    if (vfs_find_node(raw_marker)) {
+        vfs_remove_node_ex(raw_marker, 0, 1);
+    }
+
+    /* Mount only the targeted volume */
+    extern int fat32_mount_to_path(StorageDevice *dev, const char *mount_path);
+    fat32_mount_to_path(target_dev, mount_dir);
+
+    /* Record in g_mounts */
+    for (int m = 0; m < MAX_MOUNTS; m++) {
+        if (!g_mounts[m].active) {
+            g_mounts[m].active = 1;
+            g_mounts[m].is_root = 0;
+            g_mounts[m].is_raw = 0;
+            g_mounts[m].drive_index = target_idx;
+            g_mounts[m].dev_type = target_dev->type;
+            snprintf(g_mounts[m].dev_name, sizeof(g_mounts[m].dev_name), "/dev/sd%c1", 'a' + target_idx);
+            strncpy(g_mounts[m].alt_name, target_tag, sizeof(g_mounts[m].alt_name) - 1);
+            strncpy(g_mounts[m].mount_path, mount_dir, sizeof(g_mounts[m].mount_path) - 1);
+            strncpy(g_mounts[m].fs_type, info.fs_type, sizeof(g_mounts[m].fs_type) - 1);
+            strncpy(g_mounts[m].label, info.vol_label, sizeof(g_mounts[m].label) - 1);
+            g_mounts[m].total_bytes = info.total_bytes;
+            break;
+        }
+    }
+}
+
 int vfs_mount_device(const char *source, const char *target, const char *fstype, char *out_log, size_t out_cap) {
+    (void)fstype;
     if (!source || !target) {
         if (out_log && out_cap > 0) snprintf(out_log, out_cap, "mount: missing source or target argument\n");
         return -1;

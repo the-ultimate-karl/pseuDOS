@@ -22,5 +22,6 @@ typedef struct {
 } panic_context_t;
 
 void kernel_panic(const char *reason, const panic_context_t *ctx) __attribute__((noreturn));
+void panic_insufficient_memory(uint64_t detected_mb, uint64_t required_mb) __attribute__((noreturn));
 
 #endif /* PANIC_H */

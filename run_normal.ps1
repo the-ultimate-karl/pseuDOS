@@ -312,7 +312,7 @@ $QemuBootArgs = @()
 if ($IsNoIso) {
     $QemuBootArgs += "-boot", "order=c,menu=off"
 } else {
-    $QemuBootArgs += "-cdrom", "$IsoPath", "-boot", "order=d,menu=off"
+    $QemuBootArgs += "-drive", "file=$IsoPath,media=cdrom,if=none,id=cdrom0", "-device", "ide-cd,drive=cdrom0,bootindex=0", "-boot", "order=d,menu=off"
 }
 
 $BiosArgs = @()

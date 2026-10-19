@@ -378,51 +378,149 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
         uint32_t start_cluster;
     } DynamicPayload;
 
-    DynamicPayload payloads[] = {
-        { "\\EFI\\BOOT\\BOOTX64.EFI boot manager", NULL, 0, 0, 0 },
-        { "\\protected\\krnl\\vpkernel bare-metal payload", NULL, 0, 0, 0 },
-        { "\\protected\\krnl\\autoinit.exe userland init process", NULL, 0, 0, 0 },
-        { "\\protected\\crit\\xshss.exe shell subsystem", NULL, 0, 0, 0 },
-        { "\\protected\\gui\\gman.exe graphical manager", NULL, 0, 0, 0 },
-        { "\\protected\\gui\\ntfs.exe display server", NULL, 0, 0, 0 },
-        { "\\protected\\gui\\lack.exe login/auth session", NULL, 0, 0, 0 },
-        { "\\protected\\gui\\ninds.exe window manager", NULL, 0, 0, 0 },
-        { "\\protected\\gui\\splash.exe splash loader", NULL, 0, 0, 0 },
-        { "\\protected\\gui\\gshss.exe GUI desktop shell", NULL, 0, 0, 0 },
-        { "\\protected\\apps\\shell.exe terminal app", NULL, 0, 0, 0 },
-        { "\\protected\\apps\\sysmon.exe system monitor", NULL, 0, 0, 0 },
-        { "\\protected\\apps\\calc.exe calculator app", NULL, 0, 0, 0 },
-        { "\\protected\\apps\\notepad.exe notepad app", NULL, 0, 0, 0 },
-        { "\\protected\\apps\\paint.exe paint app", NULL, 0, 0, 0 },
-        { "\\protected\\apps\\clock.exe clock app", NULL, 0, 0, 0 },
-        { "\\protected\\apps\\view.exe image viewer app", NULL, 0, 0, 0 },
-        { "\\protected\\apps\\filemgr.exe file manager app", NULL, 0, 0, 0 }
-    };
-    int num_payloads = sizeof(payloads) / sizeof(payloads[0]);
+    enum {
+        PAYLOAD_BOOTLOADER = 0,
+        PAYLOAD_RECOVERY,
+        PAYLOAD_KERNEL,
+        PAYLOAD_AUTOINIT,
+        PAYLOAD_BSHSS,
+        PAYLOAD_GMAN,
+        PAYLOAD_SUPERGLUE,
+        PAYLOAD_NTFS,
+        PAYLOAD_LACK,
+        PAYLOAD_NINDS,
+        PAYLOAD_SPLASH,
+        PAYLOAD_GSHSS,
+        PAYLOAD_SHELL,
+        PAYLOAD_SYSMON,
+        PAYLOAD_CALC,
+        PAYLOAD_NOTEPAD,
+        PAYLOAD_PAINT,
+        PAYLOAD_CLOCK,
+        PAYLOAD_VIEW,
+        PAYLOAD_FILEMGR,
+        PAYLOAD_INITRAMFS,
 
-    payloads[0].data = payload_get_bootloader(&payloads[0].size);
-    payloads[1].data = payload_get_kernel(&payloads[1].size);
-    payloads[2].data = payload_get_autoinit(&payloads[2].size);
-    payloads[3].data = payload_get_xshss(&payloads[3].size);
-    payloads[4].data = payload_get_gman(&payloads[4].size);
-    payloads[5].data = payload_get_ntfs(&payloads[5].size);
-    payloads[6].data = payload_get_lack(&payloads[6].size);
-    payloads[7].data = payload_get_ninds(&payloads[7].size);
-    payloads[8].data = payload_get_splash(&payloads[8].size);
-    payloads[9].data = payload_get_gshss(&payloads[9].size);
-    payloads[10].data = payload_get_shell(&payloads[10].size);
-    payloads[11].data = payload_get_sysmon(&payloads[11].size);
-    payloads[12].data = payload_get_calc(&payloads[12].size);
-    payloads[13].data = payload_get_notepad(&payloads[13].size);
-    payloads[14].data = payload_get_paint(&payloads[14].size);
-    payloads[15].data = payload_get_clock(&payloads[15].size);
-    payloads[16].data = payload_get_view(&payloads[16].size);
-    payloads[17].data = payload_get_filemgr(&payloads[17].size);
+        /* Test Media in \home\user */
+        PAYLOAD_IMG1_JPG,
+        PAYLOAD_IMG1_PNG,
+        PAYLOAD_IMG1_BMP,
+        PAYLOAD_IMG2_PNG,
+        PAYLOAD_SAMPLE_PNG,
+        PAYLOAD_SAMPLE_BMP,
+
+        /* Wallpapers in \home\user\Wallpapers */
+        PAYLOAD_WALL_UNDER_CONSTRUCTION,
+        PAYLOAD_WALL_ACCURATE,
+        PAYLOAD_WALL_BLUESCREEN,
+        PAYLOAD_WALL_FALLBACK,
+        PAYLOAD_WALL_MEOW,
+        PAYLOAD_WALL_SPARKLYMEOW,
+        PAYLOAD_WALL_SPARKLYMEOW_ALT,
+        PAYLOAD_WALL_SPARKLYMEOW_ALTCIRCLES,
+        PAYLOAD_WALL_SPARKLYMEOW_ALTLINES,
+        PAYLOAD_WALL_SPARKLYMEOW_ALTLINES2,
+        NUM_INSTALL_PAYLOADS
+    };
+
+    DynamicPayload payloads[NUM_INSTALL_PAYLOADS] = {
+        [PAYLOAD_BOOTLOADER] = { "\\EFI\\BOOT\\BOOTX64.EFI boot manager", NULL, 0, 0, 0 },
+        [PAYLOAD_RECOVERY]   = { "\\EFI\\BOOT\\recovery.efi recovery console", NULL, 0, 0, 0 },
+        [PAYLOAD_KERNEL]     = { "\\protected\\krnl\\vpkernel bare-metal payload", NULL, 0, 0, 0 },
+        [PAYLOAD_AUTOINIT]   = { "\\protected\\krnl\\autoinit.exe userland init process", NULL, 0, 0, 0 },
+        [PAYLOAD_BSHSS]      = { "\\protected\\crit\\bshss.exe shell subsystem", NULL, 0, 0, 0 },
+        [PAYLOAD_GMAN]       = { "\\protected\\gui\\gman.exe graphical manager", NULL, 0, 0, 0 },
+        [PAYLOAD_SUPERGLUE]  = { "\\protected\\gui\\superglue.exe window compositor", NULL, 0, 0, 0 },
+        [PAYLOAD_NTFS]       = { "\\protected\\gui\\ntfs.exe display server", NULL, 0, 0, 0 },
+        [PAYLOAD_LACK]       = { "\\protected\\gui\\lack.exe login/auth session", NULL, 0, 0, 0 },
+        [PAYLOAD_NINDS]      = { "\\protected\\gui\\ninds.exe window manager", NULL, 0, 0, 0 },
+        [PAYLOAD_SPLASH]     = { "\\protected\\gui\\splash.exe splash loader", NULL, 0, 0, 0 },
+        [PAYLOAD_GSHSS]      = { "\\protected\\gui\\gshss.exe GUI desktop shell", NULL, 0, 0, 0 },
+        [PAYLOAD_SHELL]      = { "\\protected\\apps\\shell.exe terminal app", NULL, 0, 0, 0 },
+        [PAYLOAD_SYSMON]     = { "\\protected\\apps\\sysmon.exe system monitor", NULL, 0, 0, 0 },
+        [PAYLOAD_CALC]       = { "\\protected\\apps\\calc.exe calculator app", NULL, 0, 0, 0 },
+        [PAYLOAD_NOTEPAD]    = { "\\protected\\apps\\notepad.exe notepad app", NULL, 0, 0, 0 },
+        [PAYLOAD_PAINT]      = { "\\protected\\apps\\paint.exe paint app", NULL, 0, 0, 0 },
+        [PAYLOAD_CLOCK]      = { "\\protected\\apps\\clock.exe clock app", NULL, 0, 0, 0 },
+        [PAYLOAD_VIEW]       = { "\\protected\\apps\\view.exe image viewer app", NULL, 0, 0, 0 },
+        [PAYLOAD_FILEMGR]    = { "\\protected\\apps\\filemgr.exe file manager app", NULL, 0, 0, 0 },
+        [PAYLOAD_INITRAMFS]  = { "\\protected\\krnl\\initramfs.img archive", NULL, 0, 0, 0 },
+
+        [PAYLOAD_IMG1_JPG]   = { "\\home\\user\\image1.jpg test image", NULL, 0, 0, 0 },
+        [PAYLOAD_IMG1_PNG]   = { "\\home\\user\\image1.png test image", NULL, 0, 0, 0 },
+        [PAYLOAD_IMG1_BMP]   = { "\\home\\user\\image1.bmp test image", NULL, 0, 0, 0 },
+        [PAYLOAD_IMG2_PNG]   = { "\\home\\user\\image2.png test image", NULL, 0, 0, 0 },
+        [PAYLOAD_SAMPLE_PNG] = { "\\home\\user\\sample.png test image", NULL, 0, 0, 0 },
+        [PAYLOAD_SAMPLE_BMP] = { "\\home\\user\\sample.bmp test image", NULL, 0, 0, 0 },
+
+        [PAYLOAD_WALL_UNDER_CONSTRUCTION]    = { "\\home\\user\\Wallpapers\\Under Construction.png wallpaper", NULL, 0, 0, 0 },
+        [PAYLOAD_WALL_ACCURATE]              = { "\\home\\user\\Wallpapers\\accurate.png wallpaper", NULL, 0, 0, 0 },
+        [PAYLOAD_WALL_BLUESCREEN]            = { "\\home\\user\\Wallpapers\\bluescreen.png wallpaper", NULL, 0, 0, 0 },
+        [PAYLOAD_WALL_FALLBACK]              = { "\\home\\user\\Wallpapers\\fallback.png wallpaper", NULL, 0, 0, 0 },
+        [PAYLOAD_WALL_MEOW]                  = { "\\home\\user\\Wallpapers\\meow.png wallpaper", NULL, 0, 0, 0 },
+        [PAYLOAD_WALL_SPARKLYMEOW]           = { "\\home\\user\\Wallpapers\\sparklymeow.png wallpaper", NULL, 0, 0, 0 },
+        [PAYLOAD_WALL_SPARKLYMEOW_ALT]       = { "\\home\\user\\Wallpapers\\sparklymeow_alt.png wallpaper", NULL, 0, 0, 0 },
+        [PAYLOAD_WALL_SPARKLYMEOW_ALTCIRCLES]= { "\\home\\user\\Wallpapers\\sparklymeow_altcircles.png wallpaper", NULL, 0, 0, 0 },
+        [PAYLOAD_WALL_SPARKLYMEOW_ALTLINES]  = { "\\home\\user\\Wallpapers\\sparklymeow_altlines.png wallpaper", NULL, 0, 0, 0 },
+        [PAYLOAD_WALL_SPARKLYMEOW_ALTLINES2] = { "\\home\\user\\Wallpapers\\sparklymeow_altlines2.png wallpaper", NULL, 0, 0, 0 },
+    };
+    int num_payloads = NUM_INSTALL_PAYLOADS;
+
+    payloads[PAYLOAD_BOOTLOADER].data = payload_get_bootloader(&payloads[PAYLOAD_BOOTLOADER].size);
+    payloads[PAYLOAD_RECOVERY].data   = payload_get_recovery(&payloads[PAYLOAD_RECOVERY].size);
+    payloads[PAYLOAD_KERNEL].data     = payload_get_kernel(&payloads[PAYLOAD_KERNEL].size);
+    payloads[PAYLOAD_AUTOINIT].data   = payload_get_autoinit(&payloads[PAYLOAD_AUTOINIT].size);
+    payloads[PAYLOAD_BSHSS].data      = payload_get_bshss(&payloads[PAYLOAD_BSHSS].size);
+    payloads[PAYLOAD_GMAN].data       = payload_get_gman(&payloads[PAYLOAD_GMAN].size);
+    payloads[PAYLOAD_SUPERGLUE].data  = payload_get_superglue(&payloads[PAYLOAD_SUPERGLUE].size);
+    payloads[PAYLOAD_NTFS].data       = payload_get_ntfs(&payloads[PAYLOAD_NTFS].size);
+    payloads[PAYLOAD_LACK].data       = payload_get_lack(&payloads[PAYLOAD_LACK].size);
+    payloads[PAYLOAD_NINDS].data      = payload_get_ninds(&payloads[PAYLOAD_NINDS].size);
+    payloads[PAYLOAD_SPLASH].data     = payload_get_splash(&payloads[PAYLOAD_SPLASH].size);
+    payloads[PAYLOAD_GSHSS].data      = payload_get_gshss(&payloads[PAYLOAD_GSHSS].size);
+    payloads[PAYLOAD_SHELL].data      = payload_get_shell(&payloads[PAYLOAD_SHELL].size);
+    payloads[PAYLOAD_SYSMON].data     = payload_get_sysmon(&payloads[PAYLOAD_SYSMON].size);
+    payloads[PAYLOAD_CALC].data       = payload_get_calc(&payloads[PAYLOAD_CALC].size);
+    payloads[PAYLOAD_NOTEPAD].data    = payload_get_notepad(&payloads[PAYLOAD_NOTEPAD].size);
+    payloads[PAYLOAD_PAINT].data      = payload_get_paint(&payloads[PAYLOAD_PAINT].size);
+    payloads[PAYLOAD_CLOCK].data      = payload_get_clock(&payloads[PAYLOAD_CLOCK].size);
+    payloads[PAYLOAD_VIEW].data       = payload_get_view(&payloads[PAYLOAD_VIEW].size);
+    payloads[PAYLOAD_FILEMGR].data    = payload_get_filemgr(&payloads[PAYLOAD_FILEMGR].size);
+    payloads[PAYLOAD_INITRAMFS].data  = payload_get_initramfs(&payloads[PAYLOAD_INITRAMFS].size);
+
+    /* Test images in /home/user */
+    payloads[PAYLOAD_IMG1_JPG].data   = payload_get_by_path("/home/user/image1.jpg", &payloads[PAYLOAD_IMG1_JPG].size);
+    if (!payloads[PAYLOAD_IMG1_JPG].data) payloads[PAYLOAD_IMG1_JPG].data = payload_get_by_path("/home/user/image1_testmedia.jpg", &payloads[PAYLOAD_IMG1_JPG].size);
+    payloads[PAYLOAD_IMG1_PNG].data   = payload_get_by_path("/home/user/image1.png", &payloads[PAYLOAD_IMG1_PNG].size);
+    if (!payloads[PAYLOAD_IMG1_PNG].data) payloads[PAYLOAD_IMG1_PNG].data = payload_get_by_path("/home/user/image1_testmedia.png", &payloads[PAYLOAD_IMG1_PNG].size);
+    payloads[PAYLOAD_IMG1_BMP].data   = payload_get_by_path("/home/user/image1.bmp", &payloads[PAYLOAD_IMG1_BMP].size);
+    if (!payloads[PAYLOAD_IMG1_BMP].data) payloads[PAYLOAD_IMG1_BMP].data = payload_get_by_path("/home/user/image1_testmedia.bmp", &payloads[PAYLOAD_IMG1_BMP].size);
+    payloads[PAYLOAD_IMG2_PNG].data   = payload_get_by_path("/home/user/image2.png", &payloads[PAYLOAD_IMG2_PNG].size);
+    if (!payloads[PAYLOAD_IMG2_PNG].data) payloads[PAYLOAD_IMG2_PNG].data = payload_get_by_path("/home/user/image2_testmedia.png", &payloads[PAYLOAD_IMG2_PNG].size);
+    payloads[PAYLOAD_SAMPLE_PNG].data = payload_get_by_path("/home/user/sample.png", &payloads[PAYLOAD_SAMPLE_PNG].size);
+    payloads[PAYLOAD_SAMPLE_BMP].data = payload_get_by_path("/home/user/sample.bmp", &payloads[PAYLOAD_SAMPLE_BMP].size);
+
+    /* Wallpapers in /home/user/Wallpapers */
+    payloads[PAYLOAD_WALL_UNDER_CONSTRUCTION].data    = payload_get_by_path("/home/user/Wallpapers/Under Construction.png", &payloads[PAYLOAD_WALL_UNDER_CONSTRUCTION].size);
+    payloads[PAYLOAD_WALL_ACCURATE].data              = payload_get_by_path("/home/user/Wallpapers/accurate.png", &payloads[PAYLOAD_WALL_ACCURATE].size);
+    payloads[PAYLOAD_WALL_BLUESCREEN].data            = payload_get_by_path("/home/user/Wallpapers/bluescreen.png", &payloads[PAYLOAD_WALL_BLUESCREEN].size);
+    payloads[PAYLOAD_WALL_FALLBACK].data              = payload_get_by_path("/home/user/Wallpapers/fallback.png", &payloads[PAYLOAD_WALL_FALLBACK].size);
+    payloads[PAYLOAD_WALL_MEOW].data                  = payload_get_by_path("/home/user/Wallpapers/meow.png", &payloads[PAYLOAD_WALL_MEOW].size);
+    payloads[PAYLOAD_WALL_SPARKLYMEOW].data           = payload_get_by_path("/home/user/Wallpapers/sparklymeow.png", &payloads[PAYLOAD_WALL_SPARKLYMEOW].size);
+    payloads[PAYLOAD_WALL_SPARKLYMEOW_ALT].data       = payload_get_by_path("/home/user/Wallpapers/sparklymeow_alt.png", &payloads[PAYLOAD_WALL_SPARKLYMEOW_ALT].size);
+    payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTCIRCLES].data= payload_get_by_path("/home/user/Wallpapers/sparklymeow_altcircles.png", &payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTCIRCLES].size);
+    payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTLINES].data  = payload_get_by_path("/home/user/Wallpapers/sparklymeow_altlines.png", &payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTLINES].size);
+    payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTLINES2].data = payload_get_by_path("/home/user/Wallpapers/sparklymeow_altlines2.png", &payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTLINES2].size);
 
     uint32_t cluster_size_bytes = spc * 512;
-    uint32_t next_cluster = 20; /* Clusters 2..19 reserved for directories and static config files */
+    uint32_t next_cluster = 21; /* Clusters 2..20 reserved for directories and static config files */
 
     for (int p = 0; p < num_payloads; p++) {
+        if (payloads[p].size == 0) {
+            payloads[p].clusters = 0;
+            payloads[p].start_cluster = 0;
+            continue;
+        }
         payloads[p].clusters = (uint32_t)((payloads[p].size + cluster_size_bytes - 1) / cluster_size_bytes);
         if (payloads[p].clusters == 0) payloads[p].clusters = 1;
         payloads[p].start_cluster = next_cluster;
@@ -514,12 +612,14 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
                 entries[i] = 0x0FFFFFF8; /* Media descriptor */
             } else if (c == 1) {
                 entries[i] = 0xFFFFFFFF; /* Clean shutdown status */
-            } else if (c >= 2 && c <= 19) {
+            } else if (c >= 2 && c <= 20) {
                 entries[i] = 0x0FFFFFFF; /* EOF for system directories and static config files */
             } else {
                 int matched = 0;
                 for (int p = 0; p < num_payloads; p++) {
-                    if (c >= payloads[p].start_cluster && c < payloads[p].start_cluster + payloads[p].clusters) {
+                    if (payloads[p].clusters > 0 &&
+                        c >= payloads[p].start_cluster &&
+                        c < payloads[p].start_cluster + payloads[p].clusters) {
                         uint32_t offset = c - payloads[p].start_cluster;
                         entries[i] = (offset + 1 == payloads[p].clusters) ? 0x0FFFFFFF : (c + 1);
                         matched = 1;
@@ -610,13 +710,16 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     make_lfn_entry(entries, &idx, "pseuDOS", "PSEUDOS    ", 0x10, 5, 0);
     WRITE_CLUSTER(3, cluster_buf);
 
-    /* Cluster 4: \EFI\BOOT contains "BOOTX64.EFI" */
+    /* Cluster 4: \EFI\BOOT contains "BOOTX64.EFI" and "recovery.efi" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
     idx = 0;
     make_lfn_entry(entries, &idx, ".",           ".          ", 0x10, 4, 0);
     make_lfn_entry(entries, &idx, "..",          "..         ", 0x10, 3, 0);
-    make_lfn_entry(entries, &idx, "BOOTX64.EFI", "BOOTX64 EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
+    make_lfn_entry(entries, &idx, "BOOTX64.EFI", "BOOTX64 EFI", 0x20, payloads[PAYLOAD_BOOTLOADER].start_cluster, (uint32_t)payloads[PAYLOAD_BOOTLOADER].size);
+    if (payloads[PAYLOAD_RECOVERY].clusters > 0) {
+        make_lfn_entry(entries, &idx, "recovery.efi", "RECOVERYEFI", 0x20, payloads[PAYLOAD_RECOVERY].start_cluster, (uint32_t)payloads[PAYLOAD_RECOVERY].size);
+    }
     WRITE_CLUSTER(4, cluster_buf);
 
     /* Cluster 12: \EFI\pseuDOS\grub.cfg file */
@@ -637,23 +740,26 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     const char *osrelease_content =
         "NAME=\"pseuDOS\"\r\n"
         "ID=pseudos\r\n"
-        "VERSION=\"0.7.1\"\r\n"
-        "PRETTY_NAME=\"pseuDOS v0.7.1 (x86_64 UEFI)\"\r\n"
+        "VERSION=\"0.7.2\"\r\n"
+        "PRETTY_NAME=\"pseuDOS v0.7.2 (x86_64 UEFI)\"\r\n"
         "HOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\r\n";
     uint32_t osrelease_len = (uint32_t)strlen(osrelease_content);
     memset(cluster_buf, 0, cluster_size_bytes);
     memcpy(cluster_buf, osrelease_content, osrelease_len);
     WRITE_CLUSTER(13, cluster_buf);
 
-    /* Cluster 5: \EFI\pseuDOS contains BOOTX64.EFI, pseudos.efi, fallback vpkernel, grub.cfg, os-release */
+    /* Cluster 5: \EFI\pseuDOS contains BOOTX64.EFI, silo.efi, recovery.efi, fallback vpkernel, grub.cfg, os-release */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
     idx = 0;
     make_lfn_entry(entries, &idx, ".",           ".          ", 0x10, 5, 0);
     make_lfn_entry(entries, &idx, "..",          "..         ", 0x10, 3, 0);
-    make_lfn_entry(entries, &idx, "BOOTX64.EFI", "BOOTX64 EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
-    make_lfn_entry(entries, &idx, "pseudos.efi", "PSEUDOS EFI", 0x20, payloads[0].start_cluster, (uint32_t)payloads[0].size);
-    make_lfn_entry(entries, &idx, "vpkernel",    "VPKERNEL   ", 0x20, payloads[1].start_cluster, (uint32_t)payloads[1].size);
+    make_lfn_entry(entries, &idx, "BOOTX64.EFI", "BOOTX64 EFI", 0x20, payloads[PAYLOAD_BOOTLOADER].start_cluster, (uint32_t)payloads[PAYLOAD_BOOTLOADER].size);
+    make_lfn_entry(entries, &idx, "silo.efi",    "SILO    EFI", 0x20, payloads[PAYLOAD_BOOTLOADER].start_cluster, (uint32_t)payloads[PAYLOAD_BOOTLOADER].size);
+    if (payloads[PAYLOAD_RECOVERY].clusters > 0) {
+        make_lfn_entry(entries, &idx, "recovery.efi", "RECOVERYEFI", 0x20, payloads[PAYLOAD_RECOVERY].start_cluster, (uint32_t)payloads[PAYLOAD_RECOVERY].size);
+    }
+    make_lfn_entry(entries, &idx, "vpkernel",    "VPKERNEL   ", 0x20, payloads[PAYLOAD_KERNEL].start_cluster, (uint32_t)payloads[PAYLOAD_KERNEL].size);
     make_lfn_entry(entries, &idx, "grub.cfg",    "GRUB    CFG", 0x20, 12, grub_len);
     make_lfn_entry(entries, &idx, "os-release",  "OS-REL~1   ", 0x20, 13, osrelease_len);
     WRITE_CLUSTER(5, cluster_buf);
@@ -671,34 +777,50 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     make_lfn_entry(entries, &idx, "apps",    "APPS       ", 0x10, 15, 0);
     WRITE_CLUSTER(7, cluster_buf);
 
-    /* Cluster 8: \protected\krnl contains "vpkernel" and "autoinit.exe" */
+    /* Cluster 8: \protected\krnl contains "vpkernel", "autoinit.exe", and optionally "initramfs.img" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
     idx = 0;
     make_lfn_entry(entries, &idx, ".",            ".          ", 0x10, 8, 0);
     make_lfn_entry(entries, &idx, "..",           "..         ", 0x10, 7, 0);
-    make_lfn_entry(entries, &idx, "vpkernel",     "VPKERNEL   ", 0x20, payloads[1].start_cluster, (uint32_t)payloads[1].size);
-    make_lfn_entry(entries, &idx, "autoinit.exe", "AUTOINITEXE", 0x20, payloads[2].start_cluster, (uint32_t)payloads[2].size);
+    make_lfn_entry(entries, &idx, "vpkernel",     "VPKERNEL   ", 0x20, payloads[PAYLOAD_KERNEL].start_cluster, (uint32_t)payloads[PAYLOAD_KERNEL].size);
+    make_lfn_entry(entries, &idx, "autoinit.exe", "AUTOINITEXE", 0x20, payloads[PAYLOAD_AUTOINIT].start_cluster, (uint32_t)payloads[PAYLOAD_AUTOINIT].size);
+    if (payloads[PAYLOAD_INITRAMFS].clusters > 0) {
+        make_lfn_entry(entries, &idx, "initramfs.img", "INITRAMFIMG", 0x20, payloads[PAYLOAD_INITRAMFS].start_cluster, (uint32_t)payloads[PAYLOAD_INITRAMFS].size);
+    }
     WRITE_CLUSTER(8, cluster_buf);
 
-    /* Cluster 11: \protected\crit contains "xshss.exe" */
+    /* Cluster 11: \protected\crit contains "bshss.exe" */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
     idx = 0;
     make_lfn_entry(entries, &idx, ".",         ".          ", 0x10, 11, 0);
     make_lfn_entry(entries, &idx, "..",        "..         ", 0x10, 7, 0);
-    make_lfn_entry(entries, &idx, "xshss.exe", "XSHSS   EXE", 0x20, payloads[3].start_cluster, (uint32_t)payloads[3].size);
+    make_lfn_entry(entries, &idx, "bshss.exe", "BSHSS   EXE", 0x20, payloads[PAYLOAD_BSHSS].start_cluster, (uint32_t)payloads[PAYLOAD_BSHSS].size);
     WRITE_CLUSTER(11, cluster_buf);
 
     /* Cluster 10: \protected\bootmgr\boot.cfg file content */
-    const char *cfg_content =
-        "# pseuDOS Boot Configuration\r\n"
-        "kernel=\\protected\\krnl\\vpkernel\r\n"
-        "autoinit=\\protected\\krnl\\autoinit.exe\r\n"
-        "shell=\\protected\\gui\\gman.exe\r\n"
-        "cmdline=quiet devpath=hardware\r\n"
-        "default_resolution=1280x720\r\n"
-        "bootmgr_version=1.1.0\r\n";
+    char cfg_content[512];
+    if (payloads[PAYLOAD_INITRAMFS].clusters > 0) {
+        snprintf(cfg_content, sizeof(cfg_content),
+            "# pseuDOS Boot Configuration\r\n"
+            "kernel=\\protected\\krnl\\vpkernel\r\n"
+            "initramfs=\\protected\\krnl\\initramfs.img\r\n"
+            "autoinit=\\protected\\krnl\\autoinit.exe\r\n"
+            "shell=\\protected\\gui\\gman.exe\r\n"
+            "cmdline=quiet devpath=hardware\r\n"
+            "default_resolution=auto\r\n"
+            "bootmgr_version=1.1.0\r\n");
+    } else {
+        snprintf(cfg_content, sizeof(cfg_content),
+            "# pseuDOS Boot Configuration\r\n"
+            "kernel=\\protected\\krnl\\vpkernel\r\n"
+            "autoinit=\\protected\\krnl\\autoinit.exe\r\n"
+            "shell=\\protected\\gui\\gman.exe\r\n"
+            "cmdline=quiet devpath=hardware\r\n"
+            "default_resolution=auto\r\n"
+            "bootmgr_version=1.1.0\r\n");
+    }
     uint32_t cfg_len = (uint32_t)strlen(cfg_content);
 
     memset(cluster_buf, 0, cluster_size_bytes);
@@ -720,13 +842,13 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     idx = 0;
     make_lfn_entry(entries, &idx, ".",             ".          ", 0x10, 14, 0);
     make_lfn_entry(entries, &idx, "..",            "..         ", 0x10, 7, 0);
-    make_lfn_entry(entries, &idx, "gman.exe",      "GMAN    EXE", 0x20, payloads[4].start_cluster, (uint32_t)payloads[4].size);
-    make_lfn_entry(entries, &idx, "superglue.exe", "SUPERGLUEXE", 0x20, payloads[4].start_cluster, (uint32_t)payloads[4].size);
-    make_lfn_entry(entries, &idx, "ntfs.exe",      "NTFS    EXE", 0x20, payloads[5].start_cluster, (uint32_t)payloads[5].size);
-    make_lfn_entry(entries, &idx, "lack.exe",      "LACK    EXE", 0x20, payloads[6].start_cluster, (uint32_t)payloads[6].size);
-    make_lfn_entry(entries, &idx, "ninds.exe",     "NINDS   EXE", 0x20, payloads[7].start_cluster, (uint32_t)payloads[7].size);
-    make_lfn_entry(entries, &idx, "splash.exe",    "SPLASH  EXE", 0x20, payloads[8].start_cluster, (uint32_t)payloads[8].size);
-    make_lfn_entry(entries, &idx, "gshss.exe",     "GSHSS   EXE", 0x20, payloads[9].start_cluster, (uint32_t)payloads[9].size);
+    make_lfn_entry(entries, &idx, "gman.exe",      "GMAN    EXE", 0x20, payloads[PAYLOAD_GMAN].start_cluster, (uint32_t)payloads[PAYLOAD_GMAN].size);
+    make_lfn_entry(entries, &idx, "superglue.exe", "SUPERGLUEXE", 0x20, payloads[PAYLOAD_SUPERGLUE].start_cluster, (uint32_t)payloads[PAYLOAD_SUPERGLUE].size);
+    make_lfn_entry(entries, &idx, "ntfs.exe",      "NTFS    EXE", 0x20, payloads[PAYLOAD_NTFS].start_cluster, (uint32_t)payloads[PAYLOAD_NTFS].size);
+    make_lfn_entry(entries, &idx, "lack.exe",      "LACK    EXE", 0x20, payloads[PAYLOAD_LACK].start_cluster, (uint32_t)payloads[PAYLOAD_LACK].size);
+    make_lfn_entry(entries, &idx, "ninds.exe",     "NINDS   EXE", 0x20, payloads[PAYLOAD_NINDS].start_cluster, (uint32_t)payloads[PAYLOAD_NINDS].size);
+    make_lfn_entry(entries, &idx, "splash.exe",    "SPLASH  EXE", 0x20, payloads[PAYLOAD_SPLASH].start_cluster, (uint32_t)payloads[PAYLOAD_SPLASH].size);
+    make_lfn_entry(entries, &idx, "gshss.exe",     "GSHSS   EXE", 0x20, payloads[PAYLOAD_GSHSS].start_cluster, (uint32_t)payloads[PAYLOAD_GSHSS].size);
     WRITE_CLUSTER(14, cluster_buf);
 
     /* Cluster 15: \protected\apps contains shell, sysmon, calc, notepad, paint, clock, view, filemgr */
@@ -735,14 +857,14 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     idx = 0;
     make_lfn_entry(entries, &idx, ".",           ".          ", 0x10, 15, 0);
     make_lfn_entry(entries, &idx, "..",          "..         ", 0x10, 7, 0);
-    make_lfn_entry(entries, &idx, "shell.exe",   "SHELL   EXE", 0x20, payloads[10].start_cluster, (uint32_t)payloads[10].size);
-    make_lfn_entry(entries, &idx, "sysmon.exe",  "SYSMON  EXE", 0x20, payloads[11].start_cluster, (uint32_t)payloads[11].size);
-    make_lfn_entry(entries, &idx, "calc.exe",    "CALC    EXE", 0x20, payloads[12].start_cluster, (uint32_t)payloads[12].size);
-    make_lfn_entry(entries, &idx, "notepad.exe", "NOTEPAD EXE", 0x20, payloads[13].start_cluster, (uint32_t)payloads[13].size);
-    make_lfn_entry(entries, &idx, "paint.exe",   "PAINT   EXE", 0x20, payloads[14].start_cluster, (uint32_t)payloads[14].size);
-    make_lfn_entry(entries, &idx, "clock.exe",   "CLOCK   EXE", 0x20, payloads[15].start_cluster, (uint32_t)payloads[15].size);
-    make_lfn_entry(entries, &idx, "view.exe",    "VIEW    EXE", 0x20, payloads[16].start_cluster, (uint32_t)payloads[16].size);
-    make_lfn_entry(entries, &idx, "filemgr.exe", "FILEMGR EXE", 0x20, payloads[17].start_cluster, (uint32_t)payloads[17].size);
+    make_lfn_entry(entries, &idx, "shell.exe",   "SHELL   EXE", 0x20, payloads[PAYLOAD_SHELL].start_cluster, (uint32_t)payloads[PAYLOAD_SHELL].size);
+    make_lfn_entry(entries, &idx, "sysmon.exe",  "SYSMON  EXE", 0x20, payloads[PAYLOAD_SYSMON].start_cluster, (uint32_t)payloads[PAYLOAD_SYSMON].size);
+    make_lfn_entry(entries, &idx, "calc.exe",    "CALC    EXE", 0x20, payloads[PAYLOAD_CALC].start_cluster, (uint32_t)payloads[PAYLOAD_CALC].size);
+    make_lfn_entry(entries, &idx, "notepad.exe", "NOTEPAD EXE", 0x20, payloads[PAYLOAD_NOTEPAD].start_cluster, (uint32_t)payloads[PAYLOAD_NOTEPAD].size);
+    make_lfn_entry(entries, &idx, "paint.exe",   "PAINT   EXE", 0x20, payloads[PAYLOAD_PAINT].start_cluster, (uint32_t)payloads[PAYLOAD_PAINT].size);
+    make_lfn_entry(entries, &idx, "clock.exe",   "CLOCK   EXE", 0x20, payloads[PAYLOAD_CLOCK].start_cluster, (uint32_t)payloads[PAYLOAD_CLOCK].size);
+    make_lfn_entry(entries, &idx, "view.exe",    "VIEW    EXE", 0x20, payloads[PAYLOAD_VIEW].start_cluster, (uint32_t)payloads[PAYLOAD_VIEW].size);
+    make_lfn_entry(entries, &idx, "filemgr.exe", "FILEMGR EXE", 0x20, payloads[PAYLOAD_FILEMGR].start_cluster, (uint32_t)payloads[PAYLOAD_FILEMGR].size);
     WRITE_CLUSTER(15, cluster_buf);
 
     /* Cluster 16: \home contains "user" */
@@ -770,13 +892,54 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     make_lfn_entry(entries, &idx, "..", "..         ", 0x10, 0, 0);
     WRITE_CLUSTER(18, cluster_buf);
 
-    /* Cluster 19: \home\user (empty directory) */
+    /* Cluster 19: \home\user contains "Wallpapers" and test media */
     memset(cluster_buf, 0, cluster_size_bytes);
     entries = (FatDirEntry *)cluster_buf;
     idx = 0;
-    make_lfn_entry(entries, &idx, ".",  ".          ", 0x10, 19, 0);
-    make_lfn_entry(entries, &idx, "..", "..         ", 0x10, 16, 0);
+    make_lfn_entry(entries, &idx, ".",          ".          ", 0x10, 19, 0);
+    make_lfn_entry(entries, &idx, "..",         "..         ", 0x10, 16, 0);
+    make_lfn_entry(entries, &idx, "Wallpapers", "WALLPAPE   ", 0x10, 20, 0);
+    if (payloads[PAYLOAD_IMG1_JPG].clusters > 0)
+        make_lfn_entry(entries, &idx, "image1.jpg", "IMAGE1  JPG", 0x20, payloads[PAYLOAD_IMG1_JPG].start_cluster, (uint32_t)payloads[PAYLOAD_IMG1_JPG].size);
+    if (payloads[PAYLOAD_IMG1_PNG].clusters > 0)
+        make_lfn_entry(entries, &idx, "image1.png", "IMAGE1  PNG", 0x20, payloads[PAYLOAD_IMG1_PNG].start_cluster, (uint32_t)payloads[PAYLOAD_IMG1_PNG].size);
+    if (payloads[PAYLOAD_IMG1_BMP].clusters > 0)
+        make_lfn_entry(entries, &idx, "image1.bmp", "IMAGE1  BMP", 0x20, payloads[PAYLOAD_IMG1_BMP].start_cluster, (uint32_t)payloads[PAYLOAD_IMG1_BMP].size);
+    if (payloads[PAYLOAD_IMG2_PNG].clusters > 0)
+        make_lfn_entry(entries, &idx, "image2.png", "IMAGE2  PNG", 0x20, payloads[PAYLOAD_IMG2_PNG].start_cluster, (uint32_t)payloads[PAYLOAD_IMG2_PNG].size);
+    if (payloads[PAYLOAD_SAMPLE_PNG].clusters > 0)
+        make_lfn_entry(entries, &idx, "sample.png", "SAMPLE  PNG", 0x20, payloads[PAYLOAD_SAMPLE_PNG].start_cluster, (uint32_t)payloads[PAYLOAD_SAMPLE_PNG].size);
+    if (payloads[PAYLOAD_SAMPLE_BMP].clusters > 0)
+        make_lfn_entry(entries, &idx, "sample.bmp", "SAMPLE  BMP", 0x20, payloads[PAYLOAD_SAMPLE_BMP].start_cluster, (uint32_t)payloads[PAYLOAD_SAMPLE_BMP].size);
     WRITE_CLUSTER(19, cluster_buf);
+
+    /* Cluster 20: \home\user\Wallpapers contains all wallpaper assets */
+    memset(cluster_buf, 0, cluster_size_bytes);
+    entries = (FatDirEntry *)cluster_buf;
+    idx = 0;
+    make_lfn_entry(entries, &idx, ".",  ".          ", 0x10, 20, 0);
+    make_lfn_entry(entries, &idx, "..", "..         ", 0x10, 19, 0);
+    if (payloads[PAYLOAD_WALL_UNDER_CONSTRUCTION].clusters > 0)
+        make_lfn_entry(entries, &idx, "Under Construction.png",     "UNDERC~1PNG", 0x20, payloads[PAYLOAD_WALL_UNDER_CONSTRUCTION].start_cluster, (uint32_t)payloads[PAYLOAD_WALL_UNDER_CONSTRUCTION].size);
+    if (payloads[PAYLOAD_WALL_ACCURATE].clusters > 0)
+        make_lfn_entry(entries, &idx, "accurate.png",               "ACCURATEPNG", 0x20, payloads[PAYLOAD_WALL_ACCURATE].start_cluster, (uint32_t)payloads[PAYLOAD_WALL_ACCURATE].size);
+    if (payloads[PAYLOAD_WALL_BLUESCREEN].clusters > 0)
+        make_lfn_entry(entries, &idx, "bluescreen.png",             "BLUESC~1PNG", 0x20, payloads[PAYLOAD_WALL_BLUESCREEN].start_cluster, (uint32_t)payloads[PAYLOAD_WALL_BLUESCREEN].size);
+    if (payloads[PAYLOAD_WALL_FALLBACK].clusters > 0)
+        make_lfn_entry(entries, &idx, "fallback.png",               "FALLBACKPNG", 0x20, payloads[PAYLOAD_WALL_FALLBACK].start_cluster, (uint32_t)payloads[PAYLOAD_WALL_FALLBACK].size);
+    if (payloads[PAYLOAD_WALL_MEOW].clusters > 0)
+        make_lfn_entry(entries, &idx, "meow.png",                   "MEOW    PNG", 0x20, payloads[PAYLOAD_WALL_MEOW].start_cluster, (uint32_t)payloads[PAYLOAD_WALL_MEOW].size);
+    if (payloads[PAYLOAD_WALL_SPARKLYMEOW].clusters > 0)
+        make_lfn_entry(entries, &idx, "sparklymeow.png",            "SPARKL~1PNG", 0x20, payloads[PAYLOAD_WALL_SPARKLYMEOW].start_cluster, (uint32_t)payloads[PAYLOAD_WALL_SPARKLYMEOW].size);
+    if (payloads[PAYLOAD_WALL_SPARKLYMEOW_ALT].clusters > 0)
+        make_lfn_entry(entries, &idx, "sparklymeow_alt.png",        "SPARKL~2PNG", 0x20, payloads[PAYLOAD_WALL_SPARKLYMEOW_ALT].start_cluster, (uint32_t)payloads[PAYLOAD_WALL_SPARKLYMEOW_ALT].size);
+    if (payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTCIRCLES].clusters > 0)
+        make_lfn_entry(entries, &idx, "sparklymeow_altcircles.png", "SPARKL~3PNG", 0x20, payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTCIRCLES].start_cluster, (uint32_t)payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTCIRCLES].size);
+    if (payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTLINES].clusters > 0)
+        make_lfn_entry(entries, &idx, "sparklymeow_altlines.png",   "SPARKL~4PNG", 0x20, payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTLINES].start_cluster, (uint32_t)payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTLINES].size);
+    if (payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTLINES2].clusters > 0)
+        make_lfn_entry(entries, &idx, "sparklymeow_altlines2.png",  "SPARKL~5PNG", 0x20, payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTLINES2].start_cluster, (uint32_t)payloads[PAYLOAD_WALL_SPARKLYMEOW_ALTLINES2].size);
+    WRITE_CLUSTER(20, cluster_buf);
 
     /* 11. Deploying all Payloads (Boot manager, Kernel, Init, Shell, GUI stack, Apps) */
     #define BULK_CHUNK_SECTORS 128
@@ -788,6 +951,10 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     }
 
     for (int p = 0; p < num_payloads; p++) {
+        if (!payloads[p].data || payloads[p].size == 0 || payloads[p].clusters == 0) {
+            continue;
+        }
+
         char msg[128];
         snprintf(msg, sizeof(msg), "copying %s...", payloads[p].desc);
         if (progress_cb) progress_cb(msg, 1);

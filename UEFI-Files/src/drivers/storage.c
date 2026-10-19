@@ -7,7 +7,6 @@
 
 static StorageDevice g_devices[MAX_STORAGE_DEVICES];
 static uint32_t g_device_count = 0;
-static TargetFilterMode g_target_mode = TARGET_MODE_INTERNAL;
 
 void storage_format_size(uint64_t bytes, char *buf, size_t buf_size) {
     if (!buf || buf_size == 0) return;
@@ -43,14 +42,6 @@ uint32_t storage_get_device_count(void) {
 StorageDevice *storage_get_device(uint32_t index) {
     if (index >= g_device_count) return NULL;
     return &g_devices[index];
-}
-
-TargetFilterMode storage_get_target_mode(void) {
-    return g_target_mode;
-}
-
-void storage_set_target_mode(TargetFilterMode mode) {
-    g_target_mode = mode;
 }
 
 void storage_flush_all(void) {

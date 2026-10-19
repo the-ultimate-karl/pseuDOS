@@ -74,6 +74,9 @@ void klog(int level, const char *subsystem, const char *fmt, ...) {
     klog_buffer_append(line_buf);
 
     if (level <= g_klog_level) {
+        if (console_get_cursor_x() != 0) {
+            console_putc('\n');
+        }
         console_puts(line_buf);
         console_putc('\n');
     }
@@ -95,6 +98,9 @@ void boot_log(const char *status, const char *fmt, ...) {
 
     klog_buffer_append(line_buf);
 
+    if (console_get_cursor_x() != 0) {
+        console_putc('\n');
+    }
     console_puts(line_buf);
     console_putc('\n');
 }

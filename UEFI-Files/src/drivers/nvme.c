@@ -388,9 +388,18 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     driver->acq_phase = 1;
     driver->iocq_phase = 1;
 
-    /* Read CAP register */
+    /* Read CAP and VS registers */
+    uint32_t cap_low = *nvme_reg(driver, NVME_REG_CAP);
     uint32_t cap_high = *nvme_reg(driver, NVME_REG_CAP + 4);
     driver->dstrd = (cap_high >> 0) & 0x0F;
+    uint32_t vs = *nvme_reg(driver, NVME_REG_VS);
+    uint32_t max_entries = (cap_low & 0xFFFF) + 1;
+
+    char pcie_spd[32];
+    nvme_get_pcie_speed(bus, slot, func, pcie_spd, sizeof(pcie_spd));
+    klog_info("NVMe: controller initialized: mmio=0x%llX (virt=0x%llX), pci=%u:%u.%u, ver=%u.%u.%u, speed=%s",
+              (unsigned long long)bar0_page_phys, (unsigned long long)bar0_page_virt,
+              bus, slot, func, (vs >> 16) & 0xFFFF, (vs >> 8) & 0xFF, vs & 0xFF, pcie_spd);
 
     /* Disable controller before config */
     *nvme_reg(driver, NVME_REG_CC) = 0;
@@ -421,6 +430,11 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
         __asm__ volatile ("pause" ::: "memory");
     }
 
+    klog_info("NVMe: admin queues configured: asq=0x%llX, acq=0x%llX, max_entries=%u, stride=%u",
+              (unsigned long long)(uintptr_t)driver->asq,
+              (unsigned long long)(uintptr_t)driver->acq,
+              max_entries, (4 << driver->dstrd));
+
     /* Query Identify Controller */
     memset(g_ident_buf, 0, sizeof(g_ident_buf));
 
@@ -432,19 +446,31 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
 
     char model[41];
     memset(model, 0, sizeof(model));
+    char serial[21];
+    memset(serial, 0, sizeof(serial));
 
     if (nvme_submit_admin_cmd(driver, &id_cmd) == 0) {
         /* Model Number bytes 24..63 (40 chars) */
         memcpy(model, &g_ident_buf[24], 40);
         model[40] = '\0';
         trim(model);
+
+        /* Serial Number bytes 4..23 (20 chars) */
+        memcpy(serial, &g_ident_buf[4], 20);
+        serial[20] = '\0';
+        trim(serial);
     } else {
         strcpy(model, "NVMe SSD");
     }
 
-    if (model[0] == '\0') {
+    if (strstr(model, "QEMU") != NULL) {
+        strcpy(model, "Virtual QEMU NVMe Block Device");
+    } else if (model[0] == '\0') {
         strcpy(model, "NVMe PCIe SSD");
     }
+
+    klog_info("NVMe: controller IDENTIFY: '%s' (serial=%s)",
+              model, serial[0] ? serial : "none");
 
     /* Query Identify Namespace 1 */
     memset(g_ident_buf, 0, sizeof(g_ident_buf));
@@ -472,6 +498,9 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
 
     if (total_sectors == 0) total_sectors = 488397168;
 
+    klog_info("NVMe: namespace 1: %llu sectors (%u bytes/sector)",
+              (unsigned long long)total_sectors, sector_size);
+
     /* Use 4096-byte aligned static I/O queues */
     driver->iosq = g_iosq;
     memset((void *)driver->iosq, 0, sizeof(g_iosq));
@@ -485,7 +514,7 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     id_cmd.cdw10 = (63 << 16) | 1; /* Size 64, QID 1 */
     id_cmd.cdw11 = (1 << 0);       /* Physically contiguous */
     if (nvme_submit_admin_cmd(driver, &id_cmd) != 0) {
-        klog_err("NVMe: failed to create I/O Completion Queue");
+        klog_err("nvme: failed to create I/O completion queue");
         kfree(driver);
         return;
     }
@@ -497,10 +526,14 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     id_cmd.cdw10 = (63 << 16) | 1; /* Size 64, QID 1 */
     id_cmd.cdw11 = (1 << 16) | (1 << 0); /* CQID 1, Physically contiguous */
     if (nvme_submit_admin_cmd(driver, &id_cmd) != 0) {
-        klog_err("NVMe: failed to create I/O Submission Queue");
+        klog_err("nvme: failed to create I/O submission queue");
         kfree(driver);
         return;
     }
+
+    klog_info("NVMe: I/O queues created: iosq=0x%llX, iocq=0x%llX, qid=1",
+              (unsigned long long)(uintptr_t)driver->iosq,
+              (unsigned long long)(uintptr_t)driver->iocq);
 
     driver->nsid = 1;
 
@@ -537,6 +570,8 @@ static void probe_nvme_controller(uint8_t bus, uint8_t slot, uint8_t func) {
     }
 
     storage_register_device(&dev);
+    klog_info("NVMe: registered storage device '%s' (%s, path=%s)",
+              dev.name, dev.size_str, dev.devpath);
 }
 
 void nvme_init(void) {

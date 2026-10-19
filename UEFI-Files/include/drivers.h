@@ -39,6 +39,7 @@ void tty_switch(int target_tty);
 int uart_is_present(void);
 void console_set_capture_buffer(char *buf, size_t cap);
 size_t console_get_capture_length(void);
+uint32_t console_get_cursor_x(void);
 
 /* Keyboard Input Driver */
 #define KEY_WIN 0x90
