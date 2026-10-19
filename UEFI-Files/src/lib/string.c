@@ -572,7 +572,7 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
             }
             case 'd':
             case 'i': {
-                int64_t v = (is_long >= 2) ? va_arg(ap, int64_t) : (is_long == 1 ? va_arg(ap, long) : va_arg(ap, int));
+                int64_t v = (is_long >= 1) ? va_arg(ap, int64_t) : va_arg(ap, int);
                 num_len = itoa_s(v, num_buf);
                 if (!left_align) {
                     while (width > num_len && out_idx + 1 < size) {
@@ -592,7 +592,7 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
                 break;
             }
             case 'u': {
-                uint64_t v = (is_long >= 2) ? va_arg(ap, uint64_t) : (is_long == 1 ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int));
+                uint64_t v = (is_long >= 1) ? va_arg(ap, uint64_t) : va_arg(ap, unsigned int);
                 num_len = utoa(v, num_buf, 10, 0);
                 if (!left_align) {
                     while (width > num_len && out_idx + 1 < size) {
@@ -613,7 +613,7 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
             }
             case 'x':
             case 'p': {
-                uint64_t v = (*p == 'p' || is_long >= 2) ? va_arg(ap, uint64_t) : (is_long == 1 ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int));
+                uint64_t v = (*p == 'p' || is_long >= 1) ? va_arg(ap, uint64_t) : va_arg(ap, unsigned int);
                 num_len = utoa(v, num_buf, 16, 0);
                 if (!left_align) {
                     while (width > num_len && out_idx + 1 < size) {

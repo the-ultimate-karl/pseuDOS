@@ -173,10 +173,6 @@ static void render_notepad(void) {
     gfx_fill_rect(g_client.pixels, win_w, win_h, 96, 2, 64, 18, COLOR_BTN_FACE);
     gfx_draw_bevel(g_client.pixels, win_w, win_h, 96, 2, 64, 18, g_save_dlg_open ? 1 : 0);
     gfx_draw_string(g_client.pixels, win_w, win_h, 101, 4, "Save As", COLOR_TEXT, 0, 1);
-
-    /* Static menu labels */
-    gfx_draw_string(g_client.pixels, win_w, win_h, 172, 4, "Edit   Help", COLOR_TEXT, 0, 1);
-
     /* Main text box */
     int tx = 4;
     int ty = 24;

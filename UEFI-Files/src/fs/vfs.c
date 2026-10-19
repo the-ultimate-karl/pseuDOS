@@ -812,6 +812,13 @@ int vfs_copy_file(const char *src_path, const char *dst_path) {
             src_data = (const char *)k;
             src_size = k_sz;
         }
+    } else if (strcmp(norm_src, "/protected/krnl/initramfs.img") == 0) {
+        size_t r_sz = 0;
+        const uint8_t *r = payload_get_initramfs(&r_sz);
+        if (r && r_sz > 0) {
+            src_data = (const char *)r;
+            src_size = r_sz;
+        }
     }
 
     if (!src_data) {
@@ -978,8 +985,8 @@ int vfs_init_initramfs(void) {
     vfs_write_file("/EFI/pseuDOS/os-release",
         "NAME=\"pseuDOS\"\n"
         "ID=pseudos\n"
-        "VERSION=\"0.7.2\"\n"
-        "PRETTY_NAME=\"pseuDOS v0.7.2 (x86_64 UEFI)\"\n"
+        "VERSION=\"0.7.3\"\n"
+        "PRETTY_NAME=\"pseuDOS v0.7.3 (x86_64 UEFI)\"\n"
         "HOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\n", 0);
 
     /* 3. Ensure all system directories exist */
@@ -990,9 +997,13 @@ int vfs_init_initramfs(void) {
         vfs_unpack_initramfs((const uint8_t *)(uintptr_t)g_boot_info_global->initramfs_base,
                              (size_t)g_boot_info_global->initramfs_size);
         if (!vfs_find_node("/protected/krnl/initramfs.img")) {
-            vfs_write_file_bytes("/protected/krnl/initramfs.img",
-                                 (const uint8_t *)(uintptr_t)g_boot_info_global->initramfs_base,
-                                 (size_t)g_boot_info_global->initramfs_size, 0);
+            vfs_node_t *rnode = vfs_create_file("/protected/krnl/initramfs.img");
+            if (rnode) {
+                rnode->size = (size_t)g_boot_info_global->initramfs_size;
+                rnode->content = (char *)(uintptr_t)g_boot_info_global->initramfs_base;
+                rnode->capacity = 0;
+                rnode->is_protected = 1;
+            }
         }
     }
 
@@ -1005,6 +1016,7 @@ void vfs_ensure_system_payloads(void) {
     vfs_mkdir("/home/user");
     vfs_mkdir("/tmp");
     vfs_mkdir("/services");
+    vfs_mkdir("/etc");
 
     vfs_node_t *dev_dir = vfs_mkdir("/dev");
     if (dev_dir) dev_dir->is_protected = 1;
@@ -1150,6 +1162,8 @@ int vfs_mount_boot_media(const BootInfo *boot_info) {
     if (is_live_boot) {
         klog_info("VFS: booting live ISO media, initializing root ramfs");
         int ret = vfs_init_initramfs();
+        vfs_mkdir("/etc");
+        vfs_write_file("/etc/is_live_media", "1\n", 0);
         vfs_init_mounts(NULL, -1);
         vfs_refresh_mounts_dir();
         return ret;
@@ -1283,7 +1297,7 @@ static void vfs_init_mounts(StorageDevice *boot_dev, int boot_drive_idx) {
     strcpy(g_mounts[1].label, "TEMP");
 }
 
-static StorageDevice *vfs_resolve_device(const char *source, int *out_drive_idx, char *out_canon_name, char *out_alt_name) {
+StorageDevice *vfs_resolve_device(const char *source, int *out_drive_idx, char *out_canon_name, char *out_alt_name) {
     if (!source || source[0] == '\0') return NULL;
     const char *s = source;
     if (strncmp(s, "/dev/", 5) == 0) s += 5;

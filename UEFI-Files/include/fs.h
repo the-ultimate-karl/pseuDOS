@@ -86,5 +86,6 @@ int vfs_list_mounts(char *out_buf, size_t out_cap);
 int vfs_auto_mount_all(char *out_log, size_t out_cap);
 void vfs_refresh_mounts_dir(void);
 void vfs_refresh_device_mount(StorageDevice *target_dev);
+StorageDevice *vfs_resolve_device(const char *source, int *out_drive_idx, char *out_canon_name, char *out_alt_name);
 
 #endif /* FS_H */

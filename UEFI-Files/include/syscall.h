@@ -70,7 +70,28 @@
 #define SYS_MOUNT            66
 #define SYS_UMOUNT           67
 #define SYS_COPYFILE         68
+#define SYS_SYNC             69
+#define SYS_FSCK             70
 #define SYS_PANIC            99
+
+/* FSCK Error Flags & Result Structure for SYS_FSCK */
+#define FSCK_ERR_MAGIC        (1 << 0) /* VBR boot sector 0x55AA magic invalid */
+#define FSCK_ERR_BPB          (1 << 1) /* BPB geometry/metadata invalid */
+#define FSCK_ERR_FAT_MISMATCH (1 << 2) /* Primary FAT1 and backup FAT2 differ */
+#define FSCK_ERR_FSINFO       (1 << 3) /* FSInfo signatures or free cluster count mismatched */
+#define FSCK_ERR_CHAIN        (1 << 4) /* Broken, invalid, or looping cluster chain */
+#define FSCK_ERR_DIR          (1 << 5) /* Directory entry corruption or invalid LFN checksum */
+
+typedef struct {
+    uint32_t error_flags;
+    uint32_t fat_mismatches;
+    uint32_t fsinfo_reported_free;
+    uint32_t fsinfo_actual_free;
+    uint32_t fixed_chains;
+    uint32_t total_clusters;
+    uint32_t checked_dirs;
+    uint32_t checked_files;
+} fsck_result_t;
 
 /* VFS Node Types for SYS_STAT */
 #define VFS_TYPE_FILE        0

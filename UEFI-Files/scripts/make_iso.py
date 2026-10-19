@@ -204,7 +204,7 @@ def make_fat12_esp(output_path, efi_binary_path, kernel_binary_path=None, initra
         write_clus(grubcfg_clus, grub_bytes)
         off = append_dir(d3, off, mklfn("grub.cfg", "GRUB    CFG", 0x20, grubcfg_clus, len(grub_bytes)))
 
-        osrelease_bytes = b"NAME=\"pseuDOS\"\r\nID=pseudos\r\nVERSION=\"0.7.0\"\r\nPRETTY_NAME=\"pseuDOS v0.7.0\"\r\nHOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\r\n"
+        osrelease_bytes = b"NAME=\"pseuDOS\"\r\nID=pseudos\r\nVERSION=\"0.7.3\"\r\nPRETTY_NAME=\"pseuDOS v0.7.3\"\r\nHOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\r\n"
         write_clus(osrelease_clus, osrelease_bytes)
         off = append_dir(d3, off, mklfn("os-release", "OS-REL~1   ", 0x20, osrelease_clus, len(osrelease_bytes)))
 

@@ -318,6 +318,7 @@ static void cmd_help(void) {
     con_puts("  cp / copy <src> <dst> - Copy a file\n");
     con_puts("  mv / ren <src> <dst>  - Rename or move a file\n");
     con_puts("  rm / del <file>       - Delete a file\n");
+    con_puts("  edit <file>           - Full-screen text editor (Ctrl+S save, Ctrl+X exit)\n");
     con_puts("  echo <text> [> file]  - Print text or write/append to file\n");
     con_puts("  fs0:, fs1:...         - Switch active filesystem volume\n");
     con_puts("  cls / clear           - Clear screen\n");
@@ -970,74 +971,712 @@ static void cmd_bootcfg(const char *subarg) {
     con_printf("[ok] successfully repaired '%s'\n", cfg_path);
 }
 
-/* Read interactive line */
+/* ========================================================================= */
+/* Advanced Interactive Readline & Tab-Completion Engine                     */
+/* ========================================================================= */
+
+#define REC_HISTORY_MAX 16
+static char g_rec_history[REC_HISTORY_MAX][LINE_BUF_SZ];
+static int g_rec_history_count = 0;
+static int g_rec_history_browse = -1;
+static char g_rec_scratch[LINE_BUF_SZ];
+
+static void rec_history_add(const char *cmd) {
+    if (!cmd || cmd[0] == '\0') return;
+    if (g_rec_history_count > 0 && strcmp(g_rec_history[(g_rec_history_count - 1) % REC_HISTORY_MAX], cmd) == 0) {
+        return;
+    }
+    size_t idx = (size_t)(g_rec_history_count % REC_HISTORY_MAX);
+    strncpy(g_rec_history[idx], cmd, sizeof(g_rec_history[idx]) - 1);
+    g_rec_history[idx][sizeof(g_rec_history[idx]) - 1] = '\0';
+    g_rec_history_count++;
+}
+
+/* Known recovery console commands for command completion */
+static const char *g_rec_commands[] = {
+    "help", "bootcfg", "ls", "dir", "cd", "cat", "type",
+    "edit", "cp", "copy", "mv", "ren", "rm", "del",
+    "echo", "cls", "clear", "boot", "reboot", "shutdown", "exit",
+    NULL
+};
+
+#define MAX_COMPLETIONS 64
+static char g_comp_list[MAX_COMPLETIONS][MAX_PATH];
+static int g_comp_count = 0;
+static int g_comp_index = -1;
+static char g_comp_prefix[MAX_PATH];
+
+static void collect_file_completions(const char *path_prefix) {
+    g_comp_count = 0;
+    EFI_FILE_PROTOCOL *root = get_current_root();
+    if (!root) return;
+
+    char dir_part[MAX_PATH] = "";
+    char file_prefix[MAX_PATH] = "";
+
+    const char *last_sep = strrchr(path_prefix, '\\');
+    const char *last_fsep = strrchr(path_prefix, '/');
+    if (last_fsep && (!last_sep || last_fsep > last_sep)) last_sep = last_fsep;
+
+    if (last_sep) {
+        size_t dlen = (size_t)(last_sep - path_prefix + 1);
+        if (dlen < sizeof(dir_part)) {
+            strncpy(dir_part, path_prefix, dlen);
+            dir_part[dlen] = '\0';
+        }
+        strncpy(file_prefix, last_sep + 1, sizeof(file_prefix) - 1);
+    } else {
+        strncpy(file_prefix, path_prefix, sizeof(file_prefix) - 1);
+    }
+
+    char target[MAX_PATH];
+    resolve_path(dir_part[0] ? dir_part : ".", target, sizeof(target));
+
+    EFI_FILE_PROTOCOL *dir = NULL;
+    EFI_STATUS st;
+    if (strcmp(target, "\\") == 0 || target[0] == '\0') {
+        st = g_volumes[g_cur_volume_idx].sfs->OpenVolume(g_volumes[g_cur_volume_idx].sfs, &dir);
+    } else {
+        const char *p = (target[0] == '\\') ? (target + 1) : target;
+        CHAR16 u16[MAX_PATH];
+        ascii_to_unicode(p, u16, sizeof(u16)/sizeof(CHAR16));
+        st = root->Open(root, &dir, u16, EFI_FILE_MODE_READ, 0);
+        if (EFI_ERROR(st) || !dir) {
+            ascii_to_unicode(target, u16, sizeof(u16)/sizeof(CHAR16));
+            st = root->Open(root, &dir, u16, EFI_FILE_MODE_READ, 0);
+        }
+    }
+
+    if (EFI_ERROR(st) || !dir) return;
+
+    UINT8 info_buf[sizeof(EFI_FILE_INFO) + 512];
+    size_t prefix_len = strlen(file_prefix);
+
+    while (g_comp_count < MAX_COMPLETIONS) {
+        UINTN buf_sz = sizeof(info_buf);
+        st = dir->Read(dir, &buf_sz, info_buf);
+        if (EFI_ERROR(st) || buf_sz == 0) break;
+
+        EFI_FILE_INFO *fi = (EFI_FILE_INFO *)info_buf;
+        char name[128];
+        unicode_to_ascii(fi->FileName, name, sizeof(name));
+
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+
+        /* Case-insensitive prefix match */
+        int match = 1;
+        for (size_t i = 0; i < prefix_len; i++) {
+            char c1 = file_prefix[i];
+            char c2 = name[i];
+            if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
+            if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+            if (c1 != c2) { match = 0; break; }
+        }
+
+        if (match) {
+            char candidate[MAX_PATH];
+            if (fi->Attribute & 0x10) {
+                /* Directory -> append slash */
+                snprintf(candidate, sizeof(candidate), "%s%s\\", dir_part, name);
+            } else {
+                snprintf(candidate, sizeof(candidate), "%s%s", dir_part, name);
+            }
+            strncpy(g_comp_list[g_comp_count++], candidate, MAX_PATH - 1);
+        }
+    }
+    dir->Close(dir);
+}
+
+static void collect_cmd_completions(const char *prefix) {
+    g_comp_count = 0;
+    size_t plen = strlen(prefix);
+    for (int i = 0; g_rec_commands[i] && g_comp_count < MAX_COMPLETIONS; i++) {
+        int match = 1;
+        for (size_t p = 0; p < plen; p++) {
+            char c1 = prefix[p];
+            char c2 = g_rec_commands[i][p];
+            if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
+            if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+            if (c1 != c2) { match = 0; break; }
+        }
+        if (match) {
+            strncpy(g_comp_list[g_comp_count++], g_rec_commands[i], MAX_PATH - 1);
+        }
+    }
+}
+
+/* Advanced read_command_line with in-line editing, history browsing, and Tab cycling */
 static int read_command_line(char *buf, size_t max_len) {
-    size_t idx = 0;
+    size_t len = 0;
+    size_t pos = 0;
     buf[0] = '\0';
+
+    g_rec_history_browse = -1;
+    g_rec_scratch[0] = '\0';
+    g_comp_count = 0;
+    g_comp_index = -1;
+
+    UINTN prompt_col = 0, prompt_row = 0;
+    if (g_st && g_st->ConOut && g_st->ConOut->Mode) {
+        prompt_col = (UINTN)g_st->ConOut->Mode->CursorColumn;
+        prompt_row = (UINTN)g_st->ConOut->Mode->CursorRow;
+    }
 
     while (1) {
         EFI_INPUT_KEY key;
+        int has_key = 0;
         EFI_STATUS st = g_st->ConIn->ReadKeyStroke(g_st->ConIn, &key);
         if (!EFI_ERROR(st)) {
-            /* Check ESC key -> returns 1 to signal exit to SiLo */
-            if (key.ScanCode == 0x17 || key.UnicodeChar == 0x1B) {
-                con_puts("\n");
-                return 1;
+            has_key = 1;
+        } else if (inb(0x3F8 + 5) & 0x01) {
+            uint8_t uc = inb(0x3F8);
+            key.UnicodeChar = (CHAR16)uc;
+            key.ScanCode = 0;
+            if (uc == 0x1B) {
+                key.ScanCode = 0x17; /* ESC */
             }
-            if (key.UnicodeChar == (CHAR16)'\r' || key.UnicodeChar == (CHAR16)'\n') {
-                con_puts("\n");
-                buf[idx] = '\0';
-                return 0;
-            }
-            if (key.UnicodeChar == (CHAR16)'\b') {
-                if (idx > 0) {
-                    idx--;
-                    buf[idx] = '\0';
-                    con_puts("\b \b");
-                }
-                continue;
-            }
-            if (key.UnicodeChar >= 32 && key.UnicodeChar < 127) {
-                if (idx + 1 < max_len) {
-                    char c = (char)key.UnicodeChar;
-                    buf[idx++] = c;
-                    buf[idx] = '\0';
-                    char echo_s[2] = { c, '\0' };
-                    con_puts(echo_s);
-                }
-            }
+            has_key = 1;
         }
 
-        /* UART input fallback */
-        if (inb(0x3F8 + 5) & 0x01) {
-            uint8_t c = inb(0x3F8);
-            if (c == 0x1B) {
-                con_puts("\n");
-                return 1;
-            }
-            if (c == '\r' || c == '\n') {
-                con_puts("\n");
-                buf[idx] = '\0';
-                return 0;
-            }
-            if (c == 0x08 || c == 0x7F) {
-                if (idx > 0) {
-                    idx--;
-                    buf[idx] = '\0';
-                    con_puts("\b \b");
+        if (!has_key) continue;
+
+        /* Reset tab completion if key is not Tab */
+        if (key.UnicodeChar != (CHAR16)'\t' && key.ScanCode != 0) {
+            g_comp_count = 0;
+            g_comp_index = -1;
+        }
+
+        /* ESC Key -> Cancel / Return to SiLo */
+        if (key.ScanCode == 0x17 || key.UnicodeChar == 0x1B) {
+            con_puts("\n");
+            return 1;
+        }
+
+        /* Enter Key */
+        if (key.UnicodeChar == (CHAR16)'\r' || key.UnicodeChar == (CHAR16)'\n') {
+            con_puts("\n");
+            buf[len] = '\0';
+            rec_history_add(buf);
+            return 0;
+        }
+
+        /* Tab Key: PowerShell-Style Cycle */
+        if (key.UnicodeChar == (CHAR16)'\t') {
+            if (g_comp_count == 0) {
+                /* Determine word under / before cursor */
+                size_t word_start = pos;
+                while (word_start > 0 && buf[word_start - 1] != ' ') {
+                    word_start--;
                 }
-                continue;
+                size_t wlen = pos - word_start;
+                if (wlen < sizeof(g_comp_prefix)) {
+                    strncpy(g_comp_prefix, &buf[word_start], wlen);
+                    g_comp_prefix[wlen] = '\0';
+                } else {
+                    g_comp_prefix[0] = '\0';
+                }
+
+                if (word_start == 0) {
+                    collect_cmd_completions(g_comp_prefix);
+                } else {
+                    collect_file_completions(g_comp_prefix);
+                }
+                g_comp_index = -1;
             }
-            if (c >= 32 && c < 127) {
-                if (idx + 1 < max_len) {
-                    buf[idx++] = (char)c;
-                    buf[idx] = '\0';
-                    char echo_s[2] = { (char)c, '\0' };
+
+            if (g_comp_count > 0) {
+                g_comp_index = (g_comp_index + 1) % g_comp_count;
+                const char *cand = g_comp_list[g_comp_index];
+
+                /* Replace current word */
+                size_t word_start = pos;
+                while (word_start > 0 && buf[word_start - 1] != ' ') {
+                    word_start--;
+                }
+                size_t tail_len = len - pos;
+                char tail[LINE_BUF_SZ];
+                memcpy(tail, &buf[pos], tail_len + 1);
+
+                size_t cand_len = strlen(cand);
+                if (word_start + cand_len + tail_len < max_len) {
+                    memcpy(&buf[word_start], cand, cand_len);
+                    memcpy(&buf[word_start + cand_len], tail, tail_len + 1);
+                    len = word_start + cand_len + tail_len;
+                    pos = word_start + cand_len;
+
+                    /* Redraw line */
+                    if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                        g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col, prompt_row);
+                    }
+                    con_puts(buf);
+                    con_puts("   \b\b\b");
+                    if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                        g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col + pos, prompt_row);
+                    }
+                }
+            }
+            continue;
+        }
+
+        /* Backspace Key */
+        if (key.UnicodeChar == (CHAR16)'\b' || key.UnicodeChar == 127) {
+            if (pos > 0) {
+                memmove(&buf[pos - 1], &buf[pos], len - pos + 1);
+                pos--;
+                len--;
+
+                if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                    g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col, prompt_row);
+                }
+                con_puts(buf);
+                con_puts(" \b");
+                if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                    g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col + pos, prompt_row);
+                }
+            }
+            continue;
+        }
+
+        /* Scan Codes (Arrows, Home, End, Delete) */
+        if (key.ScanCode != 0) {
+            switch (key.ScanCode) {
+                case 0x01: /* UP ARROW - History */
+                    if (g_rec_history_count > 0) {
+                        if (g_rec_history_browse == -1) {
+                            buf[len] = '\0';
+                            strcpy(g_rec_scratch, buf);
+                            g_rec_history_browse = g_rec_history_count - 1;
+                        } else if (g_rec_history_browse > 0 && g_rec_history_browse > g_rec_history_count - REC_HISTORY_MAX) {
+                            g_rec_history_browse--;
+                        }
+                        const char *h_entry = g_rec_history[g_rec_history_browse % REC_HISTORY_MAX];
+                        size_t h_len = strlen(h_entry);
+                        if (h_len >= max_len) h_len = max_len - 1;
+
+                        /* Erase old line */
+                        if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                            g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col, prompt_row);
+                        }
+                        for (size_t s = 0; s < len; s++) con_puts(" ");
+                        if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                            g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col, prompt_row);
+                        }
+
+                        strncpy(buf, h_entry, h_len);
+                        buf[h_len] = '\0';
+                        len = h_len;
+                        pos = h_len;
+                        con_puts(buf);
+                    }
+                    break;
+
+                case 0x02: /* DOWN ARROW - History */
+                    if (g_rec_history_browse != -1) {
+                        g_rec_history_browse++;
+                        /* Erase old line */
+                        if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                            g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col, prompt_row);
+                        }
+                        for (size_t s = 0; s < len; s++) con_puts(" ");
+                        if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                            g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col, prompt_row);
+                        }
+
+                        if (g_rec_history_browse >= g_rec_history_count) {
+                            g_rec_history_browse = -1;
+                            size_t s_len = strlen(g_rec_scratch);
+                            if (s_len >= max_len) s_len = max_len - 1;
+                            strncpy(buf, g_rec_scratch, s_len);
+                            buf[s_len] = '\0';
+                            len = s_len;
+                            pos = s_len;
+                        } else {
+                            const char *h_entry = g_rec_history[g_rec_history_browse % REC_HISTORY_MAX];
+                            size_t h_len = strlen(h_entry);
+                            if (h_len >= max_len) h_len = max_len - 1;
+                            strncpy(buf, h_entry, h_len);
+                            buf[h_len] = '\0';
+                            len = h_len;
+                            pos = h_len;
+                        }
+                        con_puts(buf);
+                    }
+                    break;
+
+                case 0x03: /* RIGHT ARROW */
+                    if (pos < len) {
+                        pos++;
+                        if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                            g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col + pos, prompt_row);
+                        }
+                    }
+                    break;
+
+                case 0x04: /* LEFT ARROW */
+                    if (pos > 0) {
+                        pos--;
+                        if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                            g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col + pos, prompt_row);
+                        }
+                    }
+                    break;
+
+                case 0x05: /* HOME */
+                    pos = 0;
+                    if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                        g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col, prompt_row);
+                    }
+                    break;
+
+                case 0x06: /* END */
+                    pos = len;
+                    if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                        g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col + pos, prompt_row);
+                    }
+                    break;
+
+                case 0x08: /* DELETE */
+                    if (pos < len) {
+                        memmove(&buf[pos], &buf[pos + 1], len - pos);
+                        len--;
+                        if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                            g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col, prompt_row);
+                        }
+                        con_puts(buf);
+                        con_puts(" \b");
+                        if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                            g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col + pos, prompt_row);
+                        }
+                    }
+                    break;
+            }
+            continue;
+        }
+
+        /* Printable Characters */
+        if (key.UnicodeChar >= 32 && key.UnicodeChar < 127) {
+            if (len + 1 < max_len) {
+                char c = (char)key.UnicodeChar;
+                if (pos == len) {
+                    buf[pos++] = c;
+                    len++;
+                    buf[len] = '\0';
+                    char echo_s[2] = { c, '\0' };
                     con_puts(echo_s);
+                } else {
+                    memmove(&buf[pos + 1], &buf[pos], len - pos + 1);
+                    buf[pos++] = c;
+                    len++;
+
+                    if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                        g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col, prompt_row);
+                    }
+                    con_puts(buf);
+                    if (g_st->ConOut && g_st->ConOut->SetCursorPosition) {
+                        g_st->ConOut->SetCursorPosition(g_st->ConOut, prompt_col + pos, prompt_row);
+                    }
                 }
             }
         }
     }
+}
+
+/* ========================================================================= */
+/* Classic Full-Screen MS-DOS Style Text Editor (cmd_edit)                   */
+/* ========================================================================= */
+
+#define EDIT_MAX_LINES 512
+#define EDIT_LINE_MAX  128
+
+typedef struct {
+    char lines[EDIT_MAX_LINES][EDIT_LINE_MAX];
+    int line_count;
+    int cur_line;
+    int cur_col;
+    int top_line;
+    int modified;
+    char path[MAX_PATH];
+} editor_state_t;
+
+static void editor_draw_ui(editor_state_t *ed, UINTN cols, UINTN rows) {
+    if (!g_st || !g_st->ConOut) return;
+
+    /* Top Title Bar (White on Blue or Inverted Gray) */
+    if (g_st->ConOut->SetCursorPosition) g_st->ConOut->SetCursorPosition(g_st->ConOut, 0, 0);
+    if (g_st->ConOut->SetAttribute) g_st->ConOut->SetAttribute(g_st->ConOut, 0x70); /* Black on Light Gray */
+
+    char top_bar[256];
+    snprintf(top_bar, sizeof(top_bar), " [ EDIT: %s%s ]", ed->path, ed->modified ? " *" : "");
+    size_t tblen = strlen(top_bar);
+    con_puts(top_bar);
+    for (size_t s = tblen; s < cols; s++) con_puts(" ");
+
+    /* Text Area */
+    if (g_st->ConOut->SetAttribute) g_st->ConOut->SetAttribute(g_st->ConOut, 0x07); /* Light Gray on Black */
+    UINTN text_rows = (rows > 2) ? (rows - 2) : 1;
+
+    for (UINTN r = 0; r < text_rows; r++) {
+        if (g_st->ConOut->SetCursorPosition) g_st->ConOut->SetCursorPosition(g_st->ConOut, 0, r + 1);
+        int file_line = ed->top_line + (int)r;
+        if (file_line < ed->line_count) {
+            const char *lstr = ed->lines[file_line];
+            size_t llen = strlen(lstr);
+            if (llen > cols) llen = cols;
+            char lbuf[128];
+            strncpy(lbuf, lstr, llen);
+            lbuf[llen] = '\0';
+            con_puts(lbuf);
+            for (size_t s = llen; s < cols; s++) con_puts(" ");
+        } else {
+            con_puts("~");
+            for (size_t s = 1; s < cols; s++) con_puts(" ");
+        }
+    }
+
+    /* Bottom Helper Bar */
+    if (g_st->ConOut->SetCursorPosition) g_st->ConOut->SetCursorPosition(g_st->ConOut, 0, rows - 1);
+    if (g_st->ConOut->SetAttribute) g_st->ConOut->SetAttribute(g_st->ConOut, 0x70);
+    const char *bot = " Ctrl+S = Save  |  Ctrl+X = Exit  |  Arrow Keys = Navigate";
+    size_t botlen = strlen(bot);
+    con_puts(bot);
+    for (size_t s = botlen; s < cols; s++) con_puts(" ");
+
+    /* Restore normal attribute and position cursor */
+    if (g_st->ConOut->SetAttribute) g_st->ConOut->SetAttribute(g_st->ConOut, 0x07);
+    UINTN scr_y = 1 + (UINTN)(ed->cur_line - ed->top_line);
+    UINTN scr_x = (UINTN)ed->cur_col;
+    if (scr_x >= cols) scr_x = cols - 1;
+    if (g_st->ConOut->SetCursorPosition) g_st->ConOut->SetCursorPosition(g_st->ConOut, scr_x, scr_y);
+}
+
+static int editor_save(editor_state_t *ed) {
+    EFI_FILE_PROTOCOL *root = get_current_root();
+    if (!root) return -1;
+
+    char target[MAX_PATH];
+    resolve_path(ed->path, target, sizeof(target));
+    const char *p = (target[0] == '\\') ? (target + 1) : target;
+    CHAR16 u16[MAX_PATH];
+    ascii_to_unicode(p, u16, sizeof(u16)/sizeof(CHAR16));
+
+    EFI_FILE_PROTOCOL *f = NULL;
+    EFI_STATUS st = root->Open(root, &f, u16, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
+    if (EFI_ERROR(st) || !f) return -1;
+
+    (void)f->SetPosition(f, 0);
+    for (int i = 0; i < ed->line_count; i++) {
+        UINTN wsz = strlen(ed->lines[i]);
+        if (wsz > 0) f->Write(f, &wsz, ed->lines[i]);
+        const char *crlf = "\r\n";
+        UINTN crlfsz = 2;
+        f->Write(f, &crlfsz, (VOID *)crlf);
+    }
+    f->Flush(f);
+    f->Close(f);
+    ed->modified = 0;
+    return 0;
+}
+
+static void cmd_edit(const char *path) {
+    if (!path || path[0] == '\0') {
+        con_puts("usage: edit <filename>\n");
+        return;
+    }
+
+    editor_state_t ed;
+    memset(&ed, 0, sizeof(ed));
+    strncpy(ed.path, path, sizeof(ed.path) - 1);
+    ed.line_count = 1;
+
+    /* Load file into buffer if exists */
+    EFI_FILE_PROTOCOL *root = get_current_root();
+    if (root) {
+        char target[MAX_PATH];
+        resolve_path(path, target, sizeof(target));
+        const char *p = (target[0] == '\\') ? (target + 1) : target;
+        CHAR16 u16[MAX_PATH];
+        ascii_to_unicode(p, u16, sizeof(u16)/sizeof(CHAR16));
+
+        EFI_FILE_PROTOCOL *f = NULL;
+        EFI_STATUS st = root->Open(root, &f, u16, EFI_FILE_MODE_READ, 0);
+        if (!EFI_ERROR(st) && f) {
+            UINT8 fbuf[4096];
+            UINTN rsz = sizeof(fbuf) - 1;
+            st = f->Read(f, &rsz, fbuf);
+            if (!EFI_ERROR(st) && rsz > 0) {
+                fbuf[rsz] = '\0';
+                ed.line_count = 0;
+                char *line_start = (char *)fbuf;
+                while (*line_start && ed.line_count < EDIT_MAX_LINES) {
+                    char *line_end = strchr(line_start, '\n');
+                    if (line_end) {
+                        *line_end = '\0';
+                        char *cr = strchr(line_start, '\r');
+                        if (cr) *cr = '\0';
+                        strncpy(ed.lines[ed.line_count++], line_start, EDIT_LINE_MAX - 1);
+                        line_start = line_end + 1;
+                    } else {
+                        char *cr = strchr(line_start, '\r');
+                        if (cr) *cr = '\0';
+                        strncpy(ed.lines[ed.line_count++], line_start, EDIT_LINE_MAX - 1);
+                        break;
+                    }
+                }
+                if (ed.line_count == 0) ed.line_count = 1;
+            }
+            f->Close(f);
+        }
+    }
+
+    UINTN cols = 80, rows = 25;
+    get_screen_size(&cols, &rows);
+    UINTN text_rows = (rows > 2) ? (rows - 2) : 1;
+
+    /* Clear screen and draw editor */
+    if (g_st && g_st->ConOut && g_st->ConOut->ClearScreen) g_st->ConOut->ClearScreen(g_st->ConOut);
+    editor_draw_ui(&ed, cols, rows);
+
+    while (1) {
+        EFI_INPUT_KEY key;
+        EFI_STATUS st = g_st->ConIn->ReadKeyStroke(g_st->ConIn, &key);
+        if (EFI_ERROR(st)) continue;
+
+        /* Ctrl+S = Save (ASCII 19) */
+        if (key.UnicodeChar == 19) {
+            editor_save(&ed);
+            editor_draw_ui(&ed, cols, rows);
+            continue;
+        }
+
+        /* Ctrl+X = Exit (ASCII 24) */
+        if (key.UnicodeChar == 24) {
+            if (ed.modified) {
+                if (g_st->ConOut->SetCursorPosition) g_st->ConOut->SetCursorPosition(g_st->ConOut, 0, rows - 1);
+                if (g_st->ConOut->SetAttribute) g_st->ConOut->SetAttribute(g_st->ConOut, 0x4F); /* White on Red */
+                const char *prm = " Save changes before exiting? (Y/N/Cancel) ";
+                con_puts(prm);
+                for (size_t s = strlen(prm); s < cols; s++) con_puts(" ");
+
+                while (1) {
+                    EFI_INPUT_KEY ck;
+                    if (!EFI_ERROR(g_st->ConIn->ReadKeyStroke(g_st->ConIn, &ck))) {
+                        if (ck.UnicodeChar == 'y' || ck.UnicodeChar == 'Y') {
+                            editor_save(&ed);
+                            break;
+                        } else if (ck.UnicodeChar == 'n' || ck.UnicodeChar == 'N') {
+                            break;
+                        } else if (ck.ScanCode == 0x17 || ck.UnicodeChar == 0x1B) {
+                            /* Cancelled */
+                            editor_draw_ui(&ed, cols, rows);
+                            goto cont_loop;
+                        }
+                    }
+                }
+            }
+            break;
+        cont_loop:
+            continue;
+        }
+
+        /* Navigation Scan Codes */
+        if (key.ScanCode != 0) {
+            switch (key.ScanCode) {
+                case 0x01: /* UP */
+                    if (ed.cur_line > 0) ed.cur_line--;
+                    break;
+                case 0x02: /* DOWN */
+                    if (ed.cur_line + 1 < ed.line_count) ed.cur_line++;
+                    break;
+                case 0x03: /* RIGHT */
+                    if (ed.cur_col < (int)strlen(ed.lines[ed.cur_line])) ed.cur_col++;
+                    break;
+                case 0x04: /* LEFT */
+                    if (ed.cur_col > 0) ed.cur_col--;
+                    break;
+                case 0x05: /* HOME */
+                    ed.cur_col = 0;
+                    break;
+                case 0x06: /* END */
+                    ed.cur_col = (int)strlen(ed.lines[ed.cur_line]);
+                    break;
+            }
+            int llen = (int)strlen(ed.lines[ed.cur_line]);
+            if (ed.cur_col > llen) ed.cur_col = llen;
+
+            /* Scroll viewport */
+            if (ed.cur_line < ed.top_line) ed.top_line = ed.cur_line;
+            if (ed.cur_line >= ed.top_line + (int)text_rows) ed.top_line = ed.cur_line - (int)text_rows + 1;
+
+            editor_draw_ui(&ed, cols, rows);
+            continue;
+        }
+
+        /* Enter Key: Split Line */
+        if (key.UnicodeChar == (CHAR16)'\r' || key.UnicodeChar == (CHAR16)'\n') {
+            if (ed.line_count < EDIT_MAX_LINES) {
+                char *curr = ed.lines[ed.cur_line];
+                for (int i = ed.line_count; i > ed.cur_line + 1; i--) {
+                    memcpy(ed.lines[i], ed.lines[i - 1], EDIT_LINE_MAX);
+                }
+                strncpy(ed.lines[ed.cur_line + 1], &curr[ed.cur_col], EDIT_LINE_MAX - 1);
+                curr[ed.cur_col] = '\0';
+                ed.line_count++;
+                ed.cur_line++;
+                ed.cur_col = 0;
+                ed.modified = 1;
+
+                if (ed.cur_line >= ed.top_line + (int)text_rows) ed.top_line = ed.cur_line - (int)text_rows + 1;
+                editor_draw_ui(&ed, cols, rows);
+            }
+            continue;
+        }
+
+        /* Backspace */
+        if (key.UnicodeChar == (CHAR16)'\b' || key.UnicodeChar == 127) {
+            char *curr = ed.lines[ed.cur_line];
+            if (ed.cur_col > 0) {
+                int llen = (int)strlen(curr);
+                memmove(&curr[ed.cur_col - 1], &curr[ed.cur_col], llen - ed.cur_col + 1);
+                ed.cur_col--;
+                ed.modified = 1;
+            } else if (ed.cur_line > 0) {
+                /* Merge with previous line */
+                char *prev = ed.lines[ed.cur_line - 1];
+                int plen = (int)strlen(prev);
+                int clen = (int)strlen(curr);
+                if (plen + clen < EDIT_LINE_MAX) {
+                    strcat(prev, curr);
+                    for (int i = ed.cur_line; i < ed.line_count - 1; i++) {
+                        memcpy(ed.lines[i], ed.lines[i + 1], EDIT_LINE_MAX);
+                    }
+                    ed.line_count--;
+                    ed.cur_line--;
+                    ed.cur_col = plen;
+                    ed.modified = 1;
+                }
+            }
+            if (ed.cur_line < ed.top_line) ed.top_line = ed.cur_line;
+            editor_draw_ui(&ed, cols, rows);
+            continue;
+        }
+
+        /* Insert printable character */
+        if (key.UnicodeChar >= 32 && key.UnicodeChar < 127) {
+            char *curr = ed.lines[ed.cur_line];
+            int llen = (int)strlen(curr);
+            if (llen + 1 < EDIT_LINE_MAX) {
+                memmove(&curr[ed.cur_col + 1], &curr[ed.cur_col], llen - ed.cur_col + 1);
+                curr[ed.cur_col] = (char)key.UnicodeChar;
+                ed.cur_col++;
+                ed.modified = 1;
+                editor_draw_ui(&ed, cols, rows);
+            }
+            continue;
+        }
+    }
+
+    /* Redraw recovery console header upon exiting editor */
+    render_header();
 }
 
 /* Main recovery shell loop */
@@ -1101,6 +1740,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             cmd_cat(arg);
         } else if (strcmp(cmd, "rm") == 0 || strcmp(cmd, "del") == 0) {
             cmd_rm(arg);
+        } else if (strcmp(cmd, "edit") == 0) {
+            cmd_edit(arg);
         } else if (strcmp(cmd, "cp") == 0 || strcmp(cmd, "copy") == 0) {
             if (arg) {
                 char *dst = strchr(arg, ' ');

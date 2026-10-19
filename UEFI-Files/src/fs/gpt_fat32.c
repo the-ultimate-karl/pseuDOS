@@ -740,8 +740,8 @@ int gpt_fat32_format_and_install(StorageDevice *dev, install_progress_cb_t progr
     const char *osrelease_content =
         "NAME=\"pseuDOS\"\r\n"
         "ID=pseudos\r\n"
-        "VERSION=\"0.7.2\"\r\n"
-        "PRETTY_NAME=\"pseuDOS v0.7.2 (x86_64 UEFI)\"\r\n"
+        "VERSION=\"0.7.3\"\r\n"
+        "PRETTY_NAME=\"pseuDOS v0.7.3 (x86_64 UEFI)\"\r\n"
         "HOME_URL=\"https://github.com/the-ultimate-karl/pseuDOS\"\r\n";
     uint32_t osrelease_len = (uint32_t)strlen(osrelease_content);
     memset(cluster_buf, 0, cluster_size_bytes);

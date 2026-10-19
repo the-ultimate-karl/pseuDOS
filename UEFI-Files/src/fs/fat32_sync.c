@@ -4,6 +4,7 @@
 #include "drivers.h"
 #include "lib.h"
 #include "klog.h"
+#include "syscall.h"
 
 typedef struct {
     char     name[11];
@@ -103,6 +104,24 @@ static int write_cluster(uint32_t cluster, const void *buf) {
 
 static uint32_t s_cached_fat_sec = 0xFFFFFFFF;
 static uint8_t s_fat_cache[512];
+static int s_fat_cache_dirty = 0;
+
+static int flush_fat_cache(void) {
+    if (!g_sync_dev || !g_sync_dev->write_sectors || s_cached_fat_sec == 0xFFFFFFFF || !s_fat_cache_dirty) {
+        return 0;
+    }
+    int ret = 0;
+    /* Write to FAT1 */
+    uint32_t fat1_sec = s_cached_fat_sec;
+    if (g_sync_dev->write_sectors(g_sync_dev, fat1_sec, 1, s_fat_cache) != 0) ret = -1;
+    /* Write to FAT2 */
+    uint32_t sec_offset = fat1_sec - (g_sync_part_lba + g_sync_reserved_sectors);
+    uint32_t fat2_sec = g_sync_part_lba + g_sync_reserved_sectors + g_sync_fat_size_sectors + sec_offset;
+    if (g_sync_dev->write_sectors(g_sync_dev, fat2_sec, 1, s_fat_cache) != 0) ret = -1;
+
+    s_fat_cache_dirty = 0;
+    return ret;
+}
 
 static uint32_t get_fat_entry(uint32_t cluster) {
     if (!g_sync_dev || !g_sync_dev->read_sectors) return 0x0FFFFFFF;
@@ -111,6 +130,7 @@ static uint32_t get_fat_entry(uint32_t cluster) {
     uint32_t entry_offset = fat_offset % 512;
 
     if (s_cached_fat_sec != fat_sector) {
+        flush_fat_cache();
         if (g_sync_dev->read_sectors(g_sync_dev, fat_sector, 1, s_fat_cache) != 0) {
             return 0x0FFFFFFF;
         }
@@ -122,32 +142,20 @@ static uint32_t get_fat_entry(uint32_t cluster) {
 static int set_fat_entry(uint32_t cluster, uint32_t val) {
     if (!g_sync_dev || !g_sync_dev->read_sectors || !g_sync_dev->write_sectors) return -1;
     uint32_t fat_offset = cluster * 4;
-    uint32_t sec_offset = fat_offset / 512;
+    uint32_t fat_sector = g_sync_part_lba + g_sync_reserved_sectors + (fat_offset / 512);
     uint32_t entry_offset = fat_offset % 512;
 
-    int ret = 0;
-    uint8_t sec[512];
-    /* Update FAT1 */
-    uint32_t fat1_sec = g_sync_part_lba + g_sync_reserved_sectors + sec_offset;
-    if (g_sync_dev->read_sectors(g_sync_dev, fat1_sec, 1, sec) == 0) {
-        *(uint32_t *)&sec[entry_offset] = val & 0x0FFFFFFF;
-        if (g_sync_dev->write_sectors(g_sync_dev, fat1_sec, 1, sec) != 0) ret = -1;
-        if (fat1_sec == s_cached_fat_sec) {
-            memcpy(s_fat_cache, sec, 512);
+    if (s_cached_fat_sec != fat_sector) {
+        flush_fat_cache();
+        if (g_sync_dev->read_sectors(g_sync_dev, fat_sector, 1, s_fat_cache) != 0) {
+            return -1;
         }
-    } else {
-        ret = -1;
+        s_cached_fat_sec = fat_sector;
     }
 
-    /* Update FAT2 */
-    uint32_t fat2_sec = g_sync_part_lba + g_sync_reserved_sectors + g_sync_fat_size_sectors + sec_offset;
-    if (g_sync_dev->read_sectors(g_sync_dev, fat2_sec, 1, sec) == 0) {
-        *(uint32_t *)&sec[entry_offset] = val & 0x0FFFFFFF;
-        if (g_sync_dev->write_sectors(g_sync_dev, fat2_sec, 1, sec) != 0) ret = -1;
-    } else {
-        ret = -1;
-    }
-    return ret;
+    *(uint32_t *)&s_fat_cache[entry_offset] = val & 0x0FFFFFFF;
+    s_fat_cache_dirty = 1;
+    return 0;
 }
 
 static void update_fsinfo_free_clusters(int delta) {
@@ -182,7 +190,12 @@ static uint32_t alloc_free_cluster(void) {
     for (uint32_t pass = 0; pass < 2; pass++) {
         for (uint32_t s = start_s; s < g_sync_fat_size_sectors; s++) {
             uint64_t fat_sec = g_sync_part_lba + g_sync_reserved_sectors + s;
-            if (g_sync_dev->read_sectors(g_sync_dev, fat_sec, 1, sec) != 0) continue;
+            if (s_cached_fat_sec == fat_sec) {
+                memcpy(sec, s_fat_cache, 512);
+            } else {
+                flush_fat_cache();
+                if (g_sync_dev->read_sectors(g_sync_dev, fat_sec, 1, sec) != 0) continue;
+            }
 
             uint32_t *entries = (uint32_t *)sec;
             for (uint32_t i = 0; i < 128; i++) {
@@ -190,7 +203,6 @@ static uint32_t alloc_free_cluster(void) {
                 if (cluster_idx >= 2 && (entries[i] & 0x0FFFFFFF) == 0) {
                     /* Allocate cluster */
                     set_fat_entry(cluster_idx, 0x0FFFFFFF);
-                    update_fsinfo_free_clusters(-1);
                     s_next_alloc_cluster = cluster_idx + 1;
                     return cluster_idx;
                 }
@@ -213,6 +225,7 @@ static void free_cluster_chain(uint32_t start_cluster) {
     }
 
     if (freed_count > 0) {
+        flush_fat_cache();
         update_fsinfo_free_clusters(freed_count);
     }
 }
@@ -904,6 +917,23 @@ int fat32_sync_write_file_bytes(const char *path, const void *data, size_t size,
     for (uint32_t k = 0; k < chain_len; k++) {
         uint32_t clus_id = chain[k];
         uint32_t clus_file_offset = k * c_sz;
+
+        /* Optimize contiguous full clusters for faster multi-sector writes */
+        if (!append && src_bytes) {
+            uint32_t contig = 1;
+            while (k + contig < chain_len && chain[k + contig] == chain[k] + contig && (src_pos + (size_t)(contig + 1) * c_sz) <= size) {
+                contig++;
+            }
+            if (contig > 1 && (src_pos + (size_t)contig * c_sz) <= size) {
+                uint64_t lba = cluster_to_lba(chain[k]);
+                if (lba > 0 && g_sync_dev->write_sectors(g_sync_dev, lba, contig * g_sync_spc, src_bytes + src_pos) == 0) {
+                    src_pos += contig * c_sz;
+                    k += contig - 1;
+                    continue;
+                }
+            }
+        }
+
         memset(data_buf, 0, c_sz);
 
         if (append && old_size > 0 && clus_file_offset < old_size) {
@@ -928,6 +958,8 @@ int fat32_sync_write_file_bytes(const char *path, const void *data, size_t size,
 
     kfree(data_buf);
     kfree(chain);
+    flush_fat_cache();
+    update_fsinfo_free_clusters(-(int)chain_len);
 
     if (read_cluster(entry_clus, cluster_buf) == 0) {
         FatDirEntry *entries = (FatDirEntry *)cluster_buf;
@@ -1093,9 +1125,8 @@ static int load_fat32_dir_recursive_depth(uint32_t dir_cluster, const char *vfs_
     uint32_t c = dir_cluster;
     int first_cluster = 1;
     uint32_t chain_guard = 0;
-    int is_secondary_mount = (strncmp(vfs_parent_path, "/mounts/", 8) == 0);
-    size_t max_file_preload = is_secondary_mount ? (4 * 1024 * 1024) : (16 * 1024 * 1024);
-    size_t max_vol_preload  = is_secondary_mount ? (8 * 1024 * 1024) : (32 * 1024 * 1024);
+    size_t max_file_preload = 512 * 1024;
+    size_t max_vol_preload  = 4 * 1024 * 1024;
 
     FatLfnCollector col;
 
@@ -1167,7 +1198,8 @@ static int load_fat32_dir_recursive_depth(uint32_t dir_cluster, const char *vfs_
                     int skip_body = (strcasecmp(entry_name, "vpkernel") == 0 ||
                                      strcasecmp(entry_name, "BOOTX64.EFI") == 0 ||
                                      strcasecmp(entry_name, "recovery.efi") == 0 ||
-                                     strcasecmp(entry_name, "EFIBOOT.IMG") == 0);
+                                     strcasecmp(entry_name, "EFIBOOT.IMG") == 0 ||
+                                     strcasecmp(entry_name, "initramfs.img") == 0);
                     if (!skip_body &&
                         entries[i].file_size > 0 &&
                         entries[i].file_size <= max_file_preload &&
@@ -1210,6 +1242,8 @@ static int load_fat32_dir_recursive_depth(uint32_t dir_cluster, const char *vfs_
                             if (tail_buf) kfree(tail_buf);
                             file_node->content[bytes_read] = '\0';
                             s_mount_loaded_bytes += bytes_read;
+                        } else {
+                            file_node->capacity = 0;
                         }
                     }
                 }
@@ -1324,4 +1358,234 @@ int fat32_mount_to_path(StorageDevice *dev, const char *mount_path) {
 
 int fat32_mount_disk(StorageDevice *dev) {
     return fat32_mount_to_path(dev, "/");
+}
+
+int fat32_fsck_device(StorageDevice *dev, int repair, fsck_result_t *out_res) {
+    if (!dev || !dev->read_sectors || !out_res) return -1;
+    memset(out_res, 0, sizeof(fsck_result_t));
+
+    StorageFsInfo info;
+    if (storage_inspect_fs(dev, &info) != 0 || !info.has_filesystem || strcmp(info.fs_type, "FAT32") != 0) {
+        out_res->error_flags |= FSCK_ERR_BPB;
+        return -1;
+    }
+
+    uint64_t part_lba = info.part_start_lba;
+    uint32_t spc = info.sectors_per_cluster;
+    uint32_t bps = info.bytes_per_sector;
+    uint32_t rsvd = info.reserved_sectors;
+    uint32_t fats = info.num_fats;
+    uint32_t fat_sz = info.fat_size_sectors;
+    uint32_t root_clus = info.root_cluster > 0 ? info.root_cluster : 2;
+    uint32_t total_clusters = info.total_clusters;
+    out_res->total_clusters = total_clusters;
+
+    uint8_t sec_buf1[512];
+    uint8_t sec_buf2[512];
+
+    /* 1. Verify Boot Sector Magic */
+    if (dev->read_sectors(dev, part_lba, 1, sec_buf1) != 0 ||
+        sec_buf1[510] != 0x55 || sec_buf1[511] != 0xAA) {
+        out_res->error_flags |= FSCK_ERR_MAGIC;
+        if (repair && dev->write_sectors) {
+            if (dev->read_sectors(dev, part_lba + 6, 1, sec_buf2) == 0 &&
+                sec_buf2[510] == 0x55 && sec_buf2[511] == 0xAA) {
+                dev->write_sectors(dev, part_lba, 1, sec_buf2);
+            }
+        }
+    }
+
+    /* 2. Verify and Compare FAT1 vs FAT2 */
+    if (fats >= 2 && fat_sz > 0) {
+        uint64_t fat1_lba = part_lba + rsvd;
+        uint64_t fat2_lba = part_lba + rsvd + fat_sz;
+        for (uint32_t s = 0; s < fat_sz; s++) {
+            if (dev->read_sectors(dev, fat1_lba + s, 1, sec_buf1) != 0 ||
+                dev->read_sectors(dev, fat2_lba + s, 1, sec_buf2) != 0) {
+                out_res->error_flags |= FSCK_ERR_FAT_MISMATCH;
+                out_res->fat_mismatches++;
+                continue;
+            }
+            if (memcmp(sec_buf1, sec_buf2, 512) != 0) {
+                out_res->error_flags |= FSCK_ERR_FAT_MISMATCH;
+                out_res->fat_mismatches++;
+                if (repair && dev->write_sectors) {
+                    /* Mirror primary FAT1 to secondary FAT2 */
+                    dev->write_sectors(dev, fat2_lba + s, 1, sec_buf1);
+                }
+            }
+        }
+    }
+
+    /* 3. Validate FSInfo Sector & Count Actual Free Clusters in FAT1 */
+    uint32_t actual_free = 0;
+    uint64_t fat1_lba = part_lba + rsvd;
+    for (uint32_t s = 0; s < fat_sz; s++) {
+        if (dev->read_sectors(dev, fat1_lba + s, 1, sec_buf1) != 0) break;
+        uint32_t *entries = (uint32_t *)sec_buf1;
+        for (uint32_t i = 0; i < 128; i++) {
+            uint32_t clus = s * 128 + i;
+            if (clus >= 2 && clus < (total_clusters + 2)) {
+                if ((entries[i] & 0x0FFFFFFF) == 0) {
+                    actual_free++;
+                }
+            }
+        }
+    }
+    out_res->fsinfo_actual_free = actual_free;
+
+    /* Read FSInfo */
+    uint16_t fsinfo_rel = 1;
+    if (dev->read_sectors(dev, part_lba, 1, sec_buf1) == 0) {
+        uint16_t rel = *(uint16_t *)&sec_buf1[48];
+        if (rel > 0 && rel < rsvd) fsinfo_rel = rel;
+    }
+    if (dev->read_sectors(dev, part_lba + fsinfo_rel, 1, sec_buf1) == 0) {
+        uint32_t lead_sig = *(uint32_t *)&sec_buf1[0];
+        uint32_t struct_sig = *(uint32_t *)&sec_buf1[484];
+        uint32_t trail_sig = *(uint32_t *)&sec_buf1[508];
+        uint32_t rep_free = *(uint32_t *)&sec_buf1[488];
+        out_res->fsinfo_reported_free = rep_free;
+
+        if (lead_sig != 0x41615252 || struct_sig != 0x61417272 || trail_sig != 0xAA550000 ||
+            rep_free != actual_free) {
+            out_res->error_flags |= FSCK_ERR_FSINFO;
+            if (repair && dev->write_sectors) {
+                *(uint32_t *)&sec_buf1[0] = 0x41615252;
+                *(uint32_t *)&sec_buf1[484] = 0x61417272;
+                *(uint32_t *)&sec_buf1[488] = actual_free;
+                *(uint32_t *)&sec_buf1[508] = 0xAA550000;
+                dev->write_sectors(dev, part_lba + fsinfo_rel, 1, sec_buf1);
+            }
+        }
+    } else {
+        out_res->error_flags |= FSCK_ERR_FSINFO;
+    }
+
+    /* 4. Validate Directory Consistency & Cluster Chains */
+    StorageDevice *prev_d = g_sync_dev;
+    uint64_t prev_lba = g_sync_part_lba;
+    uint32_t prev_spc = g_sync_spc;
+    uint32_t prev_bps = g_sync_bps;
+    uint32_t prev_csz = g_sync_cluster_size;
+    uint32_t prev_rsv = g_sync_reserved_sectors;
+    uint32_t prev_fats = g_sync_num_fats;
+    uint32_t prev_fsz = g_sync_fat_size_sectors;
+    uint32_t prev_root = g_sync_root_cluster;
+    uint64_t prev_data = g_sync_data_lba_base;
+
+    g_sync_dev = dev;
+    g_sync_part_lba = part_lba;
+    g_sync_spc = spc;
+    g_sync_bps = bps;
+    g_sync_cluster_size = spc * bps;
+    g_sync_reserved_sectors = rsvd;
+    g_sync_num_fats = fats;
+    g_sync_fat_size_sectors = fat_sz;
+    g_sync_root_cluster = root_clus;
+    g_sync_data_lba_base = part_lba + rsvd + (uint64_t)fats * fat_sz;
+
+    uint32_t c_sz = get_clus_buf_size();
+    uint8_t *c_buf = (uint8_t *)kmalloc(c_sz);
+    if (c_buf) {
+        uint32_t dir_queue[64];
+        int q_head = 0, q_tail = 0;
+        dir_queue[q_tail++] = root_clus;
+
+        while (q_head < q_tail && q_head < 64) {
+            uint32_t cur_dir_c = dir_queue[q_head++];
+            out_res->checked_dirs++;
+
+            uint32_t walk_c = cur_dir_c;
+            uint32_t dir_guard = 0;
+            FatLfnCollector col;
+
+            while (walk_c >= 2 && walk_c < 0x0FFFFFF8 && dir_guard++ < 256) {
+                if (read_cluster(walk_c, c_buf) != 0) {
+                    out_res->error_flags |= FSCK_ERR_CHAIN;
+                    break;
+                }
+                lfn_collector_init(&col);
+                FatDirEntry *entries = (FatDirEntry *)c_buf;
+                uint32_t num_e = c_sz / sizeof(FatDirEntry);
+
+                for (uint32_t i = 0; i < num_e; i++) {
+                    if ((uint8_t)entries[i].name[0] == 0x00) break;
+                    if ((uint8_t)entries[i].name[0] == 0xE5) {
+                        col.valid = 0;
+                        continue;
+                    }
+                    if (entries[i].attr == 0x0F) {
+                        lfn_collector_feed(&col, (const FatLfnEntry *)&entries[i], i);
+                        continue;
+                    }
+                    if (entries[i].attr & 0x08) {
+                        col.valid = 0;
+                        continue;
+                    }
+                    if (memcmp(entries[i].name, ".          ", 11) == 0 ||
+                        memcmp(entries[i].name, "..         ", 11) == 0) {
+                        col.valid = 0;
+                        continue;
+                    }
+
+                    if (col.valid && fat_lfn_checksum(entries[i].name) != col.checksum) {
+                        out_res->error_flags |= FSCK_ERR_DIR;
+                    }
+                    col.valid = 0;
+
+                    uint32_t start_c = ((uint32_t)entries[i].fst_clus_hi << 16) | entries[i].fst_clus_lo;
+
+                    if (entries[i].attr & 0x10) {
+                        if (start_c >= 2 && start_c < (total_clusters + 2) && q_tail < 64) {
+                            dir_queue[q_tail++] = start_c;
+                        }
+                    } else {
+                        out_res->checked_files++;
+                        if (start_c >= 2 && start_c < (total_clusters + 2)) {
+                            uint32_t fc = start_c;
+                            uint32_t fc_guard = 0;
+                            uint32_t last_valid = fc;
+                            int chain_broken = 0;
+                            while (fc >= 2 && fc < 0x0FFFFFF8 && fc_guard++ < 8192) {
+                                last_valid = fc;
+                                fc = get_fat_entry(fc);
+                                if (fc == 0 || (fc > 0x0FFFFFF8 && fc != 0x0FFFFFFF)) {
+                                    chain_broken = 1;
+                                    break;
+                                }
+                            }
+                            if (chain_broken || fc_guard >= 8192) {
+                                out_res->error_flags |= FSCK_ERR_CHAIN;
+                                if (repair) {
+                                    set_fat_entry(last_valid, 0x0FFFFFFF);
+                                    out_res->fixed_chains++;
+                                }
+                            }
+                        }
+                    }
+                }
+                walk_c = get_fat_entry(walk_c);
+            }
+        }
+        kfree(c_buf);
+    }
+
+    if (repair) {
+        flush_fat_cache();
+        if (dev->flush) dev->flush(dev);
+    }
+
+    g_sync_dev = prev_d;
+    g_sync_part_lba = prev_lba;
+    g_sync_spc = prev_spc;
+    g_sync_bps = prev_bps;
+    g_sync_cluster_size = prev_csz;
+    g_sync_reserved_sectors = prev_rsv;
+    g_sync_num_fats = prev_fats;
+    g_sync_fat_size_sectors = prev_fsz;
+    g_sync_root_cluster = prev_root;
+    g_sync_data_lba_base = prev_data;
+
+    return (out_res->error_flags != 0) ? 1 : 0;
 }

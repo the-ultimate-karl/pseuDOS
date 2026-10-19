@@ -31,6 +31,13 @@ void kernel_main(BootInfo *boot_info) {
 
     g_boot_info_global = boot_info;
 
+    /* Defensively ensure all incoming string buffers are strictly null-terminated */
+    boot_info->hardware_devpath[sizeof(boot_info->hardware_devpath) - 1] = '\0';
+    boot_info->boot_file_path[sizeof(boot_info->boot_file_path) - 1] = '\0';
+    boot_info->autoinit_path[sizeof(boot_info->autoinit_path) - 1] = '\0';
+    boot_info->shell_path[sizeof(boot_info->shell_path) - 1] = '\0';
+    boot_info->cmdline[sizeof(boot_info->cmdline) - 1] = '\0';
+
     /* 1. Initialize Dynamic Memory Heap (16MB pre-allocated) */
     heap_init(boot_info->mem.heap_physical_start, boot_info->mem.heap_size_bytes);
 
@@ -40,7 +47,7 @@ void kernel_main(BootInfo *boot_info) {
 
     /* 3. Initialize Kernel Logging Subsystem (klog ring buffer) */
     klog_init();
-    boot_log("OK", "initializing pseuDOS kernel v0.7.2-gui");
+    boot_log("OK", "initializing pseuDOS kernel v0.7.3-gui");
 
     /* 4. Initialize Custom 64-bit GDT & Task State Segment (TSS) */
     gdt_init();

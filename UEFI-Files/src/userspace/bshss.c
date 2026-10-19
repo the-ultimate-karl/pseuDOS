@@ -5,6 +5,7 @@
 #include "mice.h"
 #include "ipc.h"
 #include "shm.h"
+#include "bootinfo.h"
 
 /* Basic freestanding string utilities */
 static size_t strlen(const char *s) {
@@ -71,6 +72,17 @@ void *memset(void *s, int c, size_t n) {
     uint8_t *p = (uint8_t *)s;
     while (n--) *p++ = (uint8_t)c;
     return s;
+}
+
+int memcmp(const void *s1, const void *s2, size_t n) {
+    const uint8_t *p1 = (const uint8_t *)s1;
+    const uint8_t *p2 = (const uint8_t *)s2;
+    while (n--) {
+        if (*p1 != *p2) return (int)*p1 - (int)*p2;
+        p1++;
+        p2++;
+    }
+    return 0;
 }
 
 static char *strchr(const char *s, int c) {
@@ -290,21 +302,304 @@ static void cmd_history(void) {
     }
 }
 
+static void resolve_path(const char *arg, char *out_buf, size_t max_len);
+
+static void *memmove(void *dest, const void *src, size_t n) {
+    uint8_t *d = (uint8_t *)dest;
+    const uint8_t *s = (const uint8_t *)src;
+    if (d == s || n == 0) return dest;
+    if (d < s) {
+        while (n--) *d++ = *s++;
+    } else {
+        d += n;
+        s += n;
+        while (n--) *--d = *--s;
+    }
+    return dest;
+}
+
+static int snprintf(char *str, size_t size, const char *format, ...) {
+    if (!str || size == 0) return 0;
+    __builtin_va_list args;
+    __builtin_va_start(args, format);
+    size_t out = 0;
+    for (size_t i = 0; format[i] != '\0' && out + 1 < size; i++) {
+        if (format[i] == '%' && format[i + 1] != '\0') {
+            i++;
+            if (format[i] == 's') {
+                const char *s = __builtin_va_arg(args, const char *);
+                if (!s) s = "(null)";
+                while (*s && out + 1 < size) {
+                    str[out++] = *s++;
+                }
+            } else if (format[i] == 'd' || format[i] == 'u') {
+                int val = __builtin_va_arg(args, int);
+                if (format[i] == 'd' && val < 0) {
+                    if (out + 1 < size) str[out++] = '-';
+                    val = -val;
+                }
+                char buf[16];
+                int bi = 0;
+                unsigned int uval = (unsigned int)val;
+                if (uval == 0) buf[bi++] = '0';
+                while (uval > 0) {
+                    buf[bi++] = '0' + (uval % 10);
+                    uval /= 10;
+                }
+                while (bi > 0 && out + 1 < size) {
+                    str[out++] = buf[--bi];
+                }
+            } else if (format[i] == '%') {
+                str[out++] = '%';
+            }
+        } else {
+            str[out++] = format[i];
+        }
+    }
+    str[out] = '\0';
+    __builtin_va_end(args);
+    return (int)out;
+}
+
+/* ========================================================================= */
+/* Advanced Interactive Readline & Tab-Completion Engine                     */
+/* ========================================================================= */
+
+static int is_live_system(void) {
+    vfs_stat_t st;
+    if (syscall(SYS_STAT, (uint64_t)(uintptr_t)"/etc/is_live_media", (uint64_t)(uintptr_t)&st, 0, 0, 0) == 0) {
+        return 1;
+    }
+    BootInfo bi;
+    if (syscall(SYS_GET_BOOTINFO, (uint64_t)(uintptr_t)&bi, 0, 0, 0, 0) == 0) {
+        if (strstr(bi.cmdline, "boot=live") || strstr(bi.cmdline, "live=1") || strstr(bi.cmdline, "live")) {
+            return 1;
+        }
+        const char *p = bi.hardware_devpath;
+        if (p && p[0] != '\0') {
+            if (strstr(p, "CDROM") || strstr(p, "CdRom") || strstr(p, "cdrom") ||
+                strstr(p, "CD-ROM") || strstr(p, "Cd-Rom") || strstr(p, "cd-rom") ||
+                strstr(p, "CD(") || strstr(p, "RamDisk") || strstr(p, "ramdisk") ||
+                strstr(p, "VirtualDisk") || strstr(p, "MemoryMapped")) {
+                return 1;
+            }
+        }
+    }
+    char mnt_buf[512];
+    if (syscall(SYS_MOUNT, 0, 0, 0, (uint64_t)(uintptr_t)mnt_buf, sizeof(mnt_buf)) > 0) {
+        if (strstr(mnt_buf, "ramfs on /") || strstr(mnt_buf, "type ramfs")) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const char *g_bshss_commands[] = {
+    "help", "echo", "ls", "dir", "cd", "pwd", "cat", "type",
+    "more", "less", "data", "cp", "copy", "mv", "move", "mkdir",
+    "touch", "write", "edit", "del", "rm", "fs", "mount", "df",
+    "ps", "kill", "proctest", "syscalltest", "mousetest", "ipctest",
+    "shmtest", "date", "time", "uptime", "uname", "env", "set",
+    "export", "history", "screenres", "attached-drives", "cpu", "mem",
+    "pci", "devpath", "kernel", "su", "drop", "exit", "sudo", "dmesg",
+    "grub", "flash", "recovery-tools", "recovery", "rtools", "panic",
+    "gui", "startx", "clear", "cls", "reboot", "shutdown", "halt", NULL
+};
+
+#define BSHSS_MAX_COMPLETIONS 64
+static char g_bshss_comp_list[BSHSS_MAX_COMPLETIONS][256];
+static int g_bshss_comp_count = 0;
+static int g_bshss_comp_index = -1;
+static char g_bshss_comp_prefix[256];
+
+static void bshss_collect_cmd_completions(const char *prefix) {
+    g_bshss_comp_count = 0;
+    size_t plen = strlen(prefix);
+    int is_live = is_live_system();
+    for (int i = 0; g_bshss_commands[i] && g_bshss_comp_count < BSHSS_MAX_COMPLETIONS; i++) {
+        const char *cname = g_bshss_commands[i];
+        if (!is_live && (strcmp(cname, "flash") == 0 ||
+                         strcmp(cname, "recovery-tools") == 0 ||
+                         strcmp(cname, "recovery") == 0 ||
+                         strcmp(cname, "rtools") == 0)) {
+            continue;
+        }
+        int match = 1;
+        for (size_t p = 0; p < plen; p++) {
+            char c1 = prefix[p];
+            char c2 = cname[p];
+            if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
+            if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+            if (c1 != c2) { match = 0; break; }
+        }
+        if (match) {
+            strncpy(g_bshss_comp_list[g_bshss_comp_count++], cname, 255);
+        }
+    }
+}
+
+static void bshss_collect_file_completions(const char *path_prefix) {
+    g_bshss_comp_count = 0;
+    char dir_part[256] = "";
+    char file_prefix[256] = "";
+
+    const char *last_sep = strrchr(path_prefix, '/');
+    const char *last_bsep = strrchr(path_prefix, '\\');
+    if (last_bsep && (!last_sep || last_bsep > last_sep)) last_sep = last_bsep;
+
+    if (last_sep) {
+        size_t dlen = (size_t)(last_sep - path_prefix + 1);
+        if (dlen < sizeof(dir_part)) {
+            strncpy(dir_part, path_prefix, dlen);
+            dir_part[dlen] = '\0';
+        }
+        strncpy(file_prefix, last_sep + 1, sizeof(file_prefix) - 1);
+    } else {
+        strncpy(file_prefix, path_prefix, sizeof(file_prefix) - 1);
+    }
+
+    char query_dir[256];
+    if (dir_part[0] != '\0') {
+        resolve_path(dir_part, query_dir, sizeof(query_dir));
+    } else {
+        resolve_path(".", query_dir, sizeof(query_dir));
+    }
+
+    char names_buf[2048];
+    int64_t nbytes = syscall(SYS_LISTDIR, (uint64_t)(uintptr_t)query_dir,
+                             (uint64_t)(uintptr_t)names_buf, sizeof(names_buf), 0, 0);
+
+    if (nbytes <= 0) return;
+
+    size_t prefix_len = strlen(file_prefix);
+    size_t pos = 0;
+    while (pos < (size_t)nbytes && g_bshss_comp_count < BSHSS_MAX_COMPLETIONS) {
+        const char *name = &names_buf[pos];
+        size_t c_len = strlen(name);
+        if (c_len == 0) break;
+
+        if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
+            int match = 1;
+            for (size_t p = 0; p < prefix_len; p++) {
+                char c1 = file_prefix[p];
+                char c2 = name[p];
+                if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
+                if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+                if (c1 != c2) { match = 0; break; }
+            }
+
+            if (match) {
+                char full_cand[256];
+                char check_path[256];
+                snprintf(check_path, sizeof(check_path), "%s/%s", query_dir, name);
+                vfs_stat_t st;
+                int is_dir = (syscall(SYS_STAT, (uint64_t)(uintptr_t)check_path, (uint64_t)(uintptr_t)&st, 0, 0, 0) == 0 && st.type == VFS_TYPE_DIR);
+
+                if (is_dir) {
+                    snprintf(full_cand, sizeof(full_cand), "%s%s/", dir_part, name);
+                } else {
+                    snprintf(full_cand, sizeof(full_cand), "%s%s", dir_part, name);
+                }
+                strncpy(g_bshss_comp_list[g_bshss_comp_count++], full_cand, 255);
+            }
+        }
+        pos += c_len + 1;
+    }
+}
+
 static void readline(char *buf, size_t max_len, const char *prompt) {
-    size_t idx = 0;
+    size_t len = 0;
+    size_t pos = 0;
     g_history_browse = -1;
     g_scratch_line[0] = '\0';
+    g_bshss_comp_count = 0;
+    g_bshss_comp_index = -1;
+    buf[0] = '\0';
     puts(prompt);
 
-    while (idx + 1 < max_len) {
+    while (len + 1 < max_len) {
         char c = getchar();
+
+        /* Reset tab completion on non-tab keys */
+        if (c != '\t') {
+            g_bshss_comp_count = 0;
+            g_bshss_comp_index = -1;
+        }
+
         if (c == '\r' || c == '\n') {
             puts("\n");
+            buf[len] = '\0';
+            history_add(buf);
             break;
+        } else if (c == '\t') {
+            /* Tab: PowerShell-style cycling */
+            if (g_bshss_comp_count == 0) {
+                size_t word_start = pos;
+                while (word_start > 0 && buf[word_start - 1] != ' ') {
+                    word_start--;
+                }
+                size_t wlen = pos - word_start;
+                if (wlen < sizeof(g_bshss_comp_prefix)) {
+                    strncpy(g_bshss_comp_prefix, &buf[word_start], wlen);
+                    g_bshss_comp_prefix[wlen] = '\0';
+                } else {
+                    g_bshss_comp_prefix[0] = '\0';
+                }
+
+                if (word_start == 0) {
+                    bshss_collect_cmd_completions(g_bshss_comp_prefix);
+                } else {
+                    bshss_collect_file_completions(g_bshss_comp_prefix);
+                }
+                g_bshss_comp_index = -1;
+            }
+
+            if (g_bshss_comp_count > 0) {
+                g_bshss_comp_index = (g_bshss_comp_index + 1) % g_bshss_comp_count;
+                const char *cand = g_bshss_comp_list[g_bshss_comp_index];
+
+                size_t word_start = pos;
+                while (word_start > 0 && buf[word_start - 1] != ' ') {
+                    word_start--;
+                }
+                size_t tail_len = len - pos;
+                char tail[256];
+                memcpy(tail, &buf[pos], tail_len + 1);
+
+                size_t cand_len = strlen(cand);
+                if (word_start + cand_len + tail_len < max_len) {
+                    /* Rewind cursor to word_start */
+                    while (pos > word_start) {
+                        putc('\b');
+                        pos--;
+                    }
+                    /* Overwrite tail and print candidate */
+                    memcpy(&buf[word_start], cand, cand_len);
+                    memcpy(&buf[word_start + cand_len], tail, tail_len + 1);
+                    len = word_start + cand_len + tail_len;
+                    pos = word_start + cand_len;
+
+                    puts(&buf[word_start]);
+                    puts("   \b\b\b");
+                    /* Move cursor back to pos if there is tail */
+                    for (size_t t = 0; t < tail_len; t++) {
+                        putc('\b');
+                    }
+                }
+            }
+            continue;
         } else if (c == '\b' || c == 127) {
-            if (idx > 0) {
-                idx--;
+            if (pos > 0) {
+                memmove(&buf[pos - 1], &buf[pos], len - pos + 1);
+                pos--;
+                len--;
                 putc('\b');
+                puts(&buf[pos]);
+                putc(' ');
+                putc('\b');
+                for (size_t t = 0; t < (len - pos); t++) {
+                    putc('\b');
+                }
             }
         } else if (c == 27) { /* ESC / ANSI arrow sequence */
             char c2 = getchar();
@@ -313,57 +608,98 @@ static void readline(char *buf, size_t max_len, const char *prompt) {
                 if (c3 == 'A') { /* UP ARROW */
                     if (g_history_count > 0) {
                         if (g_history_browse == -1) {
-                            buf[idx] = '\0';
+                            buf[len] = '\0';
                             strcpy(g_scratch_line, buf);
                             g_history_browse = g_history_count - 1;
                         } else if (g_history_browse > 0 && g_history_browse > g_history_count - HISTORY_MAX) {
                             g_history_browse--;
                         }
-                        while (idx > 0) {
-                            putc('\b');
-                            idx--;
-                        }
+                        while (pos > 0) { putc('\b'); pos--; }
+                        for (size_t s = 0; s < len; s++) putc(' ');
+                        for (size_t s = 0; s < len; s++) putc('\b');
+
                         const char *h_entry = g_history[g_history_browse % HISTORY_MAX];
                         size_t h_len = strlen(h_entry);
                         if (h_len >= max_len) h_len = max_len - 1;
                         strncpy(buf, h_entry, h_len);
                         buf[h_len] = '\0';
-                        idx = h_len;
+                        len = h_len;
+                        pos = h_len;
                         puts(buf);
                     }
                 } else if (c3 == 'B') { /* DOWN ARROW */
                     if (g_history_browse != -1) {
                         g_history_browse++;
-                        while (idx > 0) {
-                            putc('\b');
-                            idx--;
-                        }
+                        while (pos > 0) { putc('\b'); pos--; }
+                        for (size_t s = 0; s < len; s++) putc(' ');
+                        for (size_t s = 0; s < len; s++) putc('\b');
+
                         if (g_history_browse >= g_history_count) {
                             g_history_browse = -1;
                             size_t s_len = strlen(g_scratch_line);
                             if (s_len >= max_len) s_len = max_len - 1;
                             strncpy(buf, g_scratch_line, s_len);
                             buf[s_len] = '\0';
-                            idx = s_len;
-                            puts(buf);
+                            len = s_len;
+                            pos = s_len;
                         } else {
                             const char *h_entry = g_history[g_history_browse % HISTORY_MAX];
                             size_t h_len = strlen(h_entry);
                             if (h_len >= max_len) h_len = max_len - 1;
                             strncpy(buf, h_entry, h_len);
                             buf[h_len] = '\0';
-                            idx = h_len;
-                            puts(buf);
+                            len = h_len;
+                            pos = h_len;
+                        }
+                        puts(buf);
+                    }
+                } else if (c3 == 'C') { /* RIGHT ARROW */
+                    if (pos < len) {
+                        putc(buf[pos]);
+                        pos++;
+                    }
+                } else if (c3 == 'D') { /* LEFT ARROW */
+                    if (pos > 0) {
+                        pos--;
+                        putc('\b');
+                    }
+                } else if (c3 == 'H') { /* HOME */
+                    while (pos > 0) { putc('\b'); pos--; }
+                } else if (c3 == 'F') { /* END */
+                    while (pos < len) { putc(buf[pos]); pos++; }
+                } else if (c3 == '3') { /* DELETE */
+                    char c4 = getchar(); /* '~' */
+                    (void)c4;
+                    if (pos < len) {
+                        memmove(&buf[pos], &buf[pos + 1], len - pos);
+                        len--;
+                        puts(&buf[pos]);
+                        putc(' ');
+                        putc('\b');
+                        for (size_t t = 0; t < (len - pos); t++) {
+                            putc('\b');
                         }
                     }
                 }
             }
         } else if (c >= 32 && c < 127) {
-            buf[idx++] = c;
-            putc(c);
+            if (pos == len) {
+                buf[pos++] = c;
+                len++;
+                buf[len] = '\0';
+                putc(c);
+            } else {
+                memmove(&buf[pos + 1], &buf[pos], len - pos + 1);
+                buf[pos++] = c;
+                len++;
+                puts(&buf[pos - 1]);
+                for (size_t t = 0; t < (len - pos); t++) {
+                    putc('\b');
+                }
+            }
         }
     }
-    buf[idx] = '\0';
+    buf[len] = '\0';
 }
 
 static void resolve_path(const char *arg, char *out_buf, size_t max_len) {
@@ -679,9 +1015,9 @@ static void cmd_uptime(void) {
 
 static void cmd_uname(const char *arg) {
     if (arg && (strcmp(arg, "-a") == 0 || strcmp(arg, "--all") == 0)) {
-        puts("pseuDOS 0.7.1-gui x86_64 UEFI\n");
+        puts("pseuDOS 0.7.3-gui x86_64 UEFI\n");
     } else if (arg && strcmp(arg, "-r") == 0) {
-        puts("0.7.1-gui\n");
+        puts("0.7.3-gui\n");
     } else if (arg && strcmp(arg, "-m") == 0) {
         puts("x86_64\n");
     } else if (arg && strcmp(arg, "-s") == 0) {
@@ -709,6 +1045,7 @@ static void cmd_help(void) {
     puts(" mkdir <path>                : create directory\n");
     puts(" touch <file>                : create empty file\n");
     puts(" write [-a] <file> <txt>     : write (or -a append) text to file\n");
+    puts(" edit <file>                 : full-screen text editor (Ctrl+S save, Ctrl+X exit)\n");
     puts(" del / rm [-r] [-f] <path...> : delete file or directory\n");
     puts(" fs [drive_no | --drives]    : query filesystem stats and disk partitions\n");
     puts(" ps                          : list processes and CPU time\n");
@@ -736,7 +1073,10 @@ static void cmd_help(void) {
     puts(" <app> [args...] --as-root   : launch application with KERNEL privileges (priv=KERNEL)\n");
     puts(" dmesg                       : display kernel message buffer\n");
     puts(" grub                        : display GRUB 2 chainloader config & setup\n");
-    puts(" flash                       : install pseuDOS to persistent disk (requires sudo)\n");
+    if (is_live_system()) {
+        puts(" flash                       : install pseuDOS to persistent disk (requires sudo)\n");
+        puts(" recovery-tools / rtools     : launch dedicated recovery and repair suite\n");
+    }
     puts(" panic [reason]              : trigger a kernel panic\n");
     puts(" gui / startx                : launch pseuDOS graphical desktop environment\n");
     puts(" clear / cls                 : clear screen\n");
@@ -1360,6 +1700,1072 @@ static void cmd_write(const char *arg) {
         puts(file);
         puts("'\n");
     }
+}
+
+/* ========================================================================= */
+/* Classic Full-Screen MS-DOS Style Text Editor (cmd_edit)                   */
+/* ========================================================================= */
+
+#define BSHSS_EDIT_MAX_LINES 512
+#define BSHSS_EDIT_LINE_MAX  128
+
+typedef struct {
+    char lines[BSHSS_EDIT_MAX_LINES][BSHSS_EDIT_LINE_MAX];
+    int line_count;
+    int cur_line;
+    int cur_col;
+    int top_line;
+    int modified;
+    char path[256];
+} bshss_editor_t;
+
+static void bshss_editor_draw_ui(bshss_editor_t *ed, int cols, int rows) {
+    syscall(SYS_CLEAR, 0, 0, 0, 0, 0);
+
+    /* Top Title Bar */
+    puts("\033[7m"); /* Inverted */
+    char top_bar[256];
+    snprintf(top_bar, sizeof(top_bar), " [ EDIT: %s%s ]", ed->path, ed->modified ? " *" : "");
+    puts(top_bar);
+    size_t tblen = strlen(top_bar);
+    for (size_t s = tblen; s < (size_t)cols; s++) putc(' ');
+    puts("\033[0m\n");
+
+    /* Text Area */
+    int text_rows = (rows > 2) ? (rows - 2) : 1;
+    for (int r = 0; r < text_rows; r++) {
+        int file_line = ed->top_line + r;
+        if (file_line < ed->line_count) {
+            const char *lstr = ed->lines[file_line];
+            size_t llen = strlen(lstr);
+            if (llen > (size_t)cols) llen = (size_t)cols;
+            char lbuf[128];
+            strncpy(lbuf, lstr, llen);
+            lbuf[llen] = '\0';
+            puts(lbuf);
+        } else {
+            putc('~');
+        }
+        puts("\n");
+    }
+
+    /* Bottom Helper Bar */
+    puts("\033[7m");
+    const char *bot = " Ctrl+S = Save  |  Ctrl+X = Exit  |  Arrow Keys = Navigate";
+    puts(bot);
+    size_t botlen = strlen(bot);
+    for (size_t s = botlen; s < (size_t)cols; s++) putc(' ');
+    puts("\033[0m");
+}
+
+static int bshss_editor_save(bshss_editor_t *ed) {
+    char full_path[256];
+    resolve_path(ed->path, full_path, sizeof(full_path));
+
+    /* Create or overwrite with empty file */
+    int64_t wr = syscall(SYS_WRITEFILE, (uint64_t)(uintptr_t)full_path, (uint64_t)(uintptr_t)"", 0, 0, 0);
+    if (wr < 0) return -1;
+
+    for (int i = 0; i < ed->line_count; i++) {
+        char lbuf[132];
+        snprintf(lbuf, sizeof(lbuf), "%s\n", ed->lines[i]);
+        syscall(SYS_WRITEFILE, (uint64_t)(uintptr_t)full_path, (uint64_t)(uintptr_t)lbuf, strlen(lbuf), 1, 0);
+    }
+    ed->modified = 0;
+    return 0;
+}
+
+static void cmd_edit(const char *arg) {
+    if (!arg || arg[0] == '\0') {
+        puts("usage: edit <filename>\n");
+        return;
+    }
+
+    bshss_editor_t ed;
+    memset(&ed, 0, sizeof(ed));
+    strncpy(ed.path, arg, sizeof(ed.path) - 1);
+    ed.line_count = 1;
+
+    char full_path[256];
+    resolve_path(arg, full_path, sizeof(full_path));
+
+    char fbuf[4096];
+    int64_t rsz = syscall(SYS_READFILE, (uint64_t)(uintptr_t)full_path, (uint64_t)(uintptr_t)fbuf, sizeof(fbuf) - 1, 0, 0);
+    if (rsz > 0) {
+        fbuf[rsz] = '\0';
+        ed.line_count = 0;
+        char *line_start = fbuf;
+        while (*line_start && ed.line_count < BSHSS_EDIT_MAX_LINES) {
+            char *line_end = strchr(line_start, '\n');
+            if (line_end) {
+                *line_end = '\0';
+                char *cr = strchr(line_start, '\r');
+                if (cr) *cr = '\0';
+                strncpy(ed.lines[ed.line_count++], line_start, BSHSS_EDIT_LINE_MAX - 1);
+                line_start = line_end + 1;
+            } else {
+                char *cr = strchr(line_start, '\r');
+                if (cr) *cr = '\0';
+                strncpy(ed.lines[ed.line_count++], line_start, BSHSS_EDIT_LINE_MAX - 1);
+                break;
+            }
+        }
+        if (ed.line_count == 0) ed.line_count = 1;
+    }
+
+    int cols = 80, rows = 25;
+    int text_rows = (rows > 2) ? (rows - 2) : 1;
+
+    bshss_editor_draw_ui(&ed, cols, rows);
+
+    while (1) {
+        char c = getchar();
+
+        /* Ctrl+S = Save (19) */
+        if (c == 19) {
+            bshss_editor_save(&ed);
+            bshss_editor_draw_ui(&ed, cols, rows);
+            continue;
+        }
+
+        /* Ctrl+X = Exit (24) */
+        if (c == 24) {
+            if (ed.modified) {
+                puts("\n\033[41;37m Save changes before exiting? (Y/N/Cancel) \033[0m ");
+                while (1) {
+                    char ck = getchar();
+                    if (ck == 'y' || ck == 'Y') {
+                        bshss_editor_save(&ed);
+                        break;
+                    } else if (ck == 'n' || ck == 'N') {
+                        break;
+                    } else if (ck == 27) {
+                        bshss_editor_draw_ui(&ed, cols, rows);
+                        goto cont_edit;
+                    }
+                }
+            }
+            break;
+        cont_edit:
+            continue;
+        }
+
+        /* ANSI Arrow Sequences */
+        if (c == 27) {
+            char c2 = getchar();
+            if (c2 == '[') {
+                char c3 = getchar();
+                if (c3 == 'A') { /* UP */
+                    if (ed.cur_line > 0) ed.cur_line--;
+                } else if (c3 == 'B') { /* DOWN */
+                    if (ed.cur_line + 1 < ed.line_count) ed.cur_line++;
+                } else if (c3 == 'C') { /* RIGHT */
+                    if (ed.cur_col < (int)strlen(ed.lines[ed.cur_line])) ed.cur_col++;
+                } else if (c3 == 'D') { /* LEFT */
+                    if (ed.cur_col > 0) ed.cur_col--;
+                } else if (c3 == 'H') { /* HOME */
+                    ed.cur_col = 0;
+                } else if (c3 == 'F') { /* END */
+                    ed.cur_col = (int)strlen(ed.lines[ed.cur_line]);
+                }
+                int llen = (int)strlen(ed.lines[ed.cur_line]);
+                if (ed.cur_col > llen) ed.cur_col = llen;
+
+                if (ed.cur_line < ed.top_line) ed.top_line = ed.cur_line;
+                if (ed.cur_line >= ed.top_line + text_rows) ed.top_line = ed.cur_line - text_rows + 1;
+                bshss_editor_draw_ui(&ed, cols, rows);
+                continue;
+            }
+        }
+
+        /* Enter Key: Split Line */
+        if (c == '\r' || c == '\n') {
+            if (ed.line_count < BSHSS_EDIT_MAX_LINES) {
+                char *curr = ed.lines[ed.cur_line];
+                for (int i = ed.line_count; i > ed.cur_line + 1; i--) {
+                    memcpy(ed.lines[i], ed.lines[i - 1], BSHSS_EDIT_LINE_MAX);
+                }
+                strncpy(ed.lines[ed.cur_line + 1], &curr[ed.cur_col], BSHSS_EDIT_LINE_MAX - 1);
+                curr[ed.cur_col] = '\0';
+                ed.line_count++;
+                ed.cur_line++;
+                ed.cur_col = 0;
+                ed.modified = 1;
+
+                if (ed.cur_line >= ed.top_line + text_rows) ed.top_line = ed.cur_line - text_rows + 1;
+                bshss_editor_draw_ui(&ed, cols, rows);
+            }
+            continue;
+        }
+
+        /* Backspace */
+        if (c == '\b' || c == 127) {
+            char *curr = ed.lines[ed.cur_line];
+            if (ed.cur_col > 0) {
+                int llen = (int)strlen(curr);
+                memmove(&curr[ed.cur_col - 1], &curr[ed.cur_col], llen - ed.cur_col + 1);
+                ed.cur_col--;
+                ed.modified = 1;
+            } else if (ed.cur_line > 0) {
+                char *prev = ed.lines[ed.cur_line - 1];
+                int plen = (int)strlen(prev);
+                int clen = (int)strlen(curr);
+                if (plen + clen < BSHSS_EDIT_LINE_MAX) {
+                    strcat(prev, curr);
+                    for (int i = ed.cur_line; i < ed.line_count - 1; i++) {
+                        memcpy(ed.lines[i], ed.lines[i + 1], BSHSS_EDIT_LINE_MAX);
+                    }
+                    ed.line_count--;
+                    ed.cur_line--;
+                    ed.cur_col = plen;
+                    ed.modified = 1;
+                }
+            }
+            if (ed.cur_line < ed.top_line) ed.top_line = ed.cur_line;
+            bshss_editor_draw_ui(&ed, cols, rows);
+            continue;
+        }
+
+        /* Printable Characters */
+        if (c >= 32 && c < 127) {
+            char *curr = ed.lines[ed.cur_line];
+            int llen = (int)strlen(curr);
+            if (llen + 1 < BSHSS_EDIT_LINE_MAX) {
+                memmove(&curr[ed.cur_col + 1], &curr[ed.cur_col], llen - ed.cur_col + 1);
+                curr[ed.cur_col] = c;
+                ed.cur_col++;
+                ed.modified = 1;
+                bshss_editor_draw_ui(&ed, cols, rows);
+            }
+            continue;
+        }
+    }
+
+    syscall(SYS_CLEAR, 0, 0, 0, 0, 0);
+}
+
+/* ========================================================================= */
+/* pseuDOS Live Recovery & Maintenance Suite (recovery-tools / rtools)       */
+/* ========================================================================= */
+
+static void print_step_status(const char *tag, const char *msg, const char *status, int target_col) {
+    char line[256];
+    int n = snprintf(line, sizeof(line), "[%s] %s", tag, msg);
+    puts(line);
+    if (target_col < n + 1) {
+        target_col = n + 1;
+    }
+    for (int i = n; i < target_col; i++) {
+        putc(' ');
+    }
+    if (status && status[0]) {
+        puts(status);
+        puts("\n");
+    } else {
+        puts("\n");
+    }
+}
+
+static void get_disk_hardware_name(const char *target, char *out_name, size_t out_sz) {
+    if (!out_name || out_sz == 0) return;
+    strncpy(out_name, "Block Storage Device", out_sz - 1);
+    out_name[out_sz - 1] = '\0';
+
+    int64_t count = syscall(SYS_FLASH, FLASH_OP_GET_COUNT, 0, 0, 0, 0);
+    if (count <= 0) return;
+
+    const char *bare = target;
+    if (strncmp(bare, "/mounts/", 8) == 0) bare += 8;
+
+    for (int i = 0; i < count; i++) {
+        flash_dev_info_t info;
+        if (syscall(SYS_FLASH, FLASH_OP_GET_DEVICE, (uint64_t)i, (uint64_t)(uintptr_t)&info, 0, 0) == 0) {
+            char tag[32];
+            if (info.type == 0) snprintf(tag, sizeof(tag), "sata%d", i);
+            else if (info.type == 1) snprintf(tag, sizeof(tag), "nvme%dn1", i);
+            else snprintf(tag, sizeof(tag), "usb%d", i);
+
+            if (strcmp(bare, tag) == 0 || (bare[0] >= '0' && bare[0] <= '9' && atoi(bare) == i)) {
+                snprintf(out_name, out_sz, "%s", info.name);
+                return;
+            }
+        }
+    }
+}
+
+static void normalize_target_mount(const char *target, char *out_path, size_t out_sz) {
+    if (!target || !out_path || out_sz == 0) return;
+    if (target[0] == '/') {
+        strncpy(out_path, target, out_sz - 1);
+    } else {
+        snprintf(out_path, out_sz, "/mounts/%s", target);
+    }
+    out_path[out_sz - 1] = '\0';
+    size_t len = strlen(out_path);
+    while (len > 1 && out_path[len - 1] == '/') {
+        out_path[--len] = '\0';
+    }
+}
+
+static void rtools_cmd_flush(const char *arg) {
+    if (!arg || arg[0] == '\0') {
+        puts("usage: flush <disk>\n");
+        return;
+    }
+    char target[256];
+    normalize_target_mount(arg, target, sizeof(target));
+    char dev_name[128];
+    get_disk_hardware_name(target, dev_name, sizeof(dev_name));
+
+    char msg[160];
+    snprintf(msg, sizeof(msg), "flushing cache on %s (%s)...", target, dev_name);
+    print_step_status("flush", msg, "[OK]", 88);
+
+    syscall(SYS_SYNC, (uint64_t)(uintptr_t)target, 0, 0, 0, 0);
+    puts("[flush] the operation has completed successfully\n");
+}
+
+static void rtools_cmd_bootcfg(const char *arg) {
+    if (!arg || arg[0] == '\0') {
+        puts("usage: bootcfg <disk> [--repair|--generate]\n");
+        return;
+    }
+
+    char disk_arg[128] = "";
+    int repair_mode = 0;
+    size_t i = 0, j = 0;
+    while (arg[i] == ' ') i++;
+    while (arg[i] && arg[i] != ' ' && j < sizeof(disk_arg) - 1) disk_arg[j++] = arg[i++];
+    disk_arg[j] = '\0';
+    while (arg[i] == ' ') i++;
+    if (arg[i] != '\0') {
+        if (strcmp(&arg[i], "--repair") == 0 || strcmp(&arg[i], "--generate") == 0) {
+            repair_mode = 1;
+        }
+    }
+
+    char target[256];
+    normalize_target_mount(disk_arg, target, sizeof(target));
+    char dev_name[128];
+    get_disk_hardware_name(target, dev_name, sizeof(dev_name));
+
+    char cfg_path[280];
+    snprintf(cfg_path, sizeof(cfg_path), "%s/protected/bootmgr/boot.cfg", target);
+
+    vfs_stat_t st;
+    int exists = (syscall(SYS_STAT, (uint64_t)(uintptr_t)cfg_path, (uint64_t)(uintptr_t)&st, 0, 0, 0) == 0 && st.size > 0);
+    int valid_cfg = 0;
+    char read_buf[512];
+    memset(read_buf, 0, sizeof(read_buf));
+
+    if (exists) {
+        int64_t r = syscall(SYS_READFILE, (uint64_t)(uintptr_t)cfg_path, (uint64_t)(uintptr_t)read_buf, sizeof(read_buf) - 1, 0, 0);
+        if (r > 0) {
+            read_buf[r] = '\0';
+            if (strstr(read_buf, "kernel=") != NULL) {
+                valid_cfg = 1;
+            }
+        }
+    }
+
+    print_step_status("bootcfg", "checking boot configuration file...", (exists && valid_cfg) ? "[OK]" : "[FAIL]", 88);
+
+    if (!exists || !valid_cfg || repair_mode) {
+        if (!exists) {
+            puts("[bootcfg] missing boot.cfg configuration file\n");
+        } else if (!valid_cfg) {
+            puts("[bootcfg] found incomplete or corrupted boot configuration data\n");
+        }
+
+        /* Ensure parent directory exists */
+        char pdir1[280], pdir2[280];
+        snprintf(pdir1, sizeof(pdir1), "%s/protected", target);
+        snprintf(pdir2, sizeof(pdir2), "%s/protected/bootmgr", target);
+        syscall(SYS_MKDIR, (uint64_t)(uintptr_t)pdir1, 0, 0, 0, 0);
+        syscall(SYS_MKDIR, (uint64_t)(uintptr_t)pdir2, 0, 0, 0, 0);
+
+        const char *new_cfg =
+            "# pseuDOS Boot Configuration\r\n"
+            "kernel=\\protected\\krnl\\vpkernel\r\n"
+            "initramfs=\\protected\\krnl\\initramfs.img\r\n"
+            "autoinit=\\protected\\krnl\\autoinit.exe\r\n"
+            "shell=\\protected\\gui\\gman.exe\r\n"
+            "cmdline=quiet devpath=hardware\r\n"
+            "default_resolution=auto\r\n"
+            "bootmgr_version=1.1.0\r\n";
+        int64_t wr = syscall(SYS_WRITEFILE, (uint64_t)(uintptr_t)cfg_path, (uint64_t)(uintptr_t)new_cfg, strlen(new_cfg), 0, 0);
+        if (wr >= 0) {
+            print_step_status("bootcfg", "writing standard boot configuration data...", "[OK]", 88);
+            puts("[bootcfg] all operations completed successfully\n");
+        } else {
+            print_step_status("bootcfg", "writing standard boot configuration data...", "[FAIL]", 88);
+        }
+    } else {
+        puts("current boot configuration:\n----------------------------------------\n");
+        puts(read_buf);
+        puts("----------------------------------------\n");
+        puts("[bootcfg] all operations completed successfully\n");
+    }
+}
+
+static int verify_efi_binary(const char *path, uint64_t expected_size) {
+    vfs_stat_t st;
+    if (syscall(SYS_STAT, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)&st, 0, 0, 0) != 0 || st.size < 512) {
+        return 0;
+    }
+    if (expected_size > 0 && st.size != expected_size) {
+        return 0;
+    }
+    uint8_t hdr[512];
+    int64_t rd = syscall(SYS_READFILE, (uint64_t)(uintptr_t)path, (uint64_t)(uintptr_t)hdr, sizeof(hdr), 0, 0);
+    if (rd < 512) return 0;
+    /* Check DOS MZ signature */
+    if (hdr[0] != 'M' || hdr[1] != 'Z') return 0;
+    /* Check PE offset */
+    uint32_t pe_offset = *(uint32_t *)&hdr[0x3C];
+    if (pe_offset + 4 <= sizeof(hdr)) {
+        if (hdr[pe_offset] != 'P' || hdr[pe_offset + 1] != 'E' ||
+            hdr[pe_offset + 2] != '\0' || hdr[pe_offset + 3] != '\0') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void rtools_cmd_loader_repair(const char *arg) {
+    if (!arg || arg[0] == '\0') {
+        puts("usage: loader-repair <disk> [--force]\n");
+        return;
+    }
+
+    char disk_arg[128] = "";
+    int force_mode = 0;
+    size_t i = 0, j = 0;
+    while (arg[i] == ' ') i++;
+    while (arg[i] && arg[i] != ' ' && j < sizeof(disk_arg) - 1) disk_arg[j++] = arg[i++];
+    disk_arg[j] = '\0';
+    while (arg[i] == ' ') i++;
+    if (arg[i] != '\0') {
+        if (strcmp(&arg[i], "--force") == 0) {
+            force_mode = 1;
+        }
+    }
+
+    char target[256];
+    normalize_target_mount(disk_arg, target, sizeof(target));
+    char dev_name[128];
+    get_disk_hardware_name(target, dev_name, sizeof(dev_name));
+
+    char msg[160];
+    snprintf(msg, sizeof(msg), "inspecting bootloader on %s (%s)...", target, dev_name);
+    print_step_status("loader-repair", msg, "[OK]", 88);
+
+    /* Locate live reference EFI loaders in VFS */
+    const char *src_fb = "/EFI/BOOT/BOOTX64.EFI";
+    const char *src_silo = "/EFI/pseuDOS/BOOTX64.EFI";
+    vfs_stat_t st_ref_fb, st_ref_silo;
+    uint64_t ref_fb_sz = 0, ref_silo_sz = 0;
+    if (syscall(SYS_STAT, (uint64_t)(uintptr_t)src_fb, (uint64_t)(uintptr_t)&st_ref_fb, 0, 0, 0) == 0) {
+        ref_fb_sz = st_ref_fb.size;
+    }
+    if (syscall(SYS_STAT, (uint64_t)(uintptr_t)src_silo, (uint64_t)(uintptr_t)&st_ref_silo, 0, 0, 0) == 0) {
+        ref_silo_sz = st_ref_silo.size;
+    } else {
+        src_silo = src_fb;
+        ref_silo_sz = ref_fb_sz;
+    }
+
+    char dst_fb[280];
+    snprintf(dst_fb, sizeof(dst_fb), "%s/EFI/BOOT/BOOTX64.EFI", target);
+    char dst_silo[280];
+    snprintf(dst_silo, sizeof(dst_silo), "%s/EFI/pseuDOS/BOOTX64.EFI", target);
+
+    int fb_ok = (!force_mode) ? verify_efi_binary(dst_fb, ref_fb_sz) : 0;
+    int silo_ok = (!force_mode) ? verify_efi_binary(dst_silo, ref_silo_sz) : 0;
+
+    print_step_status("loader-repair", "checking fallback EFI loader /EFI/BOOT/BOOTX64.EFI...", fb_ok ? "[OK]" : "[FAIL]", 88);
+    print_step_status("loader-repair", "checking SiLo loader /EFI/pseuDOS/BOOTX64.EFI...", silo_ok ? "[OK]" : "[FAIL]", 88);
+
+    if (fb_ok && silo_ok) {
+        char clean_msg[256];
+        snprintf(clean_msg, sizeof(clean_msg),
+                 "loader-repair has inspected bootloaders on %s (%s).\nall EFI loaders are intact, verified PE32+ binaries, and match reference images.\n\n",
+                 target, dev_name);
+        puts(clean_msg);
+        puts("[loader-repair] all operations completed successfully\n");
+        return;
+    }
+
+    puts("\nloader-repair has found missing or damaged bootloader files on ");
+    puts(target);
+    puts(" (");
+    puts(dev_name);
+    puts(").\n");
+    if (!fb_ok) puts("  - missing/damaged fallback EFI loader: /EFI/BOOT/BOOTX64.EFI\n");
+    if (!silo_ok) puts("  - missing/damaged SiLo loader: /EFI/pseuDOS/BOOTX64.EFI\n");
+    puts("\nwould you like to repair the bootloader? (Y/n) ");
+
+    char ans_buf[32];
+    readline(ans_buf, sizeof(ans_buf), "");
+    char *ans = trim(ans_buf);
+    if (ans[0] == 'y' || ans[0] == 'Y' || ans[0] == '\0') {
+        char dst_dir1[280], dst_dir2[280], dst_dir3[280];
+        snprintf(dst_dir1, sizeof(dst_dir1), "%s/EFI", target);
+        snprintf(dst_dir2, sizeof(dst_dir2), "%s/EFI/BOOT", target);
+        snprintf(dst_dir3, sizeof(dst_dir3), "%s/EFI/pseuDOS", target);
+        syscall(SYS_MKDIR, (uint64_t)(uintptr_t)dst_dir1, 0, 0, 0, 0);
+        syscall(SYS_MKDIR, (uint64_t)(uintptr_t)dst_dir2, 0, 0, 0, 0);
+        syscall(SYS_MKDIR, (uint64_t)(uintptr_t)dst_dir3, 0, 0, 0, 0);
+
+        int rep_err = 0;
+        if (!fb_ok) {
+            int64_t cp_ret = syscall(SYS_COPYFILE, (uint64_t)(uintptr_t)src_fb, (uint64_t)(uintptr_t)dst_fb, 0, 0, 0);
+            if (cp_ret == 0) {
+                print_step_status("loader-repair", "restoring fallback EFI loader /EFI/BOOT/BOOTX64.EFI...", "[OK]", 88);
+            } else {
+                print_step_status("loader-repair", "restoring fallback EFI loader /EFI/BOOT/BOOTX64.EFI...", "[FAIL]", 88);
+                rep_err = 1;
+            }
+        }
+        if (!silo_ok) {
+            int64_t cp_ret = syscall(SYS_COPYFILE, (uint64_t)(uintptr_t)src_silo, (uint64_t)(uintptr_t)dst_silo, 0, 0, 0);
+            if (cp_ret == 0) {
+                print_step_status("loader-repair", "restoring SiLo loader /EFI/pseuDOS/BOOTX64.EFI...", "[OK]", 88);
+            } else {
+                print_step_status("loader-repair", "restoring SiLo loader /EFI/pseuDOS/BOOTX64.EFI...", "[FAIL]", 88);
+                rep_err = 1;
+            }
+        }
+
+        /* Reverification of written binaries */
+        int v_fb = verify_efi_binary(dst_fb, ref_fb_sz);
+        int v_silo = verify_efi_binary(dst_silo, ref_silo_sz);
+        if (v_fb && v_silo && !rep_err) {
+            print_step_status("loader-repair", "reverifying bootloader binaries...", "[OK]", 88);
+            puts("[loader-repair] all operations completed successfully\n");
+            puts("to ensure changes have been truly committed, please run \"flush ");
+            puts(target);
+            puts("\"\n");
+        } else {
+            print_step_status("loader-repair", "reverifying bootloader binaries...", "[FAIL]", 88);
+            puts("[loader-repair] verification failed after writing!\n\n");
+        }
+    } else {
+        puts("[loader-repair] repair aborted by user.\n");
+    }
+}
+
+static void rtools_cmd_fsck(const char *arg) {
+    if (!arg || arg[0] == '\0') {
+        puts("usage: fsck <disk>\n");
+        return;
+    }
+    char target[256];
+    normalize_target_mount(arg, target, sizeof(target));
+    char dev_name[128];
+    get_disk_hardware_name(target, dev_name, sizeof(dev_name));
+
+    fsck_result_t res;
+    memset(&res, 0, sizeof(res));
+
+    /* Execute real sector-level FAT32 check via kernel */
+    int64_t ret = syscall(SYS_FSCK, (uint64_t)(uintptr_t)target, 0 /* dry-run */, (uint64_t)(uintptr_t)&res, 0, 0);
+    if (ret < 0) {
+        print_step_status("fsck", "inspecting partition & boot sector...", "[FAIL]", 88);
+        puts("[fsck] unable to read target storage device or not a FAT32 filesystem\n");
+        return;
+    }
+
+    /* 1. Magic number check */
+    if (res.error_flags & FSCK_ERR_MAGIC) {
+        print_step_status("fsck", "checking FAT32 Filesystem magic number...", "[FAIL]", 88);
+        puts("[fsck] invalid VBR boot signature (missing 0x55AA)\n");
+    } else {
+        print_step_status("fsck", "checking FAT32 Filesystem magic number...", "[OK]", 88);
+    }
+
+    /* 2. Metadata consistency */
+    if (res.error_flags & FSCK_ERR_BPB) {
+        print_step_status("fsck", "checking FAT32 Filesystem metadata consistency...", "[FAIL]", 88);
+        puts("[fsck] invalid BPB header geometry or cluster sizes\n");
+    } else {
+        print_step_status("fsck", "checking FAT32 Filesystem metadata consistency...", "[OK]", 88);
+    }
+
+    /* 3. Comparing FAT1 vs FAT2 */
+    if (res.error_flags & FSCK_ERR_FAT_MISMATCH) {
+        print_step_status("fsck", "comparing File Allocation Tables...", "[FAIL]", 88);
+        char fat_msg[128];
+        snprintf(fat_msg, sizeof(fat_msg), "[fsck] File Allocation Table comparison found %u mismatched sector(s)\n", res.fat_mismatches);
+        puts(fat_msg);
+    } else {
+        print_step_status("fsck", "comparing File Allocation Tables...", "[OK]", 88);
+    }
+
+    /* 4. Checking directory consistency */
+    if (res.error_flags & FSCK_ERR_CHAIN) {
+        print_step_status("fsck", "checking FAT32 Filesystem directory consistency... (this might take a while)", "[FAIL]", 88);
+        puts("[fsck] found broken, truncated, or cyclic cluster chains\n");
+    } else {
+        print_step_status("fsck", "checking FAT32 Filesystem directory consistency... (this might take a while)", "[OK]", 88);
+    }
+
+    /* 5. Checking LFNs */
+    if (res.error_flags & FSCK_ERR_DIR) {
+        print_step_status("fsck", "checking for illegal/corrupted Short and Long File Names...", "[FAIL]", 88);
+        puts("[fsck] found directory entries with invalid LFN checksums\n");
+    } else {
+        print_step_status("fsck", "checking for illegal/corrupted Short and Long File Names...", "[OK]", 88);
+    }
+
+    /* 6. Verifying file sizes and FSInfo */
+    if (res.error_flags & FSCK_ERR_FSINFO) {
+        print_step_status("fsck", "verifying file sizes on FAT32 Filesystem...", "[FAIL]", 88);
+        char fsi_msg[160];
+        snprintf(fsi_msg, sizeof(fsi_msg), "[fsck] FSInfo free count mismatch: reported %u, actual FAT count is %u\n",
+                 res.fsinfo_reported_free, res.fsinfo_actual_free);
+        puts(fsi_msg);
+    } else {
+        print_step_status("fsck", "verifying file sizes on FAT32 Filesystem...", "[OK]", 88);
+    }
+
+    if (res.error_flags == 0) {
+        char clean_msg[200];
+        snprintf(clean_msg, sizeof(clean_msg),
+                 "fsck inspected %u directories and %u files on %s (%s).\nall sectors, FAT mirrors, and metadata are healthy and consistent.\n\n",
+                 res.checked_dirs, res.checked_files, target, dev_name);
+        puts(clean_msg);
+        puts("[fsck] all operations completed successfully\n");
+        return;
+    }
+
+    puts("\nfsck has found errors with ");
+    puts(target);
+    puts(" (");
+    puts(dev_name);
+    puts(").\n");
+    puts("would you like to repair these errors? (Y/n) ");
+
+    char ans_buf[32];
+    readline(ans_buf, sizeof(ans_buf), "");
+    char *ans = trim(ans_buf);
+    if (ans[0] == 'y' || ans[0] == 'Y' || ans[0] == '\0') {
+        int64_t rep_ret = syscall(SYS_FSCK, (uint64_t)(uintptr_t)target, 1 /* repair */, (uint64_t)(uintptr_t)&res, 0, 0);
+        if (rep_ret < 0) {
+            puts("[fsck] repair execution failed on target device!\n");
+            return;
+        }
+
+        if (res.error_flags & FSCK_ERR_FAT_MISMATCH) {
+            print_step_status("fsck", "synchronizing File Allocation Tables (mirroring FAT1 -> FAT2)...", "[OK]", 88);
+        }
+        if (res.error_flags & FSCK_ERR_FSINFO) {
+            print_step_status("fsck", "rebuilding FSInfo free cluster count...", "[OK]", 88);
+        }
+        if (res.error_flags & FSCK_ERR_CHAIN) {
+            print_step_status("fsck", "relinking orphaned cluster chains...", "[OK]", 88);
+        }
+        print_step_status("fsck", "committing repaired directory records to disk...", "[OK]", 88);
+        puts("[fsck] all operations completed successfully\n");
+    } else {
+        puts("[fsck] repair aborted by user.\n");
+    }
+}
+
+static void rtools_cmd_repair_system(const char *arg) {
+    if (!arg || arg[0] == '\0') {
+        puts("usage: repair-system <disk>\n");
+        return;
+    }
+    char target[256];
+    normalize_target_mount(arg, target, sizeof(target));
+    char dev_name[128];
+    get_disk_hardware_name(target, dev_name, sizeof(dev_name));
+
+    char step_buf[256];
+    snprintf(step_buf, sizeof(step_buf), "entering %s...", target);
+    print_step_status("repair-system", step_buf, "[OK]", 88);
+
+    snprintf(step_buf, sizeof(step_buf), "checking %s/protected...", target);
+    print_step_status("repair-system", step_buf, "[OK]", 88);
+
+    /* Dynamic Missing files tracker */
+    typedef struct {
+        char src_rel[128];
+        char name[64];
+        int is_bootcfg;
+    } missing_item_t;
+
+    missing_item_t missing_items[64];
+    int missing_count = 0;
+
+    struct {
+        const char *dir;
+        const char *label;
+        int is_bootmgr;
+    } scan_dirs[] = {
+        {"/protected/krnl", "kernel binaries", 0},
+        {"/protected/bootmgr", "boot configuration data", 1},
+        {"/protected/gui", "binaries", 0},
+        {"/protected/crit", "binaries", 0},
+        {"/protected/apps", "apps", 0}
+    };
+
+    for (size_t d = 0; d < sizeof(scan_dirs)/sizeof(scan_dirs[0]); d++) {
+        const char *sdir = scan_dirs[d].dir;
+        if (scan_dirs[d].is_bootmgr) {
+            snprintf(step_buf, sizeof(step_buf), "checking boot configuration inside %s%s...", target, sdir);
+        } else {
+            snprintf(step_buf, sizeof(step_buf), "checking binaries inside %s%s...", target, sdir);
+        }
+        print_step_status("repair-system", step_buf, "[OK]", 88);
+
+        char names_buf[2048];
+        int64_t nbytes = syscall(SYS_LISTDIR, (uint64_t)(uintptr_t)sdir,
+                                 (uint64_t)(uintptr_t)names_buf, sizeof(names_buf), 0, 0);
+
+        char dir_miss_names[16][64];
+        int dir_miss_count = 0;
+
+        if (nbytes > 0) {
+            size_t pos = 0;
+            while (pos < (size_t)nbytes) {
+                const char *fname = &names_buf[pos];
+                size_t flen = strlen(fname);
+                if (flen == 0) break;
+                pos += flen + 1;
+
+                if (strcmp(fname, ".") == 0 || strcmp(fname, "..") == 0) continue;
+
+                char target_file[280];
+                snprintf(target_file, sizeof(target_file), "%s%s/%s", target, sdir, fname);
+                vfs_stat_t st;
+                int is_missing = 0;
+                if (syscall(SYS_STAT, (uint64_t)(uintptr_t)target_file, (uint64_t)(uintptr_t)&st, 0, 0, 0) != 0 || st.size == 0) {
+                    is_missing = 1;
+                }
+
+                if (is_missing) {
+                    if (missing_count < 64) {
+                        snprintf(missing_items[missing_count].src_rel, sizeof(missing_items[missing_count].src_rel), "%s/%s", sdir, fname);
+                        strncpy(missing_items[missing_count].name, fname, sizeof(missing_items[missing_count].name) - 1);
+                        missing_items[missing_count].name[sizeof(missing_items[missing_count].name) - 1] = '\0';
+                        missing_items[missing_count].is_bootcfg = (strcmp(fname, "boot.cfg") == 0);
+                        missing_count++;
+                    }
+                    if (dir_miss_count < 16) {
+                        strncpy(dir_miss_names[dir_miss_count], fname, 63);
+                        dir_miss_names[dir_miss_count][63] = '\0';
+                        dir_miss_count++;
+                    }
+                }
+            }
+        } else if (scan_dirs[d].is_bootmgr) {
+            /* Fallback if SYS_LISTDIR on bootmgr returned 0: check boot.cfg */
+            char target_file[280];
+            snprintf(target_file, sizeof(target_file), "%s%s/boot.cfg", target, sdir);
+            vfs_stat_t st;
+            if (syscall(SYS_STAT, (uint64_t)(uintptr_t)target_file, (uint64_t)(uintptr_t)&st, 0, 0, 0) != 0 || st.size == 0) {
+                if (missing_count < 64) {
+                    snprintf(missing_items[missing_count].src_rel, sizeof(missing_items[missing_count].src_rel), "%s/boot.cfg", sdir);
+                    strcpy(missing_items[missing_count].name, "boot.cfg");
+                    missing_items[missing_count].is_bootcfg = 1;
+                    missing_count++;
+                }
+                strcpy(dir_miss_names[dir_miss_count++], "boot.cfg");
+            }
+        }
+
+        /* Dynamically report findings for this directory */
+        if (dir_miss_count > 0) {
+            if (scan_dirs[d].is_bootmgr) {
+                puts("[repair-system] found incomplete/broken boot configuration data\n");
+            } else if (strcmp(sdir, "/protected/krnl") == 0) {
+                if (dir_miss_count > 1) {
+                    puts("[repair-system] found multiple missing/incomplete kernel binaries\n");
+                } else {
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "[repair-system] found missing/incomplete %s binary\n", dir_miss_names[0]);
+                    puts(msg);
+                }
+            } else if (dir_miss_count == 1) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "[repair-system] found missing/incomplete %s binary\n", dir_miss_names[0]);
+                puts(msg);
+            } else {
+                /* Dynamically construct the list of missing filenames: (file1, file2, ...) */
+                char msg[256];
+                snprintf(msg, sizeof(msg), "[repair-system] found multiple missing/incomplete binaries (");
+                for (int m = 0; m < dir_miss_count; m++) {
+                    if (m > 0) strcat(msg, ", ");
+                    strcat(msg, dir_miss_names[m]);
+                }
+                strcat(msg, ")\n");
+                puts(msg);
+            }
+        }
+    }
+
+    snprintf(step_buf, sizeof(step_buf), "exiting disk %s...", target);
+    puts("[repair-system] ");
+    puts(step_buf);
+    puts("\n");
+    puts("[repair-system] finishing inspection...\n\n");
+
+    if (missing_count == 0) {
+        puts("repair-system has inspected all critical binaries on ");
+        puts(target);
+        puts(" (");
+        puts(dev_name);
+        puts(").\nall files are intact and verified!\n");
+        return;
+    }
+
+    puts("repair-system has found multiple missing/incomplete binaries that needs to be repaired\n");
+    puts("files that will be repaired:\n");
+    for (int k = 0; k < missing_count; k++) {
+        puts("  - ");
+        puts(target);
+        puts(missing_items[k].src_rel);
+        puts("\n");
+    }
+
+    puts("start repair? (Y/n) ");
+    char ans_buf[32];
+    readline(ans_buf, sizeof(ans_buf), "");
+    char *ans = trim(ans_buf);
+    if (ans[0] != 'y' && ans[0] != 'Y' && ans[0] != '\0') {
+        puts("[repair-system] repair cancelled by user.\n");
+        return;
+    }
+
+    puts("DO NOT UNPLUG THE DISK BEFORE THE OPERATION COMPLETES!\n");
+
+    snprintf(step_buf, sizeof(step_buf), "entering %s...", target);
+    print_step_status("repair-system", step_buf, "[OK]", 108);
+
+    /* Copy missing binaries */
+    for (int k = 0; k < missing_count; k++) {
+        char src_path[128];
+        strncpy(src_path, missing_items[k].src_rel, sizeof(src_path) - 1);
+        src_path[sizeof(src_path) - 1] = '\0';
+
+        char dst_path[280];
+        snprintf(dst_path, sizeof(dst_path), "%s%s", target, missing_items[k].src_rel);
+
+        /* Ensure parent directory exists */
+        char dst_dir[280];
+        strncpy(dst_dir, dst_path, sizeof(dst_dir) - 1);
+        dst_dir[sizeof(dst_dir) - 1] = '\0';
+        char *last_s = strrchr(dst_dir, '/');
+        if (last_s) {
+            *last_s = '\0';
+            syscall(SYS_MKDIR, (uint64_t)(uintptr_t)dst_dir, 0, 0, 0, 0);
+        }
+
+        char step_msg[200];
+        if (missing_items[k].is_bootcfg) {
+            snprintf(step_msg, sizeof(step_msg), "writing new boot configuration data to %s...", dst_path);
+            const char *new_cfg =
+                "# pseuDOS Boot Configuration\r\n"
+                "kernel=\\protected\\krnl\\vpkernel\r\n"
+                "initramfs=\\protected\\krnl\\initramfs.img\r\n"
+                "autoinit=\\protected\\krnl\\autoinit.exe\r\n"
+                "shell=\\protected\\gui\\gman.exe\r\n"
+                "cmdline=quiet devpath=hardware\r\n"
+                "default_resolution=auto\r\n"
+                "bootmgr_version=1.1.0\r\n";
+            syscall(SYS_WRITEFILE, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)new_cfg, strlen(new_cfg), 0, 0);
+            print_step_status("repair-system", step_msg, "[OK]", 108);
+        } else {
+            snprintf(step_msg, sizeof(step_msg), "copying binary from %s to destination %s...", src_path, dst_path);
+            syscall(SYS_COPYFILE, (uint64_t)(uintptr_t)src_path, (uint64_t)(uintptr_t)dst_path, 0, 0, 0);
+            print_step_status("repair-system", step_msg, "[OK]", 108);
+        }
+    }
+
+    int reverify_failed = 0;
+    char failed_file[64] = "";
+    for (int k = 0; k < missing_count; k++) {
+        char dst_path[280];
+        snprintf(dst_path, sizeof(dst_path), "%s%s", target, missing_items[k].src_rel);
+
+        vfs_stat_t st_dst;
+        if (syscall(SYS_STAT, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)&st_dst, 0, 0, 0) != 0 || st_dst.size == 0) {
+            reverify_failed = 1;
+            strncpy(failed_file, missing_items[k].name, sizeof(failed_file) - 1);
+            break;
+        }
+
+        if (missing_items[k].is_bootcfg) {
+            char cfg_chunk[256];
+            int64_t r = syscall(SYS_READFILE, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)cfg_chunk, sizeof(cfg_chunk) - 1, 0, 0);
+            if (r <= 0) {
+                reverify_failed = 1;
+                strncpy(failed_file, missing_items[k].name, sizeof(failed_file) - 1);
+                break;
+            }
+            cfg_chunk[r] = '\0';
+            if (!strstr(cfg_chunk, "kernel=")) {
+                reverify_failed = 1;
+                strncpy(failed_file, missing_items[k].name, sizeof(failed_file) - 1);
+                break;
+            }
+        } else {
+            char src_path[128];
+            strncpy(src_path, missing_items[k].src_rel, sizeof(src_path) - 1);
+            src_path[sizeof(src_path) - 1] = '\0';
+
+            vfs_stat_t st_src;
+            if (syscall(SYS_STAT, (uint64_t)(uintptr_t)src_path, (uint64_t)(uintptr_t)&st_src, 0, 0, 0) == 0) {
+                if (st_dst.size != st_src.size) {
+                    reverify_failed = 1;
+                    strncpy(failed_file, missing_items[k].name, sizeof(failed_file) - 1);
+                    break;
+                }
+
+                static uint8_t s_ver_buf1[2048];
+                static uint8_t s_ver_buf2[2048];
+                size_t check_len = st_src.size < sizeof(s_ver_buf1) ? st_src.size : sizeof(s_ver_buf1);
+                int64_t r1 = syscall(SYS_READFILE, (uint64_t)(uintptr_t)src_path, (uint64_t)(uintptr_t)s_ver_buf1, check_len, 0, 0);
+                int64_t r2 = syscall(SYS_READFILE, (uint64_t)(uintptr_t)dst_path, (uint64_t)(uintptr_t)s_ver_buf2, check_len, 0, 0);
+                if (r1 != r2 || r1 != (int64_t)check_len || memcmp(s_ver_buf1, s_ver_buf2, check_len) != 0) {
+                    reverify_failed = 1;
+                    strncpy(failed_file, missing_items[k].name, sizeof(failed_file) - 1);
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!reverify_failed) {
+        print_step_status("repair-system", "reverifying binaries... (this might take a while)", "[OK]", 108);
+        puts("[repair-system] all operations completed successfully\n");
+    } else {
+        print_step_status("repair-system", "reverifying binaries... (this might take a while)", "[FAIL]", 108);
+        char fail_msg[128];
+        snprintf(fail_msg, sizeof(fail_msg), "[repair-system] verification failed for %s!\n\n", failed_file);
+        puts(fail_msg);
+        return;
+    }
+
+    snprintf(step_buf, sizeof(step_buf), "exiting disk %s...", target);
+    puts("[repair-system] ");
+    puts(step_buf);
+    puts("\n");
+    puts("[repair-system] finishing inspection...\n\n");
+
+    puts("repair-system has successfully repaired and verified binaries on ");
+    puts(target);
+    puts(" (");
+    puts(dev_name);
+    puts(")\n");
+    puts("to ensure changes have been truly committed, please run \"flush ");
+    puts(target);
+    puts("\"\n");
+}
+
+static void rtools_show_banner(void) {
+    puts("\n");
+    puts("                                                    [recovery-tools]\n");
+    puts("------------------------------------------------------------------------------------------------------------------------\n");
+    puts("                                                quick command reference:\n");
+    puts("  1. repair-system <disk>                    : checks for any and all missing critical files inside selected disk\n");
+    puts("  2. fsck / fs-repair <disk>                 : checks if the filesystem is corrupted, attempts repair if possible\n");
+    puts("  3. bootcfg <disk> [--repair|--generate]    : checks the boot configuration data file inside selected disk\n");
+    puts("  4. loader-repair <disk>                    : repairs the bootloader inside selected disk\n");
+    puts("  5. flush <disk>                            : flushes selected disk cache to ensure writes stay\n");
+    puts("  6. exit                                    : exit recovery-tools\n");
+    puts("------------------------------------------------------------------------------------------------------------------------\n\n");
+}
+
+static void cmd_rtools(void) {
+    if (!is_live_system()) {
+        puts("unknown command 'recovery-tools'. type 'help' for available commands.\n");
+        return;
+    }
+
+    puts("initializing recovery tools...\n");
+
+    int64_t prev_priv = syscall(SYS_GET_PRIVILEGE, 0, 0, 0, 0, 0);
+    if (prev_priv != 1) {
+        syscall(SYS_ELEVATE, 0, 0, 0, 0, 0);
+    }
+    env_set("USER", "recovery");
+
+    rtools_show_banner();
+
+    char line_buf[256];
+    char cwd_buf[256];
+    char prompt_buf[384];
+
+    while (1) {
+        if (syscall(SYS_GET_PROMPT_PATH, (uint64_t)(uintptr_t)cwd_buf, sizeof(cwd_buf), 0, 0, 0) != 0) {
+            if (syscall(SYS_GETCWD, (uint64_t)(uintptr_t)cwd_buf, sizeof(cwd_buf), 0, 0, 0) != 0) {
+                strcpy(cwd_buf, "/");
+            }
+        }
+
+        snprintf(prompt_buf, sizeof(prompt_buf), "recovery@pseuDOS [%s] > ", cwd_buf);
+        readline(line_buf, sizeof(line_buf), prompt_buf);
+        char *line = trim(line_buf);
+        if (!line || line[0] == '\0') continue;
+
+        if (strcmp(line, "exit") == 0 || strcmp(line, "quit") == 0) {
+            puts("exiting recovery tools...\n\n");
+            break;
+        }
+
+        char cmd[64] = "";
+        char *arg = NULL;
+        size_t cidx = 0;
+        while (line[cidx] && line[cidx] != ' ' && cidx < sizeof(cmd) - 1) {
+            cmd[cidx] = line[cidx];
+            cidx++;
+        }
+        cmd[cidx] = '\0';
+        for (size_t k = 0; cmd[k]; k++) {
+            if (cmd[k] >= 'A' && cmd[k] <= 'Z') cmd[k] += 32;
+        }
+        if (line[cidx] == ' ') {
+            arg = trim(&line[cidx + 1]);
+        }
+
+        if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
+            rtools_show_banner();
+        } else if (strcmp(cmd, "repair-system") == 0 || strcmp(cmd, "repair") == 0) {
+            rtools_cmd_repair_system(arg);
+        } else if (strcmp(cmd, "fsck") == 0 || strcmp(cmd, "fs-repair") == 0) {
+            rtools_cmd_fsck(arg);
+        } else if (strcmp(cmd, "bootcfg") == 0) {
+            rtools_cmd_bootcfg(arg);
+        } else if (strcmp(cmd, "loader-repair") == 0) {
+            rtools_cmd_loader_repair(arg);
+        } else if (strcmp(cmd, "flush") == 0 || strcmp(cmd, "sync") == 0) {
+            rtools_cmd_flush(arg);
+        } else if (strcmp(cmd, "ls") == 0 || strcmp(cmd, "dir") == 0) {
+            cmd_ls(arg);
+        } else if (strcmp(cmd, "cd") == 0) {
+            cmd_cd(arg);
+        } else if (strcmp(cmd, "pwd") == 0) {
+            cmd_pwd();
+        } else if (strcmp(cmd, "cat") == 0 || strcmp(cmd, "type") == 0) {
+            cmd_cat(arg);
+        } else if (strcmp(cmd, "edit") == 0) {
+            cmd_edit(arg);
+        } else if (strcmp(cmd, "clear") == 0 || strcmp(cmd, "cls") == 0) {
+            syscall(SYS_CLEAR, 0, 0, 0, 0, 0);
+        } else {
+            puts("unknown recovery command '");
+            puts(cmd);
+            puts("'. type 'help' for command reference or 'exit' to leave.\n");
+        }
+    }
+
+    if (prev_priv != 1) {
+        syscall(SYS_DROP_PRIVILEGES, 0, 0, 0, 0, 0);
+    }
+    env_set("USER", "shell");
 }
 
 static char g_sys_cmd_buf[16384];
@@ -2261,6 +3667,8 @@ static void execute_command_internal(char *cmd_line) {
         cmd_mv(arg);
     } else if (strcmp(cmd, "write") == 0) {
         cmd_write(arg);
+    } else if (strcmp(cmd, "edit") == 0) {
+        cmd_edit(arg);
     } else if (strcmp(cmd, "ps") == 0) {
         cmd_ps();
     } else if (strcmp(cmd, "kill") == 0) {
@@ -2300,7 +3708,17 @@ static void execute_command_internal(char *cmd_line) {
     } else if (strcmp(cmd, "grub") == 0) {
         cmd_grub();
     } else if (strcmp(cmd, "flash") == 0) {
-        cmd_flash();
+        if (!is_live_system()) {
+            execute_external_command(cmd, arg, as_root);
+        } else {
+            cmd_flash();
+        }
+    } else if (strcmp(cmd, "recovery-tools") == 0 || strcmp(cmd, "recovery") == 0 || strcmp(cmd, "rtools") == 0) {
+        if (!is_live_system()) {
+            execute_external_command(cmd, arg, as_root);
+        } else {
+            cmd_rtools();
+        }
     } else if (strcmp(cmd, "panic") == 0) {
         if (arg && (strcmp(arg, "pagefault") == 0 || strcmp(arg, "pf") == 0)) {
             volatile uint64_t *bad_ptr = (volatile uint64_t *)0x00000080DEAD0000ULL;

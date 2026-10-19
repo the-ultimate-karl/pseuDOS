@@ -320,7 +320,7 @@ void cmd_fs(const char *arg) {
 
         console_printf("  live directory cnt: %u directories\n", total_dirs);
         console_printf("  live file count   : %u files\n", total_files);
-        console_printf("  stored file data  : %lu B (%lu KB)\n", total_bytes, total_bytes / 1024);
+        console_printf("  stored file data  : %llu B (%llu KB)\n", (unsigned long long)total_bytes, (unsigned long long)(total_bytes / 1024));
         console_printf("  storage pool size : %lu MB (dynamic kernel heap)\n", heap_get_total() / (1024 * 1024));
         console_printf("  allocated storage : %lu KB / %lu MB\n", heap_get_used() / 1024, heap_get_total() / (1024 * 1024));
         console_puts("  filesystem status : active (read/write)\n\n");
@@ -1044,8 +1044,8 @@ void shell_run(const BootInfo *boot_info) {
     char prompt_buf[512];
     char prompt_path[256];
 
-    console_puts("pseuDOS kernel v0.7.2-gui (x86_64 uefi / bare-metal)\n");
-    console_puts("what's new (kernel version 0.7.2-gui):\n");
+    console_puts("pseuDOS kernel v0.7.3-gui (x86_64 uefi / bare-metal)\n");
+    console_puts("what's new (kernel version 0.7.3-gui):\n");
     console_puts("- fast text-buffer console scrolling & 64-bit memory copy routines (memcpy/memmove/memset)\n");
     console_puts("- dynamic PE32+ base relocation engine in bootloader (.reloc DIR64 / HIGHLOW)\n");
     console_puts("- full 256-vector assembly ISR dispatch table with CPU exception stack normalization\n");

@@ -786,6 +786,54 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, ui
             return (res == 0) ? 0 : -EIO;
         }
 
+        case SYS_SYNC: {
+            const char *target = (const char *)a1;
+            if (target && !validate_user_str(target, 128, curr->privilege_level)) return -EFAULT;
+            if (target && target[0] != '\0') {
+                const char *s = target;
+                if (strncmp(s, "/mounts/", 8) == 0) s += 8;
+                int drive_idx = -1;
+                StorageDevice *dev = vfs_resolve_device(s, &drive_idx, NULL, NULL);
+                if (dev && dev->flush) {
+                    dev->flush(dev);
+                    return 0;
+                } else if (dev) {
+                    return 0;
+                }
+            }
+            storage_flush_all();
+            return 0;
+        }
+
+        case SYS_FSCK: {
+            const char *target = (const char *)a1;
+            int repair = (int)a2;
+            fsck_result_t *user_res = (fsck_result_t *)a3;
+            if (target && !validate_user_str(target, 128, curr->privilege_level)) return -EFAULT;
+            if (user_res && !validate_user_buffer(user_res, sizeof(fsck_result_t), curr->privilege_level)) return -EFAULT;
+
+            int drive_idx = -1;
+            StorageDevice *dev = NULL;
+            if (target && target[0] != '\0') {
+                const char *s = target;
+                if (strncmp(s, "/mounts/", 8) == 0) s += 8;
+                dev = vfs_resolve_device(s, &drive_idx, NULL, NULL);
+            }
+            if (!dev) {
+                dev = storage_get_boot_device(NULL, &drive_idx);
+            }
+            if (!dev) return -ENODEV;
+
+            extern int fat32_fsck_device(StorageDevice *dev, int repair, fsck_result_t *out_res);
+            fsck_result_t k_res;
+            memset(&k_res, 0, sizeof(k_res));
+            int ret = fat32_fsck_device(dev, repair, &k_res);
+            if (user_res) {
+                memcpy(user_res, &k_res, sizeof(fsck_result_t));
+            }
+            return (int64_t)ret;
+        }
+
         case SYS_PANIC: {
             const char *reason = (const char *)a1;
             int is_init_panic = (reason && validate_user_str(reason, 256, curr->privilege_level) &&

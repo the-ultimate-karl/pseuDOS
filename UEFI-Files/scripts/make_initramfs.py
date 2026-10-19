@@ -54,6 +54,7 @@ if __name__ == "__main__":
         # System Core & Init
         ("/EFI/BOOT/BOOTX64.EFI", os.path.join(bin_dir, "BOOTX64.EFI")),
         ("/EFI/BOOT/recovery.efi", os.path.join(bin_dir, "recovery.efi")),
+        ("/EFI/pseuDOS/BOOTX64.EFI", os.path.join(bin_dir, "BOOTX64.EFI")),
         ("/EFI/pseuDOS/recovery.efi", os.path.join(bin_dir, "recovery.efi")),
         ("/protected/krnl/autoinit.exe", os.path.join(bin_dir, "autoinit.exe")),
         ("/protected/crit/bshss.exe", os.path.join(bin_dir, "bshss.exe")),
